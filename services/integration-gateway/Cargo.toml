@@ -13,3 +13,4 @@ tracing-subscriber = { version = "0.3", features = ["fmt","env-filter"] }
 anyhow = "1"
 thiserror = "1"
 hyper = "1"
+rdkafka = { version = "0.29", features = ["tokio"] }
