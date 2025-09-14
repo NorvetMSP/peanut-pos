@@ -1,0 +1,46 @@
+/* Scoped Bootstrap-lite styles, adapted from your snippet */
+.ecomtemplate{ background:#ddd; min-height:100vh; display:flex; font-family:sans-serif; font-size:.8rem; font-weight:bold; }
+.ecomtemplate .wrap{ width:100%; padding:4vh 2vh; }
+.ecomtemplate .title{ margin-bottom:5vh; }
+.ecomtemplate .card{ margin:auto; max-width:950px; width:90%; box-shadow:0 6px 20px rgba(0,0,0,.19); border-radius:1rem; border:transparent; background:#fff; }
+.ecomtemplate .grid{ display:flex; flex-wrap:wrap; margin:0; }
+.ecomtemplate .col-md-8{ flex:0 0 66.6667%; max-width:66.6667%; }
+.ecomtemplate .col-md-4{ flex:0 0 33.3333%; max-width:33.3333%; }
+@media(max-width:767px){ .ecomtemplate .card{ margin:3vh auto; } .ecomtemplate .col-md-8,.ecomtemplate .col-md-4{ flex:0 0 100%; max-width:100%; } }
+
+.ecomtemplate .cart{ background:#fff; padding:4vh 5vh; border-bottom-left-radius:1rem; border-top-left-radius:1rem; }
+@media(max-width:767px){ .ecomtemplate .cart{ padding:4vh; border-bottom-left-radius:unset; border-top-right-radius:1rem; } }
+
+.ecomtemplate .summary{ background:#ddd; border-top-right-radius:1rem; border-bottom-right-radius:1rem; padding:4vh; color:#414141; }
+@media(max-width:767px){ .ecomtemplate .summary{ border-top-right-radius:unset; border-bottom-left-radius:1rem; } }
+.ecomtemplate .summary .col-2,.ecomtemplate .summary .col-10{ padding:0; }
+
+.ecomtemplate .title b{ font-size:1.5rem; }
+.ecomtemplate .main{ margin:0; padding:2vh 0; width:100%; display:flex; align-items:center; gap:1vh; }
+.ecomtemplate .col-2,.ecomtemplate .col{ padding:0 1vh; }
+.ecomtemplate .col-2{ flex:0 0 64px; max-width:64px; }
+.ecomtemplate .col{ flex:1 1 0; min-width:0; }
+.ecomtemplate .text-right{ text-align:right; }
+.ecomtemplate .text-muted{ color:#6c757d; font-weight:normal; }
+.ecomtemplate .border-top{ border-top:1px solid rgba(0,0,0,.1); }
+.ecomtemplate .border-bottom{ border-bottom:1px solid rgba(0,0,0,.1); }
+.ecomtemplate .align-self-center{ align-self:center; }
+.ecomtemplate .img-fluid{ max-width:100%; height:auto; display:block; }
+.ecomtemplate .close{ margin-left:auto; font-size:.7rem; cursor:pointer; }
+.ecomtemplate img{ width:3.5rem; }
+.ecomtemplate .back-to-shop{ margin-top:4.5rem; display:flex; align-items:center; gap:.5rem; }
+.ecomtemplate h5{ margin-top:4vh; }
+.ecomtemplate hr{ margin-top:1.25rem; border:none; border-top:1px solid rgba(0,0,0,.1); }
+.ecomtemplate form{ padding:2vh 0; }
+.ecomtemplate select,.ecomtemplate input{ border:1px solid rgba(0,0,0,.137); padding:1.5vh 1vh; margin-bottom:4vh; outline:none; width:100%; background:#f7f7f7; font-weight:normal; }
+.ecomtemplate input{ padding:1vh; }
+.ecomtemplate input:focus::-webkit-input-placeholder{ color:transparent; }
+.ecomtemplate .btn{ background:#000; border-color:#000; color:#fff; width:100%; font-size:.7rem; margin-top:4vh; padding:1vh; border-radius:0; cursor:pointer; }
+.ecomtemplate .btn:focus{ box-shadow:none; outline:none; color:#fff; transition:none; }
+.ecomtemplate .btn:hover{ color:#fff; opacity:.95; }
+.ecomtemplate a{ color:#000; text-decoration:none; }
+.ecomtemplate a:hover{ color:#000; text-decoration:none; }
+.ecomtemplate .qty a,.ecomtemplate .qty button.linklike{ padding:0 1vh; background:none; border:none; color:#000; cursor:pointer; font:inherit; }
+.ecomtemplate .qty .border{ border:1px solid rgba(0,0,0,.2); padding:.1rem .5rem; border-radius:.25rem; display:inline-block; min-width:2rem; text-align:center; }
+.ecomtemplate #code{ background-image:linear-gradient(to left,rgba(255,255,255,.253),rgba(255,255,255,.185)), url("https://img.icons8.com/small/16/000000/long-arrow-right.png"); background-repeat:no-repeat; background-position:95% center; }
+.ecomtemplate .rowline{ padding:2vh 0; }
