@@ -1,0 +1,37 @@
+You’re in the repo root, but the Cargo workspace is under services/. Use one of these:
+
+Option A: Use the workspace manifest path from root
+
+
+
+cargo run --manifest-path services/Cargo.toml -p product-service
+cargo run --manifest-path services/Cargo.toml -p analytics-service
+cargo run --manifest-path services/Cargo.toml -p integration-gateway
+cargo run --manifest-path services/Cargo.toml -p order-service
+cargo run --manifest-path services/Cargo.toml -p auth-service
+cargo run --manifest-path services/Cargo.toml -p payment-service
+
+
+See the services (health endpoints)
+
+product: curl http://localhost:8081/healthz
+analytics: curl http://localhost:8082/healthz
+gateway: curl http://localhost:8083/healthz
+order: curl http://localhost:8084/healthz
+auth: curl http://localhost:8085/healthz
+payment: curl http://localhost:8086/healthz
+PowerShell alt: irm http://localhost:8081/healthz
+
+
+
+Quick Start
+
+Makefile task: run .\Makefile.ps1 Dev-Frontend -App pos-app from the repo root.
+Alt (if policy blocks scripts): powershell -ExecutionPolicy Bypass -File .\Makefile.ps1 Dev-Frontend -App pos-app
+Open: http://localhost:5173
+Stop: press Ctrl+C in the terminal running the dev server.
+Manual Start
+
+Go to app: cd frontends/pos-app
+Install deps: npm install
+Run Vite: npm run dev

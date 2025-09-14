@@ -1,0 +1,11 @@
+﻿# Ignore files
+node_modules/
+dist/
+target/
+*.log
+.env
+.terraform/
+*.tfstate
+.vscode/
+.idea/
+.DS_Store

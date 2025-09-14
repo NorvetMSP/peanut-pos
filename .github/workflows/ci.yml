@@ -11,5 +11,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-      - run: cd frontends/pos-app && npm ci && npm run build
-      - run: cd frontends/admin-portal && npm ci && npm run build
+      - name: Build pos-app
+        if: ${{ hashFiles('frontends/pos-app/package.json') != '' }}
+        run: cd frontends/pos-app && npm ci && npm run build
+      - name: Build admin-portal
+        if: ${{ hashFiles('frontends/admin-portal/package.json') != '' }}
+        run: cd frontends/admin-portal && npm ci && npm run build
