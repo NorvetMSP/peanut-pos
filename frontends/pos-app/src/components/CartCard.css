@@ -1,49 +1,129 @@
-/* CartCard.css */
-.cart-card {
-  background: #f9f9f9;
-  border-radius: 0.75rem;
-  box-shadow: 0 1px 6px rgba(0,0,0,0.06);
-  padding: 0.75rem 1rem;
-  margin-bottom: 0.5rem;
+/* Plus/Minus gadget for cart quantity */
+.cart-qty-gadget {
   display: flex;
-  flex-direction: column;
-  gap: 0.25rem;
-}
-.cart-info {
-  display: flex;
-  justify-content: space-between;
   align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin: 8px 0;
 }
-.cart-name {
-  font-weight: 600;
-  color: #222;
-  font-size: 0.95rem;
-}
-.cart-qty {
-  color: #666;
-  font-size: 0.85rem;
-}
-.cart-details {
+.cart-qty-btn {
+  outline: 0;
+  border: 1px solid #19b4b9;
+  background: #f6f8fa;
+  color: #153a5b;
+  font-size: 1rem;
+  font-family: inherit;
+  font-weight: 500;
+  border-radius: 0.3rem;
+  width: 28px;
+  height: 28px;
   display: flex;
-  justify-content: space-between;
   align-items: center;
+  justify-content: center;
+  transition: all 0.2s;
+  padding: 0;
 }
-.cart-price {
-  color: #0070f3;
-  font-weight: bold;
-  font-size: 0.95rem;
+.cart-qty-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
-.cart-remove {
-  background: none;
-  border: none;
-  color: #e00;
-  font-size: 1.2rem;
+.cart-qty-btn:hover:not(:disabled) {
+  background: #19b4b9;
+  color: #fff;
   cursor: pointer;
-  font-weight: bold;
-  margin-left: 0.5rem;
-  border-radius: 0.25rem;
-  transition: background 0.2s;
 }
-.cart-remove:hover {
-  background: #ffeaea;
+/* Match ProductCardModern button style for Proceed to Checkout */
+ .cart-proceed-btn {
+  outline: 0;
+  border: 0;
+  background: none;
+  border: 1px solid #19b4b9;
+  padding: 8px 0px;
+  margin-bottom: 12px;
+  color: #153a5b;
+  text-transform: uppercase;
+  width: 125px;
+  font-family: inherit;
+  margin-right: 5px;
+  transition: all 0.3s ease;
+  font-weight: 500;
+  border-radius: 0.5rem;
+  display: block;
+  margin-left: 0;
+}
+.cart-proceed-btn:hover {
+  background: #19b4b9;
+  color: #fff;
+  cursor: pointer;
+}
+/* CartCard Modern Style */
+.cart-card-modern {
+  width: 100%;
+  background: white;
+  margin: 1rem auto;
+  box-shadow: 0 2px 5px 0 rgba(0,0,0,0.16),0 2px 10px 0 rgba(0,0,0,0.12);
+  transition: all 0.3s;
+  border-radius: 1rem;
+  font-family: 'Raleway', sans-serif;
+  overflow: hidden;
+}
+.cart-card-modern:hover {
+  box-shadow: 0 8px 17px 0 rgba(0,0,0,0.2),0 6px 20px 0 rgba(0,0,0,0.19);
+}
+.cart-description {
+  padding: 24px;
+  border-top: 2px solid #efefef;
+  text-align: center;
+}
+.cart-description h1 {
+  color: #153a5b;
+  font-weight: 700;
+  margin: 0;
+  font-size: 1.5rem;
+}
+.cart-description h2 {
+  color: #19b4b9;
+  margin: 0;
+  text-transform: uppercase;
+  font-weight: 500;
+  font-size: 1.1rem;
+}
+.cart-description h4 {
+  margin: 0;
+  color: #727272;
+  text-transform: uppercase;
+  font-weight: 500;
+  font-size: 0.9rem;
+}
+.cart-description p {
+  font-size: 0.95rem;
+  line-height: 1.5;
+  color: #727272;
+  padding: 12px 0;
+  margin: 0;
+}
+.cart-qty-modern {
+  font-weight: bold;
+  color: #153a5b;
+}
+.cart-remove-modern {
+  outline: 0;
+  border: 0;
+  background: none;
+  border: 1px solid #19b4b9;
+  padding: 8px 0px;
+  margin-bottom: 12px;
+  color: #153a5b;
+  text-transform: uppercase;
+  width: 125px;
+  font-family: inherit;
+  margin-right: 5px;
+  transition: all 0.3s ease;
+  font-weight: 500;
+  border-radius: 0.5rem;
+}
+.cart-remove-modern:hover {
+  background: #19b4b9;
+  color: #fff;
+  cursor: pointer;
 }

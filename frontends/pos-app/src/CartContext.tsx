@@ -10,6 +10,8 @@ interface CartContextValue {
   addItem: (product: Product) => void;
   removeItem: (productId: number) => void;
   clearCart: () => void;
+  incrementItemQuantity: (productId: number) => void;
+  decrementItemQuantity: (productId: number) => void;
   totalAmount: number;
 }
 const CartContext = createContext<CartContextValue | undefined>(undefined);
@@ -35,18 +37,29 @@ export const CartProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const addItem = (product: Product) => {
     setCart(prev => {
-      // Check if product already in cart
       const existing = prev.find(item => item.id === product.id);
       if (existing) {
-        // Increment quantity if exists
         return prev.map(item =>
           item.id === product.id ? { ...item, quantity: item.quantity + 1 } : item
         );
       } else {
-        // Add new item
         return [...prev, { ...product, quantity: 1 }];
       }
     });
+  };
+
+  const incrementItemQuantity = (productId: number) => {
+    setCart(prev => prev.map(item =>
+      item.id === productId ? { ...item, quantity: item.quantity + 1 } : item
+    ));
+  };
+
+  const decrementItemQuantity = (productId: number) => {
+    setCart(prev => prev.map(item =>
+      item.id === productId && item.quantity > 1
+        ? { ...item, quantity: item.quantity - 1 }
+        : item
+    ));
   };
 
   const removeItem = (productId: number) => {
@@ -61,7 +74,7 @@ export const CartProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const totalAmount = cart.reduce((sum, item) => sum + item.price * item.quantity, 0);
 
   return (
-    <CartContext.Provider value={{ cart, addItem, removeItem, clearCart, totalAmount }}>
+    <CartContext.Provider value={{ cart, addItem, removeItem, clearCart, incrementItemQuantity, decrementItemQuantity, totalAmount }}>
       {children}
     </CartContext.Provider>
   );

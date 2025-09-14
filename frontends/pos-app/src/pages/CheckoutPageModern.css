@@ -1,0 +1,120 @@
+@import url('https://fonts.googleapis.com/css?family=Raleway:400,300,500,700');
+.checkout-modern {
+  width: 100%;
+  max-width: 400px;
+  background: white;
+  margin: 2rem auto;
+  box-shadow: 0 2px 5px 0 rgba(0,0,0,0.16),0 2px 10px 0 rgba(0,0,0,0.12);
+  transition: all 0.3s;
+  border-radius: 1rem;
+  font-family: 'Raleway', sans-serif;
+  overflow: hidden;
+}
+.checkout-modern:hover {
+  box-shadow: 0 8px 17px 0 rgba(0,0,0,0.2),0 6px 20px 0 rgba(0,0,0,0.19);
+}
+.checkout-header {
+  padding: 24px 24px 0 24px;
+  text-align: center;
+}
+.checkout-header h1 {
+  color: #153a5b;
+  font-weight: 700;
+  margin: 0;
+  font-size: 2rem;
+}
+.checkout-header p {
+  color: #727272;
+  font-size: 1rem;
+  margin: 0.5rem 0 0 0;
+}
+.checkout-section {
+  padding: 24px;
+  border-top: 2px solid #efefef;
+}
+.checkout-section h2 {
+  color: #19b4b9;
+  margin: 0 0 1rem 0;
+  text-transform: uppercase;
+  font-weight: 500;
+  font-size: 1.1rem;
+}
+.checkout-section label {
+  font-weight: 500;
+  color: #153a5b;
+  margin-bottom: 0.5rem;
+  display: block;
+}
+.checkout-section input {
+  outline: 0;
+  border: 1px solid #19b4b9;
+  padding: 8px 12px;
+  margin-bottom: 12px;
+  color: #153a5b;
+  width: 100%;
+  font-family: inherit;
+  border-radius: 0.5rem;
+  font-size: 1rem;
+  transition: border 0.3s;
+}
+.checkout-section input:focus {
+  border: 1.5px solid #153a5b;
+}
+.checkout-section .payment-methods {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.checkout-section .payment-btn {
+  outline: 0;
+  border: 1px solid #19b4b9;
+  background: none;
+  color: #153a5b;
+  text-transform: uppercase;
+  font-family: inherit;
+  font-weight: 500;
+  border-radius: 0.5rem;
+  padding: 8px 0px;
+  width: 100px;
+  transition: all 0.3s ease;
+}
+.checkout-section .payment-btn.selected,
+.checkout-section .payment-btn:hover {
+  background: #19b4b9;
+  color: #fff;
+  cursor: pointer;
+}
+.checkout-section .error {
+  background: #ffeaea;
+  color: #e00;
+  padding: 8px;
+  border-radius: 0.5rem;
+  margin-bottom: 12px;
+  font-size: 0.95rem;
+}
+.checkout-footer {
+  text-align: center;
+  color: #727272;
+  font-size: 0.95rem;
+  padding: 16px 0 0 0;
+}
+.checkout-section .action-btn {
+  outline: 0;
+  border: 1px solid #19b4b9;
+  background: none;
+  color: #153a5b;
+  text-transform: uppercase;
+  font-family: inherit;
+  font-weight: 500;
+  border-radius: 0.5rem;
+  padding: 10px 0px;
+  width: 100%;
+  margin-top: 12px;
+  font-size: 1.1rem;
+  transition: all 0.3s ease;
+}
+.checkout-section .action-btn:hover {
+  background: #19b4b9;
+  color: #fff;
+  cursor: pointer;
+}

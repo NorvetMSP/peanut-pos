@@ -17,7 +17,17 @@ const PRODUCTS = [
 
 const SalesPage: React.FC = () => {
   const { logout, isLoggedIn } = useAuth();
-  const { cart, addItem, removeItem, clearCart, totalAmount } = useCart();
+  const { cart, addItem, removeItem, clearCart, incrementItemQuantity, decrementItemQuantity, totalAmount } = useCart();
+
+  // Helper functions for quantity adjustment
+  const incrementQty = (item: { id: number }) => {
+    incrementItemQuantity(item.id);
+  };
+  const decrementQty = (item: { id: number; quantity: number }) => {
+    if (item.quantity > 1) {
+      decrementItemQuantity(item.id);
+    }
+  };
   const navigate = useNavigate();
 
   useEffect(() => {
@@ -46,60 +56,41 @@ const SalesPage: React.FC = () => {
         <button className="bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600" onClick={() => { logout(); navigate('/'); }}>Logout</button>
       </header>
 
-      {/* Main content: Products and Cart */}
-  <main className="flex flex-col md:flex-row flex-1 gap-8 px-4 py-8 items-center justify-center w-full">
-        {/* Products Section */}
-  <section className="md:w-2/3 w-full max-w-2xl mx-auto">
-          <h2 className="text-xl font-semibold mb-6 text-gray-800 dark:text-gray-100">Products</h2>
-          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-6">
-            {PRODUCTS.map(product => (
-              <ProductCardModern
-                key={product.id}
-                product={{
-                  ...product,
-                  description: 'A great product for your POS needs.',
-                  image: productIcon,
-                  onAdd: () => addItem(product),
-                  onWishlist: () => alert(`Added ${product.name} to wishlist!`)
-                }}
-              />
-            ))}
-          </div>
-        </section>
-
-        {/* Cart Section */}
-  <aside className="md:w-1/3 w-full max-w-md mx-auto bg-white dark:bg-gray-900 rounded-xl shadow-lg p-6 flex flex-col mt-8 md:mt-0">
-          <h2 className="text-xl font-semibold mb-4 text-gray-800 dark:text-gray-100">Cart</h2>
-          <div className="flex-1 space-y-3 overflow-y-auto">
-            {cart.length === 0 ? (
-              <p className="text-gray-500 dark:text-gray-400">Your cart is empty.</p>
-            ) : (
-              cart.map(item => (
-                <CartCard
-                  key={item.id}
-                  item={{
-                    ...item,
-                    onRemove: () => removeItem(item.id)
+      {/* Centered Main Content */}
+      <div className="flex-1 flex items-center justify-center w-full">
+        <main className="flex flex-col gap-8 px-4 py-8 items-center justify-center w-full max-w-4xl mx-auto">
+          {/* Products Section */}
+          <section className="w-full max-w-2xl mx-auto">
+            <h2 className="text-xl font-semibold mb-6 text-gray-800 dark:text-gray-100">Products</h2>
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-6">
+              {PRODUCTS.map(product => (
+                <ProductCardModern
+                  key={product.id}
+                  product={{
+                    ...product,
+                    description: 'A great product for your POS needs.',
+                    image: productIcon,
+                    onAdd: () => addItem(product),
+                    onWishlist: () => alert(`Added ${product.name} to wishlist!`)
                   }}
                 />
-              ))
-            )}
-          </div>
-          <div className="mt-6 text-right text-gray-800 dark:text-gray-100 text-lg">
-            <span className="font-bold">Total: ${totalAmount.toFixed(2)}</span>
-          </div>
-          {cart.length > 0 && (
-            <div className="mt-6">
-              <h4 className="mb-3 text-gray-700 dark:text-gray-200 text-base">Choose Payment Method:</h4>
-              <div className="flex flex-col gap-3">
-                <button className="bg-primary text-white py-2 px-4 rounded-lg hover:bg-opacity-90" onClick={() => handlePayment('card')}>Pay with Card</button>
-                <button className="bg-primary text-white py-2 px-4 rounded-lg hover:bg-opacity-90" onClick={() => handlePayment('cash')}>Pay with Cash</button>
-                <button className="bg-primary text-white py-2 px-4 rounded-lg hover:bg-opacity-90" onClick={() => handlePayment('crypto')}>Pay with Crypto</button>
-              </div>
+              ))}
             </div>
-          )}
-        </aside>
-      </main>
+          </section>
+
+          {/* Cart Section - centered below products */}
+          <CartCard
+            items={cart.map(item => ({
+              ...item,
+              onRemove: () => removeItem(item.id),
+              onAdd: () => incrementQty(item),
+              onSubtract: () => decrementQty(item)
+            }))}
+            total={totalAmount}
+            onCheckout={() => navigate('/checkout')}
+          />
+        </main>
+      </div>
     </div>
   );
 };
