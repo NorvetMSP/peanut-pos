@@ -35,3 +35,6 @@ Manual Start
 Go to app: cd frontends/pos-app
 Install deps: npm install
 Run Vite: npm run dev
+
+C:\Projects\novapos\frontends\admin-portal> npm run dev
+ C:\Projects\novapos\frontends\pos-app> npm run dev
