@@ -1,18 +1,16 @@
-import { Routes, Route } from 'react-router-dom';
-import Login from './pages/Login';
-import Sales from './pages/Sales';
-import { RequireAuth } from './AuthContext';
+import { Routes, Route, Navigate } from 'react-router-dom';
+import Login from './pages/LoginPage';
+import Sales from './pages/SalesPage';
 
 function App() {
   return (
-    <Routes>
-      <Route path="/" element={<Login />} />
-      <Route path="/sales" element={
-        <RequireAuth>
-          <Sales />
-        </RequireAuth>
-      } />
-    </Routes>
+    <>
+      <Routes>
+        <Route path="/login" element={<Login />} />
+        <Route path="/sales" element={<Sales />} />
+        <Route path="*" element={<Navigate to='/login' replace />} />
+      </Routes>
+    </>
   ); 
 }
 export default App
