@@ -6,6 +6,7 @@ use std::env;
 use futures::StreamExt;
 use rdkafka::consumer::{Consumer, StreamConsumer};
 use rdkafka::Message;
+use serde::Deserialize;
 use sqlx::PgPool;
 use uuid::Uuid;
 use serde::Deserialize;
@@ -43,55 +44,69 @@ async fn main() -> anyhow::Result<()> {
         .set("enable.auto.commit", "true")
         .create()
         .expect("failed to create kafka consumer");
-    consumer.subscribe(&["order.completed"])?;
+    consumer.subscribe(&["order.completed", "payment.completed"])?;
     let producer: rdkafka::producer::FutureProducer = rdkafka::ClientConfig::new()
         .set("bootstrap.servers", &env::var("KAFKA_BOOTSTRAP").unwrap_or("localhost:9092".into()))
         .create()
         .expect("failed to create kafka producer");
     // Spawn background task to consume order.completed events
     let db = db_pool.clone();
+    #[derive(Deserialize, Debug)]
+    struct PaymentCompletedEvent {
+        order_id: Uuid,
+        tenant_id: Uuid,
+        amount: f64,
+    }
     tokio::spawn(async move {
         let mut stream = consumer.stream();
         while let Some(message) = stream.next().await {
             match message {
                 Ok(m) => {
+                    let topic = m.topic();
                     if let Some(Ok(text)) = m.payload_view::<str>() {
-                        if let Ok(event) = serde_json::from_str::<OrderCompletedEvent>(text) {
-                            for item in event.items {
-                                // Decrement inventory stock
-                                let result = sqlx::query!("UPDATE inventory SET quantity = quantity - $1 WHERE product_id = $2 AND tenant_id = $3 RETURNING quantity, threshold",
-                                    item.quantity,
-                                    item.product_id,
-                                    event.tenant_id
-                                )
-                                .fetch_optional(&db)
-                                .await;
-                                if let Ok(rec) = result {
-                                    if let Some(rec) = rec {
-                                        if rec.quantity <= rec.threshold {
-                                            // Trigger low-stock alert
-                                            let alert = serde_json::json!({
-                                                "product_id": item.product_id,
-                                                "tenant_id": event.tenant_id,
-                                                "quantity": rec.quantity,
-                                                "threshold": rec.threshold
-                                            });
-                                            let _ = producer.send(
-                                                rdkafka::producer::FutureRecord::to("inventory.low_stock")
-                                                    .payload(&alert.to_string())
-                                                    .key(&event.tenant_id.to_string()),
-                                                0
-                                            ).await;
+                        if topic == "order.completed" {
+                            if let Ok(event) = serde_json::from_str::<OrderCompletedEvent>(text) {
+                                for item in event.items {
+                                    // Decrement inventory stock
+                                    let result = sqlx::query!("UPDATE inventory SET quantity = quantity - $1 WHERE product_id = $2 AND tenant_id = $3 RETURNING quantity, threshold",
+                                        item.quantity,
+                                        item.product_id,
+                                        event.tenant_id
+                                    )
+                                    .fetch_optional(&db)
+                                    .await;
+                                    if let Ok(rec) = result {
+                                        if let Some(rec) = rec {
+                                            if rec.quantity <= rec.threshold {
+                                                // Trigger low-stock alert
+                                                let alert = serde_json::json!({
+                                                    "product_id": item.product_id,
+                                                    "tenant_id": event.tenant_id,
+                                                    "quantity": rec.quantity,
+                                                    "threshold": rec.threshold
+                                                });
+                                                let _ = producer.send(
+                                                    rdkafka::producer::FutureRecord::to("inventory.low_stock")
+                                                        .payload(&alert.to_string())
+                                                        .key(&event.tenant_id.to_string()),
+                                                    0
+                                                ).await;
+                                            }
+                                        } else {
+                                            eprintln!("No inventory record for product {} (tenant {})", item.product_id, event.tenant_id);
                                         }
-                                    } else {
-                                        eprintln!("No inventory record for product {} (tenant {})", item.product_id, event.tenant_id);
+                                    } else if let Err(err) = result {
+                                        eprintln!("Inventory DB error: {}", err);
                                     }
-                                } else if let Err(err) = result {
-                                    eprintln!("Inventory DB error: {}", err);
                                 }
+                            } else {
+                                eprintln!("Failed to parse OrderCompletedEvent");
                             }
-                        } else {
-                            eprintln!("Failed to parse OrderCompletedEvent");
+                        } else if topic == "payment.completed" {
+                            if let Ok(evt) = serde_json::from_str::<PaymentCompletedEvent>(text) {
+                                tracing::info!("Inventory noticed payment.completed for order {}", evt.order_id);
+                                // (No inventory action needed here, as order.completed will handle stock updates)
+                            }
                         }
                     }
                 }

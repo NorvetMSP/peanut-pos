@@ -54,39 +54,48 @@ pub async fn create_order(
         ));
     };
 
-    let order_id = Uuid::new_v4();
-    let NewOrder {
-        items,
-        payment_method,
-        total,
-    } = new_order;
+        let order_id = Uuid::new_v4();
+        let NewOrder {
+            items,
+            payment_method,
+            total,
+        } = new_order;
 
-    // Call Integration Gateway to process payment
-    let gateway_url =
-        std::env::var("INTEGRATION_URL").unwrap_or_else(|_| "http://localhost:8083".to_string());
-    let client = Client::new();
-    let resp = client
-        .post(format!("{}/payments", gateway_url))
-        .json(&serde_json::json!({
-            "orderId": order_id.to_string(),
-            "method": payment_method,
-            "amount": total,
-        }))
-        .send()
-        .await;
+        // Determine order status based on payment method
+        let mut status = "COMPLETED";
+        if payment_method.eq_ignore_ascii_case("crypto") {
+            status = "PENDING";
+        }
+        // Insert order into DB
+        let order = sqlx::query_as::<_, Order>(
+            "INSERT INTO orders (id, tenant_id, total, status) \
+             VALUES ($1, $2, $3, $4) \
+             RETURNING id, tenant_id, total, status"
+        )
+        .bind(order_id)
+        .bind(tenant_id)
+        .bind(total)
+        .bind(status)
+        .fetch_one(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {}", e)))?;
 
-    if let Err(err) = resp {
-        return Err((
-            StatusCode::BAD_GATEWAY,
-            format!("Payment request failed: {}", err),
-        ));
-    }
+        if status == "COMPLETED" {
+            // publish order.completed event immediately (for card/cash)
+            let event = serde_json::json!({ "order_id": order.id, "tenant_id": tenant_id, "items": items, "total": total });
+            state.kafka_producer.send(
+                FutureRecord::to("order.completed").payload(&event.to_string()).key(&tenant_id.to_string()),
+                0
+            ).await.ok();
+        } else {
+            // Crypto order: save items to temporary store for later (e.g., in-memory or order_items table)
+            // NOTE: You must add pending_orders: Arc<Mutex<HashMap<Uuid, Vec<OrderItem>>>> to AppState for this to work
+            if let Some(pending_orders) = state.pending_orders.as_ref() {
+                pending_orders.lock().unwrap().insert(order.id, items);
+            }
+        }
 
-    let resp = resp.unwrap();
-    if !resp.status().is_success() {
-        return Err((StatusCode::BAD_GATEWAY, "Payment was declined".to_string()));
-    }
-
+        Ok(Json(order))
     // Payment successful, insert order into database
     let order = sqlx::query_as::<_, Order>(
         "INSERT INTO orders (id, tenant_id, total, status) VALUES ($1, $2, $3, $4) RETURNING id, tenant_id, total, status",
