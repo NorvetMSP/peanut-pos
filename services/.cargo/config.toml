@@ -1,0 +1,4 @@
+[env]
+VCPKG_TARGET_TRIPLET = "x64-windows-static-md"
+[build]
+target-dir = "../target"

@@ -5,6 +5,7 @@ members = [
   "product-service",
   "payment-service",
   "integration-gateway",
-  "analytics-service"
+  "analytics-service",
+  "inventory-service"
 ]
 resolver = "2"
