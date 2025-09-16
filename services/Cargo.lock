@@ -66,6 +66,7 @@ dependencies = [
  "rdkafka",
  "serde",
  "serde_json",
+ "sqlx",
  "thiserror",
  "tokio",
  "tracing",
@@ -937,14 +938,20 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "bytes",
+ "hex",
+ "hmac",
  "hyper 1.7.0",
  "rdkafka",
+ "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
@@ -1256,6 +1263,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "futures-util",
  "hyper 1.7.0",
  "libz-sys",
  "rdkafka",

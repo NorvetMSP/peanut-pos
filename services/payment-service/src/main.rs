@@ -1,18 +1,21 @@
-use axum::{routing::get, Router};
+use axum::{routing::get, routing::post, Router};
 use tokio::net::TcpListener;
 use std::net::SocketAddr;
+mod payment_handlers;
+use payment_handlers::{process_card_payment};
 
-async fn health() -> &'static str { "ok" }
+
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt().with_env_filter("info").init();
-    let app = Router::new().route("/healthz", get(health));
+    // Initialize logging...
+    let app = Router::new()
+        .route("/healthz", get(|| async { "ok" }))
+        .route("/payments", post(process_card_payment));
     let host = std::env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
-    let port: u16 = std::env::var("PORT").ok().and_then(|v| v.parse().ok()).unwrap_or(8086);
-    let ip: std::net::IpAddr = host.parse()?;
-    let addr = SocketAddr::from((ip, port));
-    println!("starting payment-service on {addr}");
+    let port: u16 = std::env::var("PORT").unwrap_or_else(|_| "8086".to_string()).parse()?;
+    let addr = SocketAddr::new(host.parse()?, port);
+    println!("starting payment-service on {}", addr);
     let listener = TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
     Ok(())

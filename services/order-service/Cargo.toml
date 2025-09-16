@@ -18,3 +18,5 @@ sqlx = { version = "0.6", features = ["runtime-tokio-native-tls", "postgres", "m
 rdkafka = { version = "0.29", features = ["cmake-build", "libz-static"] }
 libz-sys = { version = "1.1.22", features = ["static"] }
 reqwest = { version = "0.11", features = ["json"] }
+futures-util = "0.3"
+
