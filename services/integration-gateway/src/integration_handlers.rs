@@ -1,8 +1,8 @@
-use axum::{Json, http::StatusCode};
+use axum::{http::StatusCode, Json};
+use axum::extract::State;
 use serde::{Deserialize, Serialize};
 use crate::AppState;
 use rdkafka::producer::FutureRecord;
-use tokio::time::{sleep, Duration};
 
 #[derive(Deserialize)]
 pub struct PaymentRequest {
@@ -23,11 +23,11 @@ pub async fn process_payment(
 ) -> Result<Json<PaymentResult>, (StatusCode, String)> {
     // Simulate processing (no actual external calls in prototype)
     // Publish payment.completed event
-    let event = serde_json::json!({ "order_id": req.order_id, "method": req.method });
+    let event = serde_json::json!({ "order_id": req.order_id, "method": req.method, "amount": req.amount });
     let payload = event.to_string();
     if let Err(e) = state.kafka_producer.send(
         FutureRecord::to("payment.completed").payload(&payload).key(&req.order_id),
-        0
+        None::<std::time::Duration>
     ).await {
         eprintln!("Failed to send payment.completed event: {:?}", e);
     }

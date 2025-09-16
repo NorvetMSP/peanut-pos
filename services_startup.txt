@@ -38,3 +38,30 @@ Run Vite: npm run dev
 
 C:\Projects\novapos\frontends\admin-portal> npm run dev
  C:\Projects\novapos\frontends\pos-app> npm run dev
+
+
+**********************************postgres in docker*********************************************************
+PS C:\Projects\novapos> docker run --name novapos-pg -e POSTGRES_PASSWORD=postgres -p 5432:5432 -d postgres:16
+>> 
+ad3dd0a17f762ccc68b1e8d41544cd71584f0383305e4ffb7c12a308469f50b1
+PS C:\Projects\novapos> docker exec -it novapos-pg psql -U postgres -c "CREATE DATABASE novapos;"
+CREATE DATABASE
+PS C:\Projects\novapos> 
+
+
+Use this same URL for product-service, order-service, auth-service, and inventory-service in the prototype:
+
+# For current shell session:
+$env:DATABASE_URL = "postgres://postgres:postgres@localhost:5432/novapos"
+
+# Make it persistent for future shells and on this 
+setx DATABASE_URL "postgres://postgres:postgres@localhost:5432/novapos"
+
+Yes, if you use the setx command, the environment variable will be set persistently for your user account. It will remain available in all new PowerShell or Command Prompt sessions—even after restarting your computer or server.
+
+However, note:
+
+It will not be available in already-open shells; you must open a new shell to see the change.
+It is set for your user, not system-wide (unless you use /M for machine-wide).
+
+*******************************************************************************************

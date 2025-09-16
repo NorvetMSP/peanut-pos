@@ -1,5 +1,4 @@
-use axum::{routing::{get, post}, Router, Json};
-use axum::extract::State;
+use axum::{routing::{get, post}, Router};
 use tokio::net::TcpListener;
 use std::net::SocketAddr;
 use std::env;
@@ -7,6 +6,7 @@ use rdkafka::producer::FutureProducer;
 mod integration_handlers;
 use integration_handlers::process_payment;
 /// Shared application state
+#[derive(Clone)]
 pub struct AppState {
     kafka_producer: FutureProducer
 }
