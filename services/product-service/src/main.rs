@@ -1,17 +1,22 @@
-use axum::{routing::{get, post}, Router, Json};
-use axum::extract::State;
-use tokio::net::TcpListener;
-use std::net::SocketAddr;
+use axum::{
+    routing::{get, post},
+    Router,
+};
 use sqlx::PgPool;
 use std::env;
+use std::net::SocketAddr;
+use tokio::net::TcpListener;
 mod product_handlers;
 use product_handlers::{create_product, list_products};
 /// Shared application state
+#[derive(Clone)]
 pub struct AppState {
-    db: PgPool
+    db: PgPool,
 }
 
-async fn health() -> &'static str { "ok" }
+async fn health() -> &'static str {
+    "ok"
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -19,8 +24,10 @@ async fn main() -> anyhow::Result<()> {
     // Initialize database connection pool
     let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
     let db = PgPool::connect(&database_url).await?;
+    // Ensure database schema is up to date before serving traffic
+    sqlx::migrate!("./migrations").run(&db).await?;
     // Build application state
-    let state = AppState { db: db };
+    let state = AppState { db };
     // Build application routes
     let app = Router::new()
         .route("/healthz", get(health))
@@ -28,7 +35,10 @@ async fn main() -> anyhow::Result<()> {
         .with_state(state);
     // Start server
     let host = env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
-    let port: u16 = env::var("PORT").ok().and_then(|v| v.parse().ok()).unwrap_or(8081);
+    let port: u16 = env::var("PORT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(8081);
     let ip: std::net::IpAddr = host.parse()?;
     let addr = SocketAddr::from((ip, port));
     println!("starting product-service on {addr}");
