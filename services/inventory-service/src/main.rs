@@ -1,32 +1,32 @@
-use axum::{routing::get, Router, Json};
-use axum::extract::State;
+use axum::{routing::get, Router};
 use tokio::net::TcpListener;
-use std::net::SocketAddr;
-use std::env;
+use std::{env, net::SocketAddr, time::Duration};
 use futures::StreamExt;
 use rdkafka::consumer::{Consumer, StreamConsumer};
 use rdkafka::Message;
 use serde::Deserialize;
-use sqlx::PgPool;
+use sqlx::{query_as, PgPool};
 use uuid::Uuid;
-use serde::Deserialize;
+
 mod inventory_handlers;
 use inventory_handlers::list_inventory;
-/// Event data from Order Service (for deserialization)
+
+/// Event data from Order Service
 #[derive(Deserialize)]
-#[serde(ignore_unknown_fields)]
 struct OrderCompletedEvent {
     tenant_id: Uuid,
-    items: Vec<OrderItem>
+    items: Vec<OrderItem>,
 }
+
 #[derive(Deserialize)]
 struct OrderItem {
     product_id: Uuid,
-    quantity: i32
+    quantity: i32,
 }
-/// Shared application state
+
+#[derive(Clone)]
 pub struct AppState {
-    db: PgPool
+    pub(crate) db: PgPool,
 }
 
 async fn health() -> &'static str { "ok" }
@@ -34,9 +34,11 @@ async fn health() -> &'static str { "ok" }
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().with_env_filter("info").init();
+
     // Initialize database pool
     let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
     let db_pool = PgPool::connect(&database_url).await?;
+
     // Initialize Kafka consumer and producer
     let consumer: StreamConsumer = rdkafka::ClientConfig::new()
         .set("bootstrap.servers", &env::var("KAFKA_BOOTSTRAP").unwrap_or("localhost:9092".into()))
@@ -45,18 +47,22 @@ async fn main() -> anyhow::Result<()> {
         .create()
         .expect("failed to create kafka consumer");
     consumer.subscribe(&["order.completed", "payment.completed"])?;
+
     let producer: rdkafka::producer::FutureProducer = rdkafka::ClientConfig::new()
         .set("bootstrap.servers", &env::var("KAFKA_BOOTSTRAP").unwrap_or("localhost:9092".into()))
         .create()
         .expect("failed to create kafka producer");
+
     // Spawn background task to consume order.completed events
     let db = db_pool.clone();
+
     #[derive(Deserialize, Debug)]
     struct PaymentCompletedEvent {
         order_id: Uuid,
         tenant_id: Uuid,
         amount: f64,
     }
+
     tokio::spawn(async move {
         let mut stream = consumer.stream();
         while let Some(message) = stream.next().await {
@@ -68,35 +74,38 @@ async fn main() -> anyhow::Result<()> {
                             if let Ok(event) = serde_json::from_str::<OrderCompletedEvent>(text) {
                                 for item in event.items {
                                     // Decrement inventory stock
-                                    let result = sqlx::query!("UPDATE inventory SET quantity = quantity - $1 WHERE product_id = $2 AND tenant_id = $3 RETURNING quantity, threshold",
-                                        item.quantity,
-                                        item.product_id,
-                                        event.tenant_id
+                                    let result = query_as::<_, (i32, i32)>(
+                                        "UPDATE inventory SET quantity = quantity - $1 WHERE product_id = $2 AND tenant_id = $3 RETURNING quantity, threshold",
                                     )
+                                    .bind(item.quantity)
+                                    .bind(item.product_id)
+                                    .bind(event.tenant_id)
                                     .fetch_optional(&db)
                                     .await;
-                                    if let Ok(rec) = result {
-                                        if let Some(rec) = rec {
-                                            if rec.quantity <= rec.threshold {
-                                                // Trigger low-stock alert
-                                                let alert = serde_json::json!({
-                                                    "product_id": item.product_id,
-                                                    "tenant_id": event.tenant_id,
-                                                    "quantity": rec.quantity,
-                                                    "threshold": rec.threshold
-                                                });
-                                                let _ = producer.send(
-                                                    rdkafka::producer::FutureRecord::to("inventory.low_stock")
-                                                        .payload(&alert.to_string())
-                                                        .key(&event.tenant_id.to_string()),
-                                                    0
-                                                ).await;
+
+                                    match result {
+                                        Ok(rec_opt) => {
+                                            if let Some((quantity, threshold)) = rec_opt {
+                                                if quantity <= threshold {
+                                                    // Trigger low-stock alert
+                                                    let alert = serde_json::json!({
+                                                        "product_id": item.product_id,
+                                                        "tenant_id": event.tenant_id,
+                                                        "quantity": quantity,
+                                                        "threshold": threshold
+                                                    });
+                                                    let _ = producer.send(
+                                                        rdkafka::producer::FutureRecord::to("inventory.low_stock")
+                                                            .payload(&alert.to_string())
+                                                            .key(&event.tenant_id.to_string()),
+                                                        Duration::from_secs(0)
+                                                    ).await;
+                                                }
+                                            } else {
+                                                eprintln!("No inventory record for product {} (tenant {})", item.product_id, event.tenant_id);
                                             }
-                                        } else {
-                                            eprintln!("No inventory record for product {} (tenant {})", item.product_id, event.tenant_id);
                                         }
-                                    } else if let Err(err) = result {
-                                        eprintln!("Inventory DB error: {}", err);
+                                        Err(err) => eprintln!("Inventory DB error: {}", err),
                                     }
                                 }
                             } else {
@@ -104,22 +113,29 @@ async fn main() -> anyhow::Result<()> {
                             }
                         } else if topic == "payment.completed" {
                             if let Ok(evt) = serde_json::from_str::<PaymentCompletedEvent>(text) {
-                                tracing::info!("Inventory noticed payment.completed for order {}", evt.order_id);
-                                // (No inventory action needed here, as order.completed will handle stock updates)
+                                tracing::info!(
+                                    order_id = %evt.order_id,
+                                    tenant_id = %evt.tenant_id,
+                                    amount = evt.amount,
+                                    "Inventory noticed payment.completed event"
+                                );
+                                // No inventory action needed here, order.completed handles stock updates
                             }
                         }
                     }
                 }
-                Err(e) => eprintln!("Kafka consume error: {}", e)
+                Err(e) => eprintln!("Kafka consume error: {}", e),
             }
         }
     });
+
     // Build and run the HTTP server (health endpoint and optional APIs)
     let state = AppState { db: db_pool };
     let app = Router::new()
         .route("/healthz", get(health))
         .route("/inventory", get(list_inventory))
         .with_state(state);
+
     let host = env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
     let port: u16 = env::var("PORT").ok().and_then(|v| v.parse().ok()).unwrap_or(8087);
     let ip: std::net::IpAddr = host.parse()?;

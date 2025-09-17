@@ -1,0 +1,158 @@
+version: "3.9"
+
+networks:
+  novanet:
+
+volumes:
+  pgdata:
+  zkdata:
+  kafkadata:
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: novapos
+      POSTGRES_PASSWORD: novapos
+      POSTGRES_DB: novapos
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks: [novanet]
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+    networks: [novanet]
+
+  zookeeper:
+    image: bitnami/zookeeper:3.8
+    environment:
+      - ALLOW_ANONYMOUS_LOGIN=yes
+    ports:
+      - "2181:2181"
+    volumes:
+      - zkdata:/bitnami/zookeeper
+    networks: [novanet]
+
+  kafka:
+    image: bitnami/kafka:3.7
+    environment:
+      - KAFKA_BROKER_ID=1
+      - KAFKA_CFG_ZOOKEEPER_CONNECT=zookeeper:2181
+      - ALLOW_PLAINTEXT_LISTENER=yes
+      - KAFKA_CFG_LISTENERS=PLAINTEXT://:9092
+      - KAFKA_CFG_ADVERTISED_LISTENERS=PLAINTEXT://kafka:9092
+    ports:
+      - "9092:9092"
+    depends_on:
+      - zookeeper
+    volumes:
+      - kafkadata:/bitnami/kafka
+    networks: [novanet]
+
+  product-service:
+    build:
+      context: .
+      dockerfile: services/product-service/Dockerfile
+    environment:
+      - DATABASE_URL=postgres://novapos:novapos@postgres:5432/novapos
+      - KAFKA_BOOTSTRAP=kafka:9092
+      - RUST_LOG=info
+    depends_on: [postgres, kafka]
+    ports: ["8081:8081"]
+    networks: [novanet]
+
+  auth-service:
+    build:
+      context: .
+      dockerfile: services/auth-service/Dockerfile
+    environment:
+      - DATABASE_URL=postgres://novapos:novapos@postgres:5432/novapos
+      - RUST_LOG=info
+    depends_on: [postgres]
+    ports: ["8085:8085"]
+    networks: [novanet]
+
+  order-service:
+    build:
+      context: .
+      dockerfile: services/order-service/Dockerfile
+    environment:
+      - DATABASE_URL=postgres://novapos:novapos@postgres:5432/novapos
+      - KAFKA_BOOTSTRAP=kafka:9092
+      - INTEGRATION_URL=http://integration-gateway:8083
+      - RUST_LOG=info
+    depends_on: [postgres, kafka, integration-gateway]
+    ports: ["8084:8084"]
+    networks: [novanet]
+
+  payment-service:
+    build:
+      context: .
+      dockerfile: services/payment-service/Dockerfile
+    environment:
+      - KAFKA_BOOTSTRAP=kafka:9092
+      - RUST_LOG=info
+    depends_on: [kafka]
+    ports: ["8086:8086"]
+    networks: [novanet]
+
+  inventory-service:
+    build:
+      context: .
+      dockerfile: services/inventory-service/Dockerfile
+    environment:
+      - DATABASE_URL=postgres://novapos:novapos@postgres:5432/novapos
+      - KAFKA_BOOTSTRAP=kafka:9092
+      - RUST_LOG=info
+    depends_on: [postgres, kafka]
+    ports: ["8087:8087"]
+    networks: [novanet]
+
+  analytics-service:
+    build:
+      context: .
+      dockerfile: services/analytics-service/Dockerfile
+    environment:
+      - DATABASE_URL=postgres://novapos:novapos@postgres:5432/novapos
+      - KAFKA_BOOTSTRAP=kafka:9092
+      - RUST_LOG=info
+    depends_on: [postgres, kafka]
+    ports: ["8082:8082"]
+    networks: [novanet]
+
+  integration-gateway:
+    build:
+      context: .
+      dockerfile: services/integration-gateway/Dockerfile
+    environment:
+      - KAFKA_BOOTSTRAP=kafka:9092
+      - PAYMENT_SERVICE_URL=http://payment-service:8086
+      - ORDER_SERVICE_URL=http://order-service:8084
+      # Uncomment and set if testing Coinbase integration:
+      # - COINBASE_COMMERCE_API_KEY=
+      # - COINBASE_WEBHOOK_SECRET=
+      - RUST_LOG=info
+    depends_on: [kafka, payment-service]
+    ports: ["8083:8083"]
+    networks: [novanet]
+
+  # Frontends (optional in dev)
+  pos-app:
+    build:
+      context: .
+      dockerfile: frontends/pos-app/Dockerfile
+    depends_on: [product-service]
+    ports: ["3000:80"]
+    networks: [novanet]
+
+  admin-portal:
+    build:
+      context: .
+      dockerfile: frontends/admin-portal/Dockerfile
+    depends_on: [auth-service]
+    ports: ["3001:80"]
+    networks: [novanet]

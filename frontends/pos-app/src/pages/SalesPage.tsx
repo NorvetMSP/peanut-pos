@@ -1,5 +1,5 @@
 import React, { useEffect } from 'react';
-import logoTransparent from '../../../assets/logo/logo_transparent.png';
+import logoTransparent from '../assets/logo_transparent.png';
 import productIcon from '../assets/react.svg';
 import ProductCardModern from '../components/ProductCardModern';
 import '../components/ProductCardModern.css';
@@ -40,6 +40,7 @@ const SalesPage: React.FC = () => {
       await simulatePayment(method, totalAmount);
       alert(`${method.charAt(0).toUpperCase() + method.slice(1)} payment successful!`);
       clearCart();
+      navigate('/checkout');
     } catch (err) {
       alert(`Payment failed: ${err}`);
     }
@@ -87,7 +88,7 @@ const SalesPage: React.FC = () => {
               onSubtract: () => decrementQty(item)
             }))}
             total={totalAmount}
-            onCheckout={() => navigate('/checkout')}
+            onCheckout={() => handlePayment('card')}
           />
         </main>
       </div>
@@ -96,3 +97,8 @@ const SalesPage: React.FC = () => {
 };
 
 export default SalesPage;
+
+
+
+
+
