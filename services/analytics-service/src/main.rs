@@ -190,6 +190,7 @@ async fn main() -> anyhow::Result<()> {
         data: data_map.clone(),
     };
     let app = Router::new()
+        .route("/healthz", get(|| async { "ok" }))
         .route("/analytics/forecast", get(get_forecast))
         .route("/analytics/anomalies", get(get_anomalies))
         .with_state(state);
@@ -207,3 +208,6 @@ async fn main() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+
+

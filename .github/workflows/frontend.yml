@@ -1,0 +1,67 @@
+name: Frontend CI
+
+on:
+  push:
+    paths:
+      - "frontends/**"
+      - ".github/workflows/frontend.yml"
+  pull_request:
+    paths:
+      - "frontends/**"
+      - ".github/workflows/frontend.yml"
+  workflow_dispatch:
+
+jobs:
+  pos_app:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontends/pos-app
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "npm"
+          cache-dependency-path: frontends/pos-app/package-lock.json
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint --if-present
+
+      - name: Test
+        run: npm test --if-present -- --watch=false
+
+      - name: Build
+        run: npm run build
+
+  admin_portal:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontends/admin-portal
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "npm"
+          cache-dependency-path: frontends/admin-portal/package-lock.json
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint --if-present
+
+      - name: Test
+        run: npm test --if-present -- --watch=false
+
+      - name: Build
+        run: npm run build

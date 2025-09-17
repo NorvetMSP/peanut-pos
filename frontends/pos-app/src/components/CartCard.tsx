@@ -1,5 +1,4 @@
 import React from 'react';
-import CartItemCard from './CartItemCard';
 import './CartCard.css';
 
 type CartItem = {
