@@ -144,5 +144,10 @@ Email: admin@novapos.local
 Password: admin123
 Role: super_admin (tenant NovaPOS HQ)
 
-
+Tenant & Key Management Updates (Sept 2025)
+------------------------------------------
+- After pulling latest changes run auth-service migrations 3003/3004 (e.g. sqlx migrate run) to create the integration_keys table and role constraint.
+- integration-gateway now expects DATABASE_URL (same Postgres DSN as other services) and optionally KEY_REFRESH_SECONDS (default 60). Remove any tenant_config.json usage.
+- Generate/rotate integration keys via POST /tenants/{tenant_id}/integration-keys (or Admin UI > Settings); broadcast new key to external systems and revoke unused ones.
+- Admin portal linting now uses eslint.config.js (flat config). Run npm run lint once to ensure the new config is picked up.
 

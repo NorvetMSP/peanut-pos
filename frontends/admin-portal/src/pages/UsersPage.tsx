@@ -1,9 +1,10 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../AuthContext';
+import { resolveServiceUrl } from '../utils/env';
 import './AdminSectionModern.css';
 
-const AUTH_SERVICE_URL = (import.meta.env.VITE_AUTH_SERVICE_URL ?? 'http://localhost:8085').replace(/\/$/, '');
+const AUTH_SERVICE_URL = resolveServiceUrl('VITE_AUTH_SERVICE_URL', 'http://localhost:8085');
 
 type ServiceUser = {
   id: string;
@@ -19,11 +20,23 @@ type UserFormState = {
   role: string;
 };
 
-const ROLE_OPTIONS: Array<{ value: string; label: string }> = [
-  { value: 'admin', label: 'Admin' },
-  { value: 'manager', label: 'Manager' },
-  { value: 'cashier', label: 'Cashier' },
-];
+const FALLBACK_ROLES = ['super_admin', 'admin', 'manager', 'cashier'] as const;
+const DEFAULT_ROLE = 'cashier';
+
+type RoleOption = { value: string; label: string };
+
+const roleLabel = (value: string): string =>
+  value
+    .split('_')
+    .map(part => (part ? part.charAt(0).toUpperCase() + part.slice(1) : part))
+    .join(' ');
+
+const ROLE_ORDER = new Map<string, number>(FALLBACK_ROLES.map((role, index) => [role, index]));
+
+const orderRoles = (values: string[]): string[] =>
+  [...new Set(values)].sort(
+    (a, b) => (ROLE_ORDER.get(a) ?? Number.MAX_SAFE_INTEGER) - (ROLE_ORDER.get(b) ?? Number.MAX_SAFE_INTEGER)
+  );
 
 const normalizeUser = (entry: unknown): ServiceUser | null => {
   if (!entry || typeof entry !== 'object') return null;
@@ -43,17 +56,19 @@ const UsersPage: React.FC = () => {
   const [users, setUsers] = useState<ServiceUser[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [rolesLoading, setRolesLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
+  const [roleOptions, setRoleOptions] = useState<RoleOption[]>([]);
   const [form, setForm] = useState<UserFormState>({
     name: '',
     email: '',
     password: '',
-    role: ROLE_OPTIONS[2]?.value ?? 'cashier',
+    role: DEFAULT_ROLE,
   });
 
   useEffect(() => {
-    if (!isLoggedIn) navigate('/login', { replace: true });
+    if (!isLoggedIn) void navigate('/login', { replace: true });
   }, [isLoggedIn, navigate]);
 
   const tenantId = currentUser?.tenant_id ? String(currentUser.tenant_id) : null;
@@ -69,6 +84,57 @@ const UsersPage: React.FC = () => {
     [tenantId, token]
   );
 
+  const fetchRoles = useCallback(async (): Promise<void> => {
+    setRolesLoading(true);
+    try {
+      const response = await fetch(`${AUTH_SERVICE_URL}/roles`, {
+        headers: buildHeaders(),
+      });
+      if (!response.ok) {
+        throw new Error(`Failed to fetch roles (${response.status})`);
+      }
+      const payload = (await response.json()) as unknown;
+      const values = Array.isArray(payload)
+        ? payload.filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0)
+        : [];
+      const ordered = orderRoles(values.length > 0 ? values : Array.from(FALLBACK_ROLES));
+      const options = ordered.map(value => ({ value, label: roleLabel(value) }));
+      setRoleOptions(options);
+      setForm(prev => {
+        if (options.some(option => option.value === prev.role)) {
+          return prev;
+        }
+        return {
+          ...prev,
+          role: options[0]?.value ?? DEFAULT_ROLE,
+        };
+      });
+    } catch (err) {
+      console.error('Unable to load role catalog', err);
+      const fallbackOptions = orderRoles(Array.from(FALLBACK_ROLES)).map(value => ({
+        value,
+        label: roleLabel(value),
+      }));
+      setRoleOptions(fallbackOptions);
+      setForm(prev => ({
+        ...prev,
+        role: fallbackOptions[0]?.value ?? DEFAULT_ROLE,
+      }));
+    } finally {
+      setRolesLoading(false);
+    }
+  }, [buildHeaders]);
+
+  useEffect(() => {
+    void fetchRoles();
+  }, [fetchRoles]);
+
+  const defaultRoleValue = useMemo(() => {
+    if (roleOptions.length === 0) return DEFAULT_ROLE;
+    const preferred = roleOptions.find(option => option.value === DEFAULT_ROLE);
+    return (preferred ?? roleOptions[0]).value;
+  }, [roleOptions]);
+
   const ensureTenantContext = useCallback((): boolean => {
     if (!tenantId) {
       setError('Tenant context is unavailable. Please log out and back in.');
@@ -78,7 +144,7 @@ const UsersPage: React.FC = () => {
     return true;
   }, [tenantId]);
 
-  const fetchUsers = useCallback(async () => {
+  const fetchUsers = useCallback(async (): Promise<void> => {
     if (!ensureTenantContext()) return;
     setIsLoading(true);
     setError(null);
@@ -89,9 +155,9 @@ const UsersPage: React.FC = () => {
       if (!response.ok) {
         throw new Error(`Failed to fetch users (${response.status})`);
       }
-      const payload = await response.json();
+      const payload = (await response.json()) as unknown;
       const normalized = Array.isArray(payload)
-        ? payload.map(normalizeUser).filter((item): item is ServiceUser => Boolean(item))
+        ? payload.map(normalizeUser).filter((item): item is ServiceUser => item !== null)
         : [];
       setUsers(normalized);
     } catch (err) {
@@ -103,7 +169,7 @@ const UsersPage: React.FC = () => {
   }, [buildHeaders, ensureTenantContext]);
 
   useEffect(() => {
-    fetchUsers();
+    void fetchUsers();
   }, [fetchUsers]);
 
   const handleInputChange = (field: keyof UserFormState, value: string) => {
@@ -118,56 +184,44 @@ const UsersPage: React.FC = () => {
 
   const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    setError(null);
-    setSuccessMessage(null);
-
     if (!ensureTenantContext()) return;
 
-    const trimmedName = form.name.trim();
-    const trimmedEmail = form.email.trim();
-
-    if (!trimmedName) {
-      setError('Name is required.');
-      return;
-    }
-    if (!validateEmail(trimmedEmail)) {
-      setError('Enter a valid email address.');
-      return;
-    }
-    if (!form.password) {
-      setError('Password is required.');
+    if (!validateEmail(form.email)) {
+      setError('Provide a valid email address.');
       return;
     }
 
+    setError(null);
+    setSuccessMessage(null);
     setIsSubmitting(true);
+
     try {
       const response = await fetch(`${AUTH_SERVICE_URL}/users`, {
         method: 'POST',
         headers: buildHeaders(true),
-        body: JSON.stringify({
-          name: trimmedName,
-          email: trimmedEmail,
-          password: form.password,
-          role: form.role,
-        }),
+        body: JSON.stringify(form),
       });
       if (!response.ok) {
-        throw new Error(`Failed to create user (${response.status})`);
+        throw new Error(`Create user failed (${response.status})`);
       }
-      const created = normalizeUser(await response.json());
-      if (created) {
-        setUsers(prev => [created, ...prev]);
-      } else {
-        fetchUsers();
-      }
-      setSuccessMessage(`User ${trimmedName} created.`);
-      setForm({ name: '', email: '', password: '', role: form.role });
+      await fetchUsers();
+      setSuccessMessage('User created successfully.');
+      setForm(prev => ({
+        name: '',
+        email: '',
+        password: '',
+        role: prev.role,
+      }));
     } catch (err) {
       console.error('Create user failed', err);
       setError('Unable to create user. Please try again.');
     } finally {
       setIsSubmitting(false);
     }
+  };
+
+  const handleClear = () => {
+    setForm({ name: '', email: '', password: '', role: defaultRoleValue });
   };
 
   const sortedUsers = useMemo(() => {
@@ -181,30 +235,25 @@ const UsersPage: React.FC = () => {
     >
       <div className="admin-section-modern">
         <div className="admin-section-header">
-          <div>
-            <h2>User Management</h2>
-            <p>Invite employees and review existing access.</p>
-          </div>
-          <button className="admin-section-btn" onClick={() => navigate('/home')}>
-            Back to Admin Home
-          </button>
+          <h2>Users</h2>
+          <p>Invite team members and manage their access levels for this tenant.</p>
         </div>
 
-        <div className="admin-section-content grid gap-8">
+        <div className="admin-section-content">
           {error && (
-            <div className="rounded-md bg-red-100 px-4 py-3 text-sm text-red-700 dark:bg-red-900/40 dark:text-red-200">
+            <div className="rounded bg-red-100 text-red-800 px-4 py-3 mb-4">
               {error}
             </div>
           )}
           {successMessage && (
-            <div className="rounded-md bg-emerald-100 px-4 py-3 text-sm text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-100">
+            <div className="rounded bg-green-100 text-green-800 px-4 py-3 mb-4">
               {successMessage}
             </div>
           )}
 
-          <section className="rounded-lg bg-white dark:bg-gray-800 p-6 shadow">
+          <section className="rounded-lg bg-white dark:bg-gray-800 p-6 shadow mb-6">
             <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Add New User</h3>
-            <form className="mt-4 grid gap-4 md:grid-cols-2" onSubmit={handleSubmit}>
+            <form className="mt-4 grid gap-4 md:grid-cols-2" onSubmit={event => { void handleSubmit(event); }}>
               <div className="flex flex-col">
                 <label className="text-sm font-medium text-gray-600 dark:text-gray-300">Full Name</label>
                 <input
@@ -241,22 +290,33 @@ const UsersPage: React.FC = () => {
               <div className="flex flex-col">
                 <label className="text-sm font-medium text-gray-600 dark:text-gray-300">Role</label>
                 <select
-                  value={form.role}
+                  value={roleOptions.length === 0 ? '' : form.role}
                   onChange={event => handleInputChange('role', event.target.value)}
                   className="mt-1 rounded-md border border-gray-300 px-3 py-2 text-gray-900 focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary"
+                  disabled={rolesLoading || roleOptions.length === 0}
                 >
-                  {ROLE_OPTIONS.map(option => (
-                    <option key={option.value} value={option.value}>
-                      {option.label}
+                  {rolesLoading && roleOptions.length === 0 ? (
+                    <option value="" disabled>
+                      Loading roles...
                     </option>
-                  ))}
+                  ) : roleOptions.length === 0 ? (
+                    <option value="" disabled>
+                      No roles available
+                    </option>
+                  ) : (
+                    roleOptions.map(option => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))
+                  )}
                 </select>
               </div>
               <div className="md:col-span-2 flex justify-end gap-2">
                 <button
                   type="button"
                   className="px-4 py-2 rounded bg-gray-200 text-gray-800 dark:bg-gray-700 dark:text-gray-200"
-                  onClick={() => setForm({ name: '', email: '', password: '', role: ROLE_OPTIONS[2]?.value ?? 'cashier' })}
+                  onClick={handleClear}
                   disabled={isSubmitting}
                 >
                   Clear
@@ -267,7 +327,7 @@ const UsersPage: React.FC = () => {
                   style={{ background: '#19b4b9' }}
                   onMouseOver={event => (event.currentTarget.style.background = '#153a5b')}
                   onMouseOut={event => (event.currentTarget.style.background = '#19b4b9')}
-                  disabled={isSubmitting}
+                  disabled={isSubmitting || rolesLoading || roleOptions.length === 0}
                 >
                   {isSubmitting ? 'Creating...' : 'Create User'}
                 </button>
@@ -281,7 +341,7 @@ const UsersPage: React.FC = () => {
               <button
                 type="button"
                 className="admin-section-btn"
-                onClick={() => fetchUsers()}
+                onClick={() => void fetchUsers()}
                 disabled={isLoading}
               >
                 {isLoading ? 'Refreshing...' : 'Refresh List'}
@@ -308,7 +368,7 @@ const UsersPage: React.FC = () => {
                       <tr key={user.id} className="bg-white dark:bg-gray-800">
                         <td className="px-4 py-2 text-sm text-gray-900 dark:text-gray-100">{user.name}</td>
                         <td className="px-4 py-2 text-sm text-gray-700 dark:text-gray-200">{user.email}</td>
-                        <td className="px-4 py-2 text-sm text-gray-700 dark:text-gray-200 capitalize">{user.role}</td>
+                        <td className="px-4 py-2 text-sm text-gray-700 dark:text-gray-200">{roleLabel(user.role)}</td>
                       </tr>
                     ))
                   )}
@@ -323,3 +383,4 @@ const UsersPage: React.FC = () => {
 };
 
 export default UsersPage;
+

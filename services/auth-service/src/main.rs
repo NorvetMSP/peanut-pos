@@ -12,13 +12,19 @@ use std::net::SocketAddr;
 use tokio::net::TcpListener;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
+mod tenant_handlers;
 mod user_handlers;
-use user_handlers::{create_user, list_users, login_user};
+
+use tenant_handlers::{
+    create_integration_key, create_tenant, list_integration_keys, list_tenants,
+    revoke_integration_key,
+};
+use user_handlers::{create_user, list_roles, list_users, login_user};
 
 /// Shared application state
 #[derive(Clone)]
 pub struct AppState {
-    db: PgPool,
+    pub db: PgPool,
 }
 
 async fn health() -> &'static str {
@@ -51,6 +57,16 @@ async fn main() -> anyhow::Result<()> {
         .route("/healthz", get(health))
         .route("/login", post(login_user))
         .route("/users", post(create_user).get(list_users))
+        .route("/roles", get(list_roles))
+        .route("/tenants", post(create_tenant).get(list_tenants))
+        .route(
+            "/tenants/:tenant_id/integration-keys",
+            post(create_integration_key).get(list_integration_keys),
+        )
+        .route(
+            "/integration-keys/:key_id/revoke",
+            post(revoke_integration_key),
+        )
         .with_state(state)
         .layer(cors);
 

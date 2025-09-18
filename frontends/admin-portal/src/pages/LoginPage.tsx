@@ -10,16 +10,16 @@ const LoginPage: React.FC = () => {
 
   useEffect(() => {
     if (isLoggedIn) {
-      navigate('/home', { replace: true });
+      void navigate('/home', { replace: true });
     }
   }, [isLoggedIn, navigate]);
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
     setLocalError(null);
     const success = await login(credentials.email, credentials.password);
     if (success) {
-      navigate('/home', { replace: true });
+      void navigate('/home', { replace: true });
     } else if (!loginError) {
       setLocalError('Login failed. Please try again.');
     }
@@ -34,7 +34,7 @@ const LoginPage: React.FC = () => {
         <h1 className="text-2xl font-bold mb-6 text-center text-gray-800 dark:text-gray-100">
           NovaPOS Admin Portal
         </h1>
-        <form onSubmit={handleSubmit} className="space-y-4">
+        <form onSubmit={event => { void handleSubmit(event); }} className="space-y-4">
           <div>
             <label className="block text-gray-700 dark:text-gray-200 mb-1" htmlFor="email">Email</label>
             <input
