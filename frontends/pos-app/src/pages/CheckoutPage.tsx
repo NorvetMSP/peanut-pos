@@ -8,20 +8,34 @@ import "./CheckoutPageModern.css";
 const PRODUCT_SERVICE_URL = (import.meta.env.VITE_PRODUCT_SERVICE_URL ?? "http://localhost:8081").replace(/\/$/, "");
 const STORAGE_PREFIX = "productCache";
 
-const mapProductActiveFlags = (raw: unknown): Record<string, boolean> => {
-  if (!Array.isArray(raw)) return {};
-  const result: Record<string, boolean> = {};
+type CatalogSnapshot = Record<string, { active: boolean; price: number }>;
+
+const mapToCatalogSnapshot = (raw: unknown): CatalogSnapshot => {
+  const snapshot: CatalogSnapshot = {};
+  if (!Array.isArray(raw)) return snapshot;
   for (const entry of raw) {
     if (!entry || typeof entry !== "object") continue;
     const candidate = entry as Record<string, unknown>;
     const rawId = candidate.id;
     if (typeof rawId !== "string" && typeof rawId !== "number") continue;
     const id = typeof rawId === "string" ? rawId : String(rawId);
+    const rawPrice = candidate.price;
+    const price =
+      typeof rawPrice === "number"
+        ? rawPrice
+        : typeof rawPrice === "string"
+        ? Number(rawPrice)
+        : NaN;
+    if (!Number.isFinite(price)) continue;
     const activeValue = candidate.active;
-    result[id] = typeof activeValue === "boolean" ? activeValue : true;
+    snapshot[id] = {
+      active: typeof activeValue === "boolean" ? activeValue : true,
+      price,
+    };
   }
-  return result;
+  return snapshot;
 };
+
 
 type SubmissionOutcome = {
   mode: "queued" | "submitted";
@@ -52,7 +66,7 @@ export default function CheckoutPage() {
   const [submissionError, setSubmissionError] = React.useState<string | null>(null);
   const [isProcessing, setIsProcessing] = React.useState(false);
 
-  const resolveCatalogSnapshot = React.useCallback(async (): Promise<Record<string, boolean>> => {
+  const resolveCatalogSnapshot = React.useCallback(async (): Promise<CatalogSnapshot> => {
     if (!tenantId) return {};
     const headers: Record<string, string> = { "X-Tenant-ID": tenantId };
     if (token) headers["Authorization"] = `Bearer ${token}`;
@@ -64,15 +78,18 @@ export default function CheckoutPage() {
         throw new Error(`Failed to fetch products (${response.status})`);
       }
       const payload = await response.json();
-      return mapProductActiveFlags(payload);
+      return mapToCatalogSnapshot(payload);
     } catch (err) {
       console.warn('Using cached catalog for submission validation', err);
       if (!storage) return {};
       const cached = storage.getItem(`${STORAGE_PREFIX}:${tenantId}`);
       if (!cached) return {};
       try {
-        const parsed = JSON.parse(cached);
-        return mapProductActiveFlags(parsed);
+        const parsed = JSON.parse(cached) as { products?: unknown };
+        if (parsed && typeof parsed === "object" && Array.isArray(parsed.products)) {
+          return mapToCatalogSnapshot(parsed.products);
+        }
+        return mapToCatalogSnapshot(parsed);
       } catch (cacheError) {
         console.warn('Unable to parse cached catalog during checkout validation', cacheError);
         return {};
@@ -80,17 +97,41 @@ export default function CheckoutPage() {
     }
   }, [tenantId, token]);
 
-  const detectInactiveItems = React.useCallback(async (): Promise<string[]> => {
-    if (!cart.length) return [];
-    const catalogSnapshot = await resolveCatalogSnapshot();
-    if (!Object.keys(catalogSnapshot).length) return [];
-    const flagged = cart.reduce<string[]>((acc, item) => {
-      if (catalogSnapshot[item.id] === false) {
-        acc.push(item.name);
+  type CatalogValidationResult = {
+    inactive: string[];
+    priceChanges: Array<{ id: string; name: string; previous: number; next: number }>;
+  };
+
+  const detectCatalogIssues = React.useCallback(async (): Promise<CatalogValidationResult> => {
+    if (!cart.length) {
+      return { inactive: [], priceChanges: [] };
+    }
+    const snapshot = await resolveCatalogSnapshot();
+    if (!Object.keys(snapshot).length) {
+      return { inactive: [], priceChanges: [] };
+    }
+
+    const inactive: string[] = [];
+    const priceChanges: Array<{ id: string; name: string; previous: number; next: number }> = [];
+
+    for (const item of cart) {
+      const entry = snapshot[item.id];
+      if (!entry) {
+        inactive.push(item.name);
+        continue;
       }
-      return acc;
-    }, []);
-    return Array.from(new Set(flagged));
+      if (!entry.active) {
+        inactive.push(item.name);
+      }
+      if (Math.abs(entry.price - item.price) > 0.0001) {
+        priceChanges.push({ id: item.id, name: item.name, previous: item.price, next: entry.price });
+      }
+    }
+
+    return {
+      inactive: Array.from(new Set(inactive)),
+      priceChanges,
+    };
   }, [cart, resolveCatalogSnapshot]);
 
   const handleCardChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -155,14 +196,24 @@ export default function CheckoutPage() {
     setIsProcessing(true);
 
     try {
-      const inactiveItems = await detectInactiveItems();
-      if (inactiveItems.length > 0) {
-        const detail = inactiveItems.join(', ');
-        const message = `Inactive items detected: ${detail}. Manager override assumed; proceeding with locked pricing.`;
-        console.warn(message);
-        if (typeof window !== 'undefined' && typeof window.alert === 'function') {
-          window.alert(message);
-        }
+      const { inactive, priceChanges } = await detectCatalogIssues();
+      if (inactive.length > 0) {
+        const detail = inactive.join(', ');
+        setSubmissionError(`Inactive items detected: ${detail}. Remove or replace these items before completing checkout.`);
+        setIsProcessing(false);
+        setReview(false);
+        return;
+      }
+
+      if (priceChanges.length > 0) {
+        const detail = priceChanges
+          .map(change => `${change.name} (locked ${change.previous.toFixed(2)} vs catalog ${change.next.toFixed(2)})`)
+          .join(', ');
+        console.warn(`Catalog pricing updated for: ${detail}`);
+        setSubmissionError(`Catalog pricing updated for: ${detail}. Locked cart prices remain in effect - review and submit again when ready.`);
+        setIsProcessing(false);
+        setReview(false);
+        return;
       }
 
       const orderItems = cart.map(item => ({

@@ -25,13 +25,35 @@ interface AuthContextValue {
 
 const SESSION_STORAGE_KEY = 'admin-portal-session';
 const SESSION_MAX_AGE_MS = 8 * 60 * 60 * 1000;
-const AUTH_SERVICE_URL = (import.meta.env.VITE_AUTH_SERVICE_URL ?? 'http://localhost:8085').replace(/\/$/, '');
+
+const resolveBaseUrl = (raw: string | undefined, fallback: string): string => {
+  const candidate = typeof raw === 'string' && raw.trim().length > 0 ? raw : fallback;
+  return candidate.replace(/\/$/, '');
+};
+
+type EnvRecord = Record<string, string | undefined>;
+const { VITE_AUTH_SERVICE_URL } = (import.meta.env ?? {}) as EnvRecord;
+const AUTH_SERVICE_URL = resolveBaseUrl(VITE_AUTH_SERVICE_URL, 'http://localhost:8085');
 const LOGIN_ENDPOINT = `${AUTH_SERVICE_URL}/login`;
 
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
 
 const isBrowser = typeof window !== 'undefined';
-const getStorage = () => (isBrowser ? window.localStorage : null);
+const getStorage = (): Storage | null => (isBrowser ? window.localStorage : null);
+
+const isAuthUser = (value: unknown): value is AuthUser => {
+  return typeof value === 'object' && value !== null;
+};
+
+const isStoredSessionRecord = (value: unknown): value is StoredSession => {
+  if (typeof value !== 'object' || value === null) return false;
+  const candidate = value as Record<string, unknown>;
+  return (
+    typeof candidate.token === 'string' &&
+    typeof candidate.timestamp === 'number' &&
+    isAuthUser(candidate.user)
+  );
+};
 
 const isSessionFresh = (session: StoredSession | null): session is StoredSession => {
   if (!session) return false;
@@ -40,21 +62,28 @@ const isSessionFresh = (session: StoredSession | null): session is StoredSession
   return age < SESSION_MAX_AGE_MS;
 };
 
-const readStoredSession = (): StoredSession | null => {
-  const storage = getStorage();
-  if (!storage) return null;
-  const raw = storage.getItem(SESSION_STORAGE_KEY);
-  if (!raw) return null;
+const parseStoredSession = (raw: string): StoredSession | null => {
   try {
-    const parsed: StoredSession = JSON.parse(raw);
-    if (isSessionFresh(parsed)) {
+    const parsed = JSON.parse(raw) as unknown;
+    if (isStoredSessionRecord(parsed) && isSessionFresh(parsed)) {
       return parsed;
     }
   } catch (err) {
     console.warn('Unable to parse stored session', err);
   }
-  storage.removeItem(SESSION_STORAGE_KEY);
   return null;
+};
+
+const readStoredSession = (): StoredSession | null => {
+  const storage = getStorage();
+  if (!storage) return null;
+  const raw = storage.getItem(SESSION_STORAGE_KEY);
+  if (!raw) return null;
+  const parsed = parseStoredSession(raw);
+  if (!parsed) {
+    storage.removeItem(SESSION_STORAGE_KEY);
+  }
+  return parsed;
 };
 
 const persistSession = (session: StoredSession | null) => {
@@ -71,6 +100,12 @@ interface LoginResponse {
   token: string;
   user: AuthUser;
 }
+
+const isLoginResponse = (value: unknown): value is LoginResponse => {
+  if (typeof value !== 'object' || value === null) return false;
+  const candidate = value as Record<string, unknown>;
+  return typeof candidate.token === 'string' && isAuthUser(candidate.user);
+};
 
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [session, setSession] = useState<StoredSession | null>(() => readStoredSession());
@@ -98,8 +133,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         return false;
       }
 
-      const data: LoginResponse = await response.json();
-      if (!data?.token || !data?.user) {
+      const data = (await response.json()) as unknown;
+      if (!isLoginResponse(data)) {
         setLoginError('Invalid response from authentication service.');
         return false;
       }
@@ -140,6 +175,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   return <AuthContext.Provider value={contextValue}>{children}</AuthContext.Provider>;
 };
 
+// eslint-disable-next-line react-refresh/only-export-components
 export const useAuth = () => {
   const ctx = useContext(AuthContext);
   if (!ctx) throw new Error('useAuth must be used within an AuthProvider');

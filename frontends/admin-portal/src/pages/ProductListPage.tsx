@@ -1,9 +1,10 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../AuthContext';
+import { resolveServiceUrl } from '../utils/env';
 import './AdminSectionModern.css';
 
-const PRODUCT_SERVICE_URL = (import.meta.env.VITE_PRODUCT_SERVICE_URL ?? 'http://localhost:8081').replace(/\/$/, '');
+const PRODUCT_SERVICE_URL = resolveServiceUrl('VITE_PRODUCT_SERVICE_URL', 'http://localhost:8081');
 
 type ServiceProduct = {
   id: string;
@@ -21,9 +22,11 @@ type ProductFormState = {
 
 type EditFormState = ProductFormState & { active: boolean };
 
+type ProductJson = Record<string, unknown>;
+
 const normalizeProduct = (input: unknown): ServiceProduct | null => {
   if (!input || typeof input !== 'object') return null;
-  const candidate = input as Record<string, unknown>;
+  const candidate = input as ProductJson;
   const id = candidate.id;
   const name = candidate.name;
   const priceRaw = candidate.price;
@@ -50,11 +53,12 @@ const ProductListPage: React.FC = () => {
   const [isLoading, setIsLoading] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [updatingProductId, setUpdatingProductId] = useState<string | null>(null);
+  const [deletingProductId, setDeletingProductId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!isLoggedIn) navigate('/login', { replace: true });
+    if (!isLoggedIn) void navigate('/login', { replace: true });
   }, [isLoggedIn, navigate]);
 
   const tenantId = currentUser?.tenant_id ? String(currentUser.tenant_id) : null;
@@ -75,7 +79,7 @@ const ProductListPage: React.FC = () => {
     return true;
   }, [tenantId]);
 
-  const fetchProducts = useCallback(async () => {
+  const fetchProducts = useCallback(async (): Promise<void> => {
     if (!ensureTenantContext()) return;
     setIsLoading(true);
     setError(null);
@@ -86,7 +90,7 @@ const ProductListPage: React.FC = () => {
       if (!response.ok) {
         throw new Error(`Failed to fetch products (${response.status})`);
       }
-      const data = await response.json();
+      const data = (await response.json()) as unknown;
       const normalized = Array.isArray(data)
         ? data.map(normalizeProduct).filter((item): item is ServiceProduct => Boolean(item))
         : [];
@@ -100,7 +104,7 @@ const ProductListPage: React.FC = () => {
   }, [buildHeaders, ensureTenantContext]);
 
   useEffect(() => {
-    fetchProducts();
+    void fetchProducts();
   }, [fetchProducts]);
 
   const resetEditState = () => {
@@ -108,8 +112,8 @@ const ProductListPage: React.FC = () => {
     setEditForm({ name: '', price: '', description: '', active: true });
   };
 
-  const handleAddProduct = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleAddProduct = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
     setError(null);
     setSuccessMessage(null);
 
@@ -143,7 +147,8 @@ const ProductListPage: React.FC = () => {
       if (!response.ok) {
         throw new Error(`Failed to add product (${response.status})`);
       }
-      const created = normalizeProduct(await response.json());
+      const payload = (await response.json()) as unknown;
+      const created = normalizeProduct(payload);
       if (created) {
         setProducts(prev => [...prev, created]);
       }
@@ -169,7 +174,7 @@ const ProductListPage: React.FC = () => {
     });
   };
 
-  const handleSaveEdit = async () => {
+  const handleSaveEdit = async (): Promise<void> => {
     if (!editingProductId) return;
     if (!ensureTenantContext()) return;
 
@@ -204,7 +209,8 @@ const ProductListPage: React.FC = () => {
       if (!response.ok) {
         throw new Error(`Failed to update product (${response.status})`);
       }
-      const updated = normalizeProduct(await response.json());
+      const payload = (await response.json()) as unknown;
+      const updated = normalizeProduct(payload);
       if (updated) {
         setProducts(prev => prev.map(prod => (prod.id === updated.id ? updated : prod)));
       }
@@ -218,7 +224,7 @@ const ProductListPage: React.FC = () => {
     }
   };
 
-  const handleToggleActive = async (product: ServiceProduct) => {
+  const handleToggleActive = async (product: ServiceProduct): Promise<void> => {
     if (!ensureTenantContext()) return;
     setError(null);
     setSuccessMessage(null);
@@ -240,7 +246,8 @@ const ProductListPage: React.FC = () => {
       if (!response.ok) {
         throw new Error(`Failed to update product (${response.status})`);
       }
-      const updated = normalizeProduct(await response.json());
+      const payload = (await response.json()) as unknown;
+      const updated = normalizeProduct(payload);
       if (updated) {
         setProducts(prev => prev.map(prod => (prod.id === updated.id ? updated : prod)));
       }
@@ -253,217 +260,268 @@ const ProductListPage: React.FC = () => {
     }
   };
 
+  const handleDeleteProduct = async (product: ServiceProduct): Promise<void> => {
+    if (!ensureTenantContext()) return;
+
+    const confirmed = typeof window === 'undefined'
+      ? true
+      : window.confirm(`Delete "${product.name}"? This action cannot be undone.`);
+    if (!confirmed) return;
+
+    setError(null);
+    setSuccessMessage(null);
+    setDeletingProductId(product.id);
+    try {
+      const headers = buildHeaders();
+      const response = await fetch(`${PRODUCT_SERVICE_URL}/products/${product.id}`, {
+        method: 'DELETE',
+        headers,
+      });
+
+      if (response.status === 204) {
+        setProducts(prev => prev.filter(item => item.id !== product.id));
+        if (editingProductId === product.id) {
+          resetEditState();
+        }
+        setSuccessMessage('Product deleted successfully.');
+      } else if (response.status === 404) {
+        setError('Product not found or already removed.');
+      } else {
+        const detail = await response.text();
+        throw new Error(detail || 'Delete failed');
+      }
+    } catch (err) {
+      console.error('Unable to delete product', err);
+      setError('Unable to delete product. Please try again.');
+    } finally {
+      setDeletingProductId(null);
+    }
+  };
   const handleRefresh = () => {
     setSuccessMessage(null);
     setError(null);
-    fetchProducts();
+    void fetchProducts();
   };
 
-  const sortedProducts = useMemo(() => [...products].sort((a, b) => a.name.localeCompare(b.name)), [products]);
+  const sortedProducts = useMemo(() => {
+    return [...products].sort((a, b) => a.name.localeCompare(b.name));
+  }, [products]);
 
   return (
-    <div className="min-h-screen bg-gray-100 dark:bg-gray-900 flex flex-col" style={{ fontFamily: 'Raleway, sans-serif', background: 'linear-gradient(135deg, #f8fafc 0%, #e6f7fa 100%)' }}>
+    <div className="min-h-screen bg-gray-100 dark:bg-gray-900 flex flex-col">
       <div className="admin-section-modern">
         <div className="admin-section-header">
           <h2>Products</h2>
-          <p>Manage your product catalog and pricing.</p>
+          <p>Manage your catalog for this tenant.</p>
         </div>
+
         <div className="admin-section-content">
-          <h2 className="text-2xl font-semibold mb-4 text-gray-800 dark:text-gray-100">Product Management</h2>
-          {error && <div className="mb-4 rounded bg-red-100 text-red-700 px-4 py-2">{error}</div>}
-          {successMessage && <div className="mb-4 rounded bg-emerald-100 text-emerald-700 px-4 py-2">{successMessage}</div>}
-          {!tenantId && (
-            <div className="mb-4 rounded bg-yellow-100 text-yellow-700 px-4 py-2">
-              Tenant information is missing. Log out and sign back in as a tenant user.
-            </div>
+          {error && (
+            <div className="rounded bg-red-100 text-red-800 px-4 py-3 mb-4">{error}</div>
           )}
-          <form onSubmit={handleAddProduct} className="mb-6 p-4 bg-white dark:bg-gray-800 rounded shadow max-w-lg">
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <div>
-                <label className="block text-gray-700 dark:text-gray-200 mb-1" htmlFor="product-name">Product Name</label>
+          {successMessage && (
+            <div className="rounded bg-green-100 text-green-800 px-4 py-3 mb-4">{successMessage}</div>
+          )}
+
+          <section className="rounded-lg bg-white dark:bg-gray-800 p-6 shadow">
+            <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Add New Product</h3>
+            <form className="mt-4 grid gap-4 md:grid-cols-2" onSubmit={event => { void handleAddProduct(event); }}>
+              <div className="flex flex-col">
+                <label className="text-sm font-medium text-gray-600 dark:text-gray-300">Product Name</label>
                 <input
-                  id="product-name"
                   type="text"
                   value={newProduct.name}
-                  onChange={e => setNewProduct({ ...newProduct, name: e.target.value })}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-md text-gray-900 focus:outline-none focus:ring-2 focus:ring-primary focus:border-primary"
-                  placeholder="Name"
+                  onChange={event => setNewProduct(prev => ({ ...prev, name: event.target.value }))}
+                  className="mt-1 rounded-md border border-gray-300 px-3 py-2 text-gray-900 focus:outline-none focus:ring-2 focus:ring-primary focus:border-primary"
+                  placeholder="Deluxe Latte"
                   required
-                  disabled={isSubmitting}
                 />
               </div>
-              <div>
-                <label className="block text-gray-700 dark:text-gray-200 mb-1" htmlFor="product-price">Price ($)</label>
+              <div className="flex flex-col">
+                <label className="text-sm font-medium text-gray-600 dark:text-gray-300">Price</label>
                 <input
-                  id="product-price"
                   type="number"
-                  step="0.01"
                   value={newProduct.price}
-                  onChange={e => setNewProduct({ ...newProduct, price: e.target.value })}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-md text-gray-900 focus:outline-none focus:ring-2 focus:ring-primary focus:border-primary"
-                  placeholder="Price"
-                  required
                   min="0"
-                  disabled={isSubmitting}
+                  step="0.01"
+                  onChange={event => setNewProduct(prev => ({ ...prev, price: event.target.value }))}
+                  className="mt-1 rounded-md border border-gray-300 px-3 py-2 text-gray-900 focus:outline-none focus:ring-2 focus:ring-primary focus:border-primary"
+                  placeholder="9.99"
+                  required
                 />
               </div>
-            </div>
-            <div className="mt-4">
-              <label className="block text-gray-700 dark:text-gray-200 mb-1" htmlFor="product-description">Description</label>
-              <textarea
-                id="product-description"
-                value={newProduct.description}
-                onChange={e => setNewProduct({ ...newProduct, description: e.target.value })}
-                className="w-full px-3 py-2 border border-gray-300 rounded-md text-gray-900 focus:outline-none focus:ring-2 focus:ring-primary focus:border-primary"
-                placeholder="Short description"
-                rows={3}
-                disabled={isSubmitting}
-              />
-            </div>
-            <button
-              type="submit"
-              className="mt-4 px-4 py-2 rounded-md text-white"
-              style={{ background: '#19b4b9' }}
-              onMouseOver={e => (e.currentTarget.style.background = '#153a5b')}
-              onMouseOut={e => (e.currentTarget.style.background = '#19b4b9')}
-              disabled={isSubmitting || !tenantId}
-            >
-              {isSubmitting ? 'Adding...' : 'Add Product'}
-            </button>
-          </form>
+              <div className="md:col-span-2 flex flex-col">
+                <label className="text-sm font-medium text-gray-600 dark:text-gray-300">Description</label>
+                <textarea
+                  value={newProduct.description}
+                  onChange={event => setNewProduct(prev => ({ ...prev, description: event.target.value }))}
+                  className="mt-1 rounded-md border border-gray-300 px-3 py-2 text-gray-900 focus:outline-none focus:ring-2 focus:ring-primary focus:border-primary"
+                  rows={3}
+                  placeholder="Describe the product"
+                />
+              </div>
+              <div className="md:col-span-2 flex justify-end gap-2">
+                <button
+                  type="button"
+                  className="px-4 py-2 rounded bg-gray-200 text-gray-800 dark:bg-gray-700 dark:text-gray-200"
+                  onClick={() => setNewProduct({ name: '', price: '', description: '' })}
+                  disabled={isSubmitting}
+                >
+                  Clear
+                </button>
+                <button
+                  type="submit"
+                  className="px-4 py-2 rounded text-white"
+                  style={{ background: '#19b4b9' }}
+                  onMouseOver={event => (event.currentTarget.style.background = '#153a5b')}
+                  onMouseOut={event => (event.currentTarget.style.background = '#19b4b9')}
+                  disabled={isSubmitting}
+                >
+                  {isSubmitting ? 'Adding...' : 'Add Product'}
+                </button>
+              </div>
+            </form>
+          </section>
 
-          <div className="overflow-x-auto max-w-4xl">
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-sm text-gray-600 dark:text-gray-300">{isLoading ? 'Loading products...' : `${products.length} product${products.length === 1 ? '' : 's'}`}</span>
-              <button
-                type="button"
-                className="text-sm text-primary hover:underline"
-                onClick={handleRefresh}
-                disabled={isLoading}
-              >
-                Refresh
+          <section className="rounded-lg bg-white dark:bg-gray-800 p-6 shadow mt-6">
+            <div className="flex items-center justify-between">
+              <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Current Products</h3>
+              <button className="admin-section-btn" type="button" onClick={handleRefresh} disabled={isLoading}>
+                {isLoading ? 'Refreshing...' : 'Refresh List'}
               </button>
             </div>
-            <table className="min-w-full bg-white dark:bg-gray-800 rounded shadow">
-              <thead className="bg-gray-200 dark:bg-gray-700">
-                <tr>
-                  <th className="text-left px-4 py-2 text-gray-800 dark:text-gray-100">Product Name</th>
-                  <th className="text-left px-4 py-2 text-gray-800 dark:text-gray-100">Price ($)</th>
-                  <th className="text-left px-4 py-2 text-gray-800 dark:text-gray-100">Status</th>
-                  <th className="text-left px-4 py-2 text-gray-800 dark:text-gray-100">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {sortedProducts.map(prod => (
-                  editingProductId === prod.id ? (
-                    <tr key={prod.id} className="border-b border-gray-200 dark:border-gray-700 bg-slate-50 dark:bg-gray-900/60">
-                      <td className="px-4 py-2 text-gray-900 dark:text-gray-100">
-                        <input
-                          type="text"
-                          value={editForm.name}
-                          onChange={e => setEditForm(prev => ({ ...prev, name: e.target.value }))}
-                          className="w-full px-3 py-2 border border-gray-300 rounded-md text-gray-900 focus:outline-none focus:ring-2 focus:ring-primary focus:border-primary"
-                          required
-                        />
-                        <textarea
-                          value={editForm.description}
-                          onChange={e => setEditForm(prev => ({ ...prev, description: e.target.value }))}
-                          className="w-full mt-2 px-3 py-2 border border-gray-300 rounded-md text-gray-900 focus:outline-none focus:ring-2 focus:ring-primary focus:border-primary"
-                          rows={2}
-                          placeholder="Description"
-                        />
-                      </td>
-                      <td className="px-4 py-2 text-gray-900 dark:text-gray-100">
-                        <input
-                          type="number"
-                          step="0.01"
-                          value={editForm.price}
-                          onChange={e => setEditForm(prev => ({ ...prev, price: e.target.value }))}
-                          className="w-32 px-3 py-2 border border-gray-300 rounded-md text-gray-900 focus:outline-none focus:ring-2 focus:ring-primary focus:border-primary"
-                          required
-                          min="0"
-                        />
-                      </td>
-                      <td className="px-4 py-2 text-gray-900 dark:text-gray-100">
-                        <label className="flex items-center gap-2 text-sm">
-                          <input
-                            type="checkbox"
-                            checked={editForm.active}
-                            onChange={e => setEditForm(prev => ({ ...prev, active: e.target.checked }))}
-                          />
-                          <span>{editForm.active ? 'Active' : 'Inactive'}</span>
-                        </label>
-                      </td>
-                      <td className="px-4 py-2 text-gray-900 dark:text-gray-100">
-                        <div className="flex gap-2">
-                          <button
-                            type="button"
-                            className="px-3 py-2 rounded bg-gray-200 dark:bg-gray-700 text-gray-800 dark:text-gray-100"
-                            onClick={resetEditState}
-                            disabled={updatingProductId === prod.id}
-                          >
-                            Cancel
-                          </button>
-                          <button
-                            type="button"
-                            className="px-3 py-2 rounded text-white"
-                            style={{ background: '#19b4b9' }}
-                            onMouseOver={e => (e.currentTarget.style.background = '#153a5b')}
-                            onMouseOut={e => (e.currentTarget.style.background = '#19b4b9')}
-                            onClick={handleSaveEdit}
-                            disabled={updatingProductId === prod.id}
-                          >
-                            {updatingProductId === prod.id ? 'Saving...' : 'Save'}
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  ) : (
-                    <tr key={prod.id} className="border-b border-gray-200 dark:border-gray-700">
-                      <td className="px-4 py-2 text-gray-900 dark:text-gray-100">
-                        <div className="font-semibold">{prod.name}</div>
-                        {prod.description && <div className="text-sm text-gray-500 dark:text-gray-400">{prod.description}</div>}
-                      </td>
-                      <td className="px-4 py-2 text-gray-900 dark:text-gray-100">${prod.price.toFixed(2)}</td>
-                      <td className="px-4 py-2 text-gray-900 dark:text-gray-100">
-                        <span className={`inline-flex items-center rounded-full px-3 py-1 text-xs font-semibold ${prod.active ? 'bg-emerald-100 text-emerald-700' : 'bg-gray-300 text-gray-700'}`}>
-                          {prod.active ? 'Active' : 'Inactive'}
-                        </span>
-                      </td>
-                      <td className="px-4 py-2 text-gray-900 dark:text-gray-100">
-                        <div className="flex gap-2">
-                          <button
-                            type="button"
-                            className="px-3 py-2 rounded bg-gray-200 dark:bg-gray-700 text-gray-800 dark:text-gray-100"
-                            onClick={() => handleStartEdit(prod)}
-                            disabled={updatingProductId === prod.id}
-                          >
-                            Edit
-                          </button>
-                          <button
-                            type="button"
-                            className={`px-3 py-2 rounded text-white ${prod.active ? 'bg-red-500 hover:bg-red-600' : 'bg-emerald-500 hover:bg-emerald-600'}`}
-                            onClick={() => handleToggleActive(prod)}
-                            disabled={updatingProductId === prod.id}
-                          >
-                            {updatingProductId === prod.id ? 'Updating...' : prod.active ? 'Deactivate' : 'Activate'}
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  )
-                ))}
-                {!isLoading && sortedProducts.length === 0 && (
+
+            <div className="mt-4 overflow-x-auto">
+              <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+                <thead className="bg-gray-50 dark:bg-gray-700">
                   <tr>
-                    <td colSpan={4} className="px-4 py-2 text-center text-gray-500">No products available.</td>
+                    <th className="px-4 py-2 text-left text-xs font-semibold uppercase tracking-wider text-gray-600 dark:text-gray-300">Product</th>
+                    <th className="px-4 py-2 text-left text-xs font-semibold uppercase tracking-wider text-gray-600 dark:text-gray-300">Price</th>
+                    <th className="px-4 py-2 text-left text-xs font-semibold uppercase tracking-wider text-gray-600 dark:text-gray-300">Status</th>
+                    <th className="px-4 py-2 text-left text-xs font-semibold uppercase tracking-wider text-gray-600 dark:text-gray-300">Actions</th>
                   </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
+                </thead>
+                <tbody className="divide-y divide-gray-200 dark:divide-gray-700">
+                  {sortedProducts.map(prod => (
+                    editingProductId === prod.id ? (
+                      <tr key={prod.id} className="bg-gray-50 dark:bg-gray-900">
+                        <td className="px-4 py-2 text-gray-900 dark:text-gray-100">
+                          <input
+                            value={editForm.name}
+                            onChange={event => setEditForm(prev => ({ ...prev, name: event.target.value }))}
+                            className="w-full px-3 py-2 border border-gray-300 rounded-md text-gray-900 focus:outline-none focus:ring-2 focus:ring-primary focus:border-primary"
+                            required
+                          />
+                          <textarea
+                            value={editForm.description}
+                            onChange={event => setEditForm(prev => ({ ...prev, description: event.target.value }))}
+                            className="w-full mt-2 px-3 py-2 border border-gray-300 rounded-md text-gray-900 focus:outline-none focus:ring-2 focus:ring-primary focus:border-primary"
+                            rows={2}
+                            placeholder="Description"
+                          />
+                        </td>
+                        <td className="px-4 py-2 text-gray-900 dark:text-gray-100">
+                          <input
+                            type="number"
+                            step="0.01"
+                            value={editForm.price}
+                            onChange={event => setEditForm(prev => ({ ...prev, price: event.target.value }))}
+                            className="w-32 px-3 py-2 border border-gray-300 rounded-md text-gray-900 focus:outline-none focus:ring-2 focus:ring-primary focus:border-primary"
+                            required
+                            min="0"
+                          />
+                        </td>
+                        <td className="px-4 py-2 text-gray-900 dark:text-gray-100">
+                          <label className="flex items-center gap-2 text-sm">
+                            <input
+                              type="checkbox"
+                              checked={editForm.active}
+                              onChange={event => setEditForm(prev => ({ ...prev, active: event.target.checked }))}
+                            />
+                            <span>{editForm.active ? 'Active' : 'Inactive'}</span>
+                          </label>
+                        </td>
+                        <td className="px-4 py-2 text-gray-900 dark:text-gray-100">
+                          <div className="flex gap-2">
+                            <button
+                              type="button"
+                              className="px-3 py-2 rounded bg-gray-200 dark:bg-gray-700 text-gray-800 dark:text-gray-100"
+                              onClick={resetEditState}
+                              disabled={updatingProductId === prod.id || deletingProductId === prod.id}
+                            >
+                              Cancel
+                            </button>
+                            <button
+                              type="button"
+                              className="px-3 py-2 rounded text-white"
+                              style={{ background: '#19b4b9' }}
+                              onMouseOver={event => (event.currentTarget.style.background = '#153a5b')}
+                              onMouseOut={event => (event.currentTarget.style.background = '#19b4b9')}
+                              onClick={() => void handleSaveEdit()}
+                              disabled={updatingProductId === prod.id || deletingProductId === prod.id}
+                            >
+                              {updatingProductId === prod.id ? 'Saving...' : 'Save'}
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    ) : (
+                      <tr key={prod.id} className="border-b border-gray-200 dark:border-gray-700">
+                        <td className="px-4 py-2 text-gray-900 dark:text-gray-100">
+                          <div className="font-semibold">{prod.name}</div>
+                          {prod.description && <div className="text-sm text-gray-500 dark:text-gray-400">{prod.description}</div>}
+                        </td>
+                        <td className="px-4 py-2 text-gray-900 dark:text-gray-100">${prod.price.toFixed(2)}</td>
+                        <td className="px-4 py-2 text-gray-900 dark:text-gray-100">
+                          <span className={`inline-flex items-center rounded-full px-3 py-1 text-xs font-semibold ${prod.active ? 'bg-emerald-100 text-emerald-700' : 'bg-gray-300 text-gray-700'}`}>
+                            {prod.active ? 'Active' : 'Inactive'}
+                          </span>
+                        </td>
+                        <td className="px-4 py-2 text-gray-900 dark:text-gray-100">
+                          <div className="flex gap-2">
+                            <button
+                              type="button"
+                              className="px-3 py-2 rounded bg-gray-200 dark:bg-gray-700 text-gray-800 dark:text-gray-100"
+                              onClick={() => handleStartEdit(prod)}
+                              disabled={updatingProductId === prod.id || deletingProductId === prod.id}
+                            >
+                              Edit
+                            </button>
+                            <button
+                              type="button"
+                              className={`px-3 py-2 rounded text-white ${prod.active ? 'bg-red-500 hover:bg-red-600' : 'bg-emerald-500 hover:bg-emerald-600'}`}
+                              onClick={() => void handleToggleActive(prod)}
+                              disabled={updatingProductId === prod.id || deletingProductId === prod.id}
+                            >
+                              {updatingProductId === prod.id ? 'Updating...' : prod.active ? 'Deactivate' : 'Activate'}
+                            </button>
+                            <button
+                              type="button"
+                              className="px-3 py-2 rounded bg-red-600 text-white hover:bg-red-700"
+                              onClick={() => void handleDeleteProduct(prod)}
+                              disabled={deletingProductId === prod.id || updatingProductId === prod.id}
+                            >
+                              {deletingProductId === prod.id ? 'Deleting...' : 'Delete'}
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    )
+                  ))}
+                  {!isLoading && sortedProducts.length === 0 && (
+                    <tr>
+                      <td colSpan={4} className="px-4 py-2 text-center text-gray-500">No products available.</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </section>
         </div>
         <div style={{ textAlign: 'right', marginTop: '2rem' }}>
-          <button className="admin-section-btn" onClick={() => navigate('/home')}>Back to Admin Home</button>
+          <button className="admin-section-btn" onClick={() => void navigate('/home')} type="button">
+            Back to Admin Home
+          </button>
         </div>
       </div>
     </div>
@@ -471,6 +529,3 @@ const ProductListPage: React.FC = () => {
 };
 
 export default ProductListPage;
-
-
-

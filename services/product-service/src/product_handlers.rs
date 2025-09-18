@@ -6,7 +6,7 @@ use axum::{
 };
 use rdkafka::producer::FutureRecord;
 use serde::{Deserialize, Serialize};
-use sqlx::query_as;
+use sqlx::{query, query_as};
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -170,4 +170,54 @@ pub async fn list_products(
         )
     })?;
     Ok(Json(products))
+}
+
+pub async fn delete_product(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(product_id): axum::extract::Path<Uuid>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let tenant_id = if let Some(hdr) = headers.get("X-Tenant-ID") {
+        match hdr.to_str().ok().and_then(|s| Uuid::parse_str(s).ok()) {
+            Some(id) => id,
+            None => return Err((StatusCode::BAD_REQUEST, "Invalid X-Tenant-ID header".into())),
+        }
+    } else {
+        return Err((StatusCode::BAD_REQUEST, "Missing X-Tenant-ID header".into()));
+    };
+
+    let result = query("DELETE FROM products WHERE id = $1 AND tenant_id = $2")
+        .bind(product_id)
+        .bind(tenant_id)
+        .execute(&state.db)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Database error: {}", e),
+            )
+        })?;
+
+    if result.rows_affected() == 0 {
+        return Err((StatusCode::NOT_FOUND, "Product not found".into()));
+    }
+
+    let event = serde_json::json!({
+        "product_id": product_id,
+        "tenant_id": tenant_id,
+    });
+    if let Err(err) = state
+        .kafka_producer
+        .send(
+            FutureRecord::to("product.deleted")
+                .payload(&event.to_string())
+                .key(&tenant_id.to_string()),
+            Duration::from_secs(0),
+        )
+        .await
+    {
+        tracing::error!("Failed to publish product.deleted event: {:?}", err);
+    }
+
+    Ok(StatusCode::NO_CONTENT)
 }

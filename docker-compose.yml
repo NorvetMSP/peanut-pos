@@ -152,9 +152,12 @@ services:
       context: .
       dockerfile: services/integration-gateway/Dockerfile
     environment:
+      - DATABASE_URL=postgres://novapos:novapos@postgres:5432/novapos
       - KAFKA_BOOTSTRAP=kafka:9092
       - PAYMENT_SERVICE_URL=http://payment-service:8086
       - ORDER_SERVICE_URL=http://order-service:8084
+      # Optional: adjust refresh cadence for API key cache (defaults to 60s)
+      - KEY_REFRESH_SECONDS=60
       # Uncomment and set if testing Coinbase integration:
       # - COINBASE_COMMERCE_API_KEY=
       # - COINBASE_WEBHOOK_SECRET=
@@ -179,3 +182,6 @@ services:
     depends_on: [auth-service]
     ports: ["3001:80"]
     networks: [novanet]
+
+
+

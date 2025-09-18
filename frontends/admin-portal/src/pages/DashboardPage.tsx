@@ -3,8 +3,15 @@ import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../AuthContext';
 import './AdminSectionModern.css';
 
-const ANALYTICS_SERVICE_URL = (import.meta.env.VITE_ANALYTICS_SERVICE_URL ?? 'http://localhost:8082').replace(/\/$/, '');
-const PRODUCT_SERVICE_URL = (import.meta.env.VITE_PRODUCT_SERVICE_URL ?? 'http://localhost:8081').replace(/\/$/, '');
+const resolveBaseUrl = (raw: string | undefined, fallback: string): string => {
+  const candidate = typeof raw === 'string' && raw.trim().length > 0 ? raw : fallback;
+  return candidate.replace(/\/$/, '');
+};
+
+type EnvRecord = Record<string, string | undefined>;
+const { VITE_ANALYTICS_SERVICE_URL, VITE_PRODUCT_SERVICE_URL } = (import.meta.env ?? {}) as EnvRecord;
+const ANALYTICS_SERVICE_URL = resolveBaseUrl(VITE_ANALYTICS_SERVICE_URL, 'http://localhost:8082');
+const PRODUCT_SERVICE_URL = resolveBaseUrl(VITE_PRODUCT_SERVICE_URL, 'http://localhost:8081');
 
 type SummaryResponse = {
   today_orders: number;
@@ -13,6 +20,24 @@ type SummaryResponse = {
 };
 
 type ProductNameMap = Record<string, string>;
+
+type SummaryJson = Record<string, unknown> & {
+  today_orders?: unknown;
+  today_revenue?: unknown;
+  top_items?: unknown;
+};
+
+type ProductJson = Record<string, unknown>;
+
+const isSummaryResponse = (value: unknown): value is SummaryResponse => {
+  if (typeof value !== 'object' || value === null) return false;
+  const candidate = value as SummaryJson;
+  return (
+    typeof candidate.today_orders === 'number' &&
+    typeof candidate.today_revenue === 'number' &&
+    Array.isArray(candidate.top_items)
+  );
+};
 
 const DashboardPage: React.FC = () => {
   const { isLoggedIn, currentUser, token } = useAuth();
@@ -26,7 +51,7 @@ const DashboardPage: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!isLoggedIn) navigate('/login', { replace: true });
+    if (!isLoggedIn) void navigate('/login', { replace: true });
   }, [isLoggedIn, navigate]);
 
   const tenantId = currentUser?.tenant_id ? String(currentUser.tenant_id) : null;
@@ -56,7 +81,11 @@ const DashboardPage: React.FC = () => {
     if (!response.ok) {
       throw new Error(`Summary request failed (${response.status})`);
     }
-    return response.json();
+    const payload = (await response.json()) as unknown;
+    if (!isSummaryResponse(payload)) {
+      throw new Error('Summary response malformed');
+    }
+    return payload;
   }, []);
 
   const fetchAnomalies = useCallback(async (headers: Record<string, string>): Promise<string[]> => {
@@ -66,7 +95,7 @@ const DashboardPage: React.FC = () => {
     if (!response.ok) {
       throw new Error(`Anomaly request failed (${response.status})`);
     }
-    const data = await response.json();
+    const data = (await response.json()) as unknown;
     if (!Array.isArray(data)) return [];
     return data.filter((entry): entry is string => typeof entry === 'string');
   }, []);
@@ -78,12 +107,12 @@ const DashboardPage: React.FC = () => {
     if (!response.ok) {
       throw new Error(`Products request failed (${response.status})`);
     }
-    const data = await response.json();
+    const data = (await response.json()) as unknown;
     if (!Array.isArray(data)) return {};
     const map: ProductNameMap = {};
     for (const entry of data) {
-      if (!entry || typeof entry !== 'object') continue;
-      const candidate = entry as Record<string, unknown>;
+      if (typeof entry !== 'object' || entry === null) continue;
+      const candidate = entry as ProductJson;
       const id = typeof candidate.id === 'string' ? candidate.id : null;
       const name = typeof candidate.name === 'string' ? candidate.name : null;
       if (id && name) map[id] = name;
@@ -149,7 +178,7 @@ const DashboardPage: React.FC = () => {
   );
 
   useEffect(() => {
-    loadData({ initial: true });
+    void loadData({ initial: true });
   }, [loadData]);
 
   const topItems = useMemo(() => summary?.top_items ?? [], [summary]);
@@ -163,18 +192,18 @@ const DashboardPage: React.FC = () => {
         <div className="admin-section-header">
           <div>
             <h2>Dashboard</h2>
-            <p>Today’s performance and key alerts.</p>
+            <p>Today's performance and key alerts.</p>
           </div>
           <div className="flex items-center gap-2">
             <button
               type="button"
               className="admin-section-btn"
-              onClick={() => loadData()}
+              onClick={() => void loadData()}
               disabled={isLoading || isRefreshing}
             >
               {isRefreshing ? 'Refreshing...' : 'Refresh'}
             </button>
-            <button className="admin-section-btn" onClick={() => navigate('/home')}>
+            <button className="admin-section-btn" onClick={() => void navigate('/home')} type="button">
               Back to Admin Home
             </button>
           </div>
@@ -193,11 +222,11 @@ const DashboardPage: React.FC = () => {
             <div className="grid gap-6">
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div className="rounded-lg bg-white dark:bg-gray-800 p-6 shadow">
-                  <h3 className="text-sm font-semibold text-gray-500 dark:text-gray-300">Today’s Orders</h3>
+                  <h3 className="text-sm font-semibold text-gray-500 dark:text-gray-300">Today's Orders</h3>
                   <p className="mt-2 text-3xl font-bold text-gray-900 dark:text-gray-100">{ordersToday}</p>
                 </div>
                 <div className="rounded-lg bg-white dark:bg-gray-800 p-6 shadow">
-                  <h3 className="text-sm font-semibold text-gray-500 dark:text-gray-300">Today’s Revenue</h3>
+                  <h3 className="text-sm font-semibold text-gray-500 dark:text-gray-300">Today's Revenue</h3>
                   <p className="mt-2 text-3xl font-bold text-gray-900 dark:text-gray-100">
                     ${revenueToday.toFixed(2)}
                   </p>
@@ -206,7 +235,7 @@ const DashboardPage: React.FC = () => {
 
               {showDemoBanner && (
                 <div className="rounded-lg border border-dashed border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 p-4 text-sm text-gray-600 dark:text-gray-300">
-                  Demo mode – no sales recorded today yet.
+                  Demo mode - no sales recorded today yet.
                 </div>
               )}
 
