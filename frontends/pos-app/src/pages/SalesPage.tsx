@@ -335,13 +335,19 @@ const SalesPage: React.FC = () => {
         <div className="flex items-center gap-3">
           <button
             className="px-4 py-2 rounded border border-cyan-500 text-cyan-700 hover:bg-cyan-500 hover:text-white transition-colors"
+            onClick={() => navigate('/pos')}
+          >
+            POS Terminal
+          </button>
+          <button
+            className="px-4 py-2 rounded border border-cyan-500 text-cyan-700 hover:bg-cyan-500 hover:text-white transition-colors"
             onClick={() => navigate('/history')}
           >
-            Orders{queuedOrders.length > 0 ? ` (${queuedOrders.length})` : ''}
+            Orders{queuedOrders.length > 0 ? ` ({queuedOrders.length})` : ''}
           </button>
           <button className="bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600" onClick={() => { logout(); navigate('/login'); }}>Logout</button>
         </div>
-      </header>
+      </header
 
       {!isOnline && (
         <div className="w-full bg-amber-200 text-amber-900 px-6 py-3 text-sm text-center">

@@ -1,9 +1,10 @@
-import { Routes, Route, Navigate } from 'react-router-dom';
+﻿import { Routes, Route, Navigate } from 'react-router-dom';
 import Login from './pages/LoginPage';
 import Sales from './pages/SalesPage';
 import EcommerceTemplate from './pages/EcommerceTemplate';
 import CheckoutPage from './pages/CheckoutPage';
 import OrderHistoryPage from './pages/OrderHistoryPage';
+import CashierPage from './pages/CashierPage';
 import { RequireAuth } from './AuthContext';
 
 function App() {
@@ -40,6 +41,14 @@ function App() {
           element={(
             <RequireAuth>
               <OrderHistoryPage />
+            </RequireAuth>
+          )}
+        />
+        <Route
+          path="/pos"
+          element={(
+            <RequireAuth>
+              <CashierPage />
             </RequireAuth>
           )}
         />

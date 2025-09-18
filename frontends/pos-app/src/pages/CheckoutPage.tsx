@@ -411,6 +411,9 @@ export default function CheckoutPage() {
             )}
             {submissionOutcome.note && <div className="text-xs text-amber-700 mt-2">{submissionOutcome.note}</div>}
             <div className="mt-3 flex flex-wrap justify-center gap-2">
+              <button className="action-btn" onClick={() => navigate('/pos')} style={{ background: '#0f7b7f' }}>
+                Open POS Terminal
+              </button>
               <button className="action-btn" style={{ background: '#153a5b' }} onClick={() => navigate('/history')}>
                 View Orders
               </button>
