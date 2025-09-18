@@ -1,3 +1,61 @@
+#[derive(Serialize)]
+pub struct TopItem {
+    pub product_id: Uuid,
+    pub quantity: i32,
+}
+
+#[derive(Serialize)]
+pub struct Summary {
+    pub today_orders: u64,
+    pub today_revenue: f64,
+    pub top_items: Vec<TopItem>,
+}
+
+pub async fn get_summary(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Summary>, (StatusCode, String)> {
+    let tenant_id = extract_tenant_id(&headers)?;
+    // Query today's aggregate from DB (or use in-memory Stats)
+    let rec = sqlx::query!(
+        "SELECT order_count, total_sales FROM daily_sales \
+         WHERE tenant_id = $1 AND date = CURRENT_DATE",
+        tenant_id
+    )
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("DB query failed: {}", e),
+        )
+    })?;
+    let (order_count, total_sales) = rec
+        .map(|r| (r.order_count as u64, r.total_sales.unwrap_or(0.0)))
+        .unwrap_or((0, 0.0));
+    // Get top 5 products
+    let mut top_items: Vec<TopItem> = Vec::new();
+    if let Some(counts) = state.product_counts.lock().unwrap().get(&tenant_id) {
+        // Collect and sort by quantity desc
+        for (&pid, &qty) in counts.iter() {
+            if qty > 0 {
+                top_items.push(TopItem {
+                    product_id: pid,
+                    quantity: qty,
+                });
+            }
+        }
+        top_items.sort_by(|a, b| b.quantity.cmp(&a.quantity));
+        if top_items.len() > 5 {
+            top_items.truncate(5);
+        }
+    }
+    Ok(Json(Summary {
+        today_orders: order_count,
+        today_revenue: total_sales,
+        top_items,
+    }))
+}
 use crate::AppState;
 use axum::http::StatusCode;
 use axum::{extract::State, http::HeaderMap, Json};

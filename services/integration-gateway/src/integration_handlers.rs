@@ -1,13 +1,17 @@
 use axum::extract::{Extension, State};
 use axum::{http::StatusCode, Json};
-use rdkafka::producer::FutureRecord;
+use rdkafka::producer::{FutureProducer, FutureRecord};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::time::Duration;
+use tokio::time::sleep;
 use uuid::Uuid;
 
-use crate::{events::PaymentCompletedEvent, AppState};
+use crate::{
+    events::{PaymentCompletedEvent, PaymentFailedEvent},
+    AppState,
+};
 
 // Payment request/response types
 #[derive(Deserialize, Serialize)]
@@ -37,13 +41,63 @@ pub async fn process_payment(
     Extension(tenant_id): Extension<Uuid>,
     Json(req): Json<PaymentRequest>,
 ) -> Result<Json<PaymentResult>, (StatusCode, String)> {
+    let order_id = Uuid::parse_str(&req.order_id)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid orderId".to_string()))?;
+
     if req.method.eq_ignore_ascii_case("crypto") {
-        let api_key = std::env::var("COINBASE_COMMERCE_API_KEY").map_err(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Coinbase API key not configured".to_string(),
-            )
-        })?;
+        let mut use_stub = std::env::var("COINBASE_STUB_MODE")
+            .map(|val| val.eq_ignore_ascii_case("true") || val == "1")
+            .unwrap_or(false);
+        let api_key = std::env::var("COINBASE_COMMERCE_API_KEY").ok();
+        if api_key.is_none() && !use_stub {
+            tracing::warn!("COINBASE_COMMERCE_API_KEY missing; using Coinbase stub mode");
+            use_stub = true;
+        }
+
+        if use_stub {
+            let hosted_url = format!("https://stub.coinbase.local/charges/{}", Uuid::new_v4());
+            tracing::info!(order_id = %order_id, "Generated stub Coinbase charge");
+            let producer = state.kafka_producer.clone();
+            let tenant_key = tenant_id.to_string();
+            let amount = req.amount;
+            tokio::spawn(async move {
+                sleep(Duration::from_secs(5)).await;
+                let completion = PaymentCompletedEvent {
+                    order_id,
+                    tenant_id,
+                    method: "crypto".to_string(),
+                    amount,
+                };
+                match serde_json::to_string(&completion) {
+                    Ok(payload) => {
+                        if let Err(err) = producer
+                            .send(
+                                FutureRecord::to("payment.completed")
+                                    .payload(&payload)
+                                    .key(&tenant_key),
+                                Duration::from_secs(0),
+                            )
+                            .await
+                        {
+                            tracing::error!(?err, order_id = %order_id, "Failed to emit stub payment.completed");
+                        } else {
+                            tracing::info!(order_id = %order_id, "Stub crypto payment auto-confirmed");
+                        }
+                    }
+                    Err(err) => tracing::error!(
+                        ?err,
+                        order_id = %order_id,
+                        "Failed to serialize stub payment.completed"
+                    ),
+                }
+            });
+            return Ok(Json(PaymentResult {
+                status: "pending".into(),
+                payment_url: Some(hosted_url),
+            }));
+        }
+
+        let api_key = api_key.expect("API key must exist when not using stub");
         let client = Client::new();
         let charge_req = json!({
             "name": format!("Order {}", req.order_id),
@@ -59,62 +113,119 @@ pub async fn process_payment(
                 "amount": format!("{:.2}", req.amount)
             },
         });
-        let api_resp = client
+        let api_resp = match client
             .post("https://api.commerce.coinbase.com/charges")
             .header("X-CC-Api-Key", &api_key)
             .header("Content-Type", "application/json")
             .json(&charge_req)
             .send()
             .await
-            .map_err(|e| {
-                (
-                    StatusCode::BAD_GATEWAY,
-                    format!("Coinbase API request failed: {}", e),
+        {
+            Ok(resp) => resp,
+            Err(err) => {
+                let reason = format!("Coinbase API request failed: {err}");
+                emit_payment_failed(
+                    &state.kafka_producer,
+                    tenant_id,
+                    order_id,
+                    &req.method,
+                    &reason,
                 )
-            })?;
+                .await;
+                return Err((StatusCode::BAD_GATEWAY, reason));
+            }
+        };
         if !api_resp.status().is_success() {
+            let reason = format!("Coinbase charge rejected with status {}", api_resp.status());
+            emit_payment_failed(
+                &state.kafka_producer,
+                tenant_id,
+                order_id,
+                &req.method,
+                &reason,
+            )
+            .await;
             return Err((
                 StatusCode::BAD_GATEWAY,
                 "Failed to create crypto charge".into(),
             ));
         }
-        let resp_body: serde_json::Value = api_resp
-            .json()
-            .await
-            .map_err(|_| (StatusCode::BAD_GATEWAY, "Invalid Coinbase response".into()))?;
+        let resp_body: serde_json::Value = match api_resp.json().await {
+            Ok(body) => body,
+            Err(err) => {
+                let reason = format!("Invalid Coinbase response: {err}");
+                emit_payment_failed(
+                    &state.kafka_producer,
+                    tenant_id,
+                    order_id,
+                    &req.method,
+                    &reason,
+                )
+                .await;
+                return Err((StatusCode::BAD_GATEWAY, "Invalid Coinbase response".into()));
+            }
+        };
         let hosted_url = resp_body
             .get("data")
             .and_then(|data| data.get("hosted_url"))
             .and_then(|url| url.as_str())
             .unwrap_or("");
-        tracing::info!(
-            "Created Coinbase charge for order {} - Hosted URL: {}",
-            req.order_id,
-            hosted_url
-        );
-        let result = PaymentResult {
+        if hosted_url.is_empty() {
+            let reason = "Coinbase response missing hosted_url".to_string();
+            emit_payment_failed(
+                &state.kafka_producer,
+                tenant_id,
+                order_id,
+                &req.method,
+                &reason,
+            )
+            .await;
+            return Err((
+                StatusCode::BAD_GATEWAY,
+                "Failed to create crypto charge".into(),
+            ));
+        }
+        tracing::info!(order_id = %order_id, hosted_url, "Created Coinbase charge");
+        return Ok(Json(PaymentResult {
             status: "pending".into(),
-            payment_url: Some(hosted_url.into()),
-        };
-        return Ok(Json(result));
+            payment_url: Some(hosted_url.to_string()),
+        }));
     }
 
     if req.method.eq_ignore_ascii_case("card") {
         let pay_svc_url = std::env::var("PAYMENT_SERVICE_URL")
             .unwrap_or_else(|_| "http://localhost:8086".to_string());
         let client = Client::new();
-        let pay_resp = client
+        let pay_resp = match client
             .post(format!("{}/payments", pay_svc_url))
             .json(&req)
             .send()
             .await
-            .map_err(|e| {
-                (
-                    StatusCode::BAD_GATEWAY,
-                    format!("Payment service error: {}", e),
+        {
+            Ok(resp) => resp,
+            Err(err) => {
+                let reason = format!("Payment service error: {err}");
+                emit_payment_failed(
+                    &state.kafka_producer,
+                    tenant_id,
+                    order_id,
+                    &req.method,
+                    &reason,
                 )
-            })?;
+                .await;
+                return Err((StatusCode::BAD_GATEWAY, reason));
+            }
+        };
         if !pay_resp.status().is_success() {
+            let reason = format!("Payment declined (status {})", pay_resp.status());
+            emit_payment_failed(
+                &state.kafka_producer,
+                tenant_id,
+                order_id,
+                &req.method,
+                &reason,
+            )
+            .await;
             return Err((StatusCode::BAD_GATEWAY, "Payment was declined".into()));
         }
         let _approval =
@@ -127,7 +238,6 @@ pub async fn process_payment(
                 });
     }
 
-    let order_id = Uuid::parse_str(&req.order_id).unwrap_or_else(|_| Uuid::nil());
     let pay_event = PaymentCompletedEvent {
         order_id,
         tenant_id,
@@ -156,6 +266,41 @@ pub async fn process_payment(
         status: "paid".into(),
         payment_url: None,
     }))
+}
+
+async fn emit_payment_failed(
+    producer: &FutureProducer,
+    tenant_id: Uuid,
+    order_id: Uuid,
+    method: &str,
+    reason: &str,
+) {
+    let event = PaymentFailedEvent {
+        order_id,
+        tenant_id,
+        method: method.to_string(),
+        reason: reason.to_string(),
+    };
+    let payload = match serde_json::to_string(&event) {
+        Ok(body) => body,
+        Err(err) => {
+            tracing::error!(?err, order_id = %order_id, "Failed to serialize payment.failed");
+            return;
+        }
+    };
+    if let Err(err) = producer
+        .send(
+            FutureRecord::to("payment.failed")
+                .payload(&payload)
+                .key(&tenant_id.to_string()),
+            Duration::from_secs(0),
+        )
+        .await
+    {
+        tracing::error!(?err, order_id = %order_id, "Failed to send payment.failed");
+    } else {
+        tracing::info!(order_id = %order_id, method, reason, "Emitted payment.failed");
+    }
 }
 
 /// Order payload from external systems (mirrors Order Service's NewOrder format)

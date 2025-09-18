@@ -124,6 +124,29 @@ services:
     ports: ["8082:8082"]
     networks: [novanet]
 
+  loyalty-service:
+    build:
+      context: .
+      dockerfile: services/loyalty-service/Dockerfile
+    environment:
+      - DATABASE_URL=postgres://novapos:novapos@postgres:5432/novapos
+      - KAFKA_BOOTSTRAP=kafka:9092
+      - RUST_LOG=info
+    depends_on: [postgres, kafka]
+    ports: ["8088:8088"]
+    networks: [novanet]
+
+  customer-service:
+    build:
+      context: .
+      dockerfile: services/customer-service/Dockerfile
+    environment:
+      - DATABASE_URL=postgres://novapos:novapos@postgres:5432/novapos
+      - RUST_LOG=info
+    depends_on: [postgres]
+    ports: ["8089:8089"]
+    networks: [novanet]
+
   integration-gateway:
     build:
       context: .

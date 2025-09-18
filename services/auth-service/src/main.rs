@@ -1,11 +1,14 @@
-use axum::{routing::{get, post}, Router};
-use tokio::net::TcpListener;
-use std::net::SocketAddr;
+use axum::{
+    routing::{get, post},
+    Router,
+};
 use sqlx::PgPool;
 use std::env;
+use std::net::SocketAddr;
+use tokio::net::TcpListener;
 
 mod user_handlers;
-use user_handlers::{create_user, list_users};
+use user_handlers::{create_user, list_users, login_user};
 
 /// Shared application state
 #[derive(Clone)]
@@ -27,11 +30,15 @@ async fn main() -> anyhow::Result<()> {
 
     let app = Router::new()
         .route("/healthz", get(health))
+        .route("/login", post(login_user))
         .route("/users", post(create_user).get(list_users))
         .with_state(state);
 
     let host = env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
-    let port: u16 = env::var("PORT").ok().and_then(|v| v.parse().ok()).unwrap_or(8085);
+    let port: u16 = env::var("PORT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(8085);
     let ip: std::net::IpAddr = host.parse()?;
     let addr = SocketAddr::from((ip, port));
 

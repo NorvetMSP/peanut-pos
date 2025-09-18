@@ -3,14 +3,25 @@ You’re in the repo root, but the Cargo workspace is under services/. Use one o
 Option A: Use the workspace manifest path from root
 
 
-
+**Local build to docker only
 cargo run --manifest-path services/Cargo.toml -p product-service
 cargo run --manifest-path services/Cargo.toml -p analytics-service
 cargo run --manifest-path services/Cargo.toml -p integration-gateway
 cargo run --manifest-path services/Cargo.toml -p order-service
 cargo run --manifest-path services/Cargo.toml -p auth-service
 cargo run --manifest-path services/Cargo.toml -p payment-service
+cargo run --manifest-path services/Cargo.toml -p loyalty-service
+cargo run --manifest-path services/Cargo.toml -p customer-service
 
+
+Full Docker Build including app
+docker compose build
+docker compose up -d
+// tear down..... docker compose down
+//If you need to rebuild just one service after code changes:
+docker compose up -d --build order-service
+docker compose up -d --build loyalty-service
+docker compose up -d --build customer-service
 
 See the services (health endpoints)
 
@@ -20,6 +31,8 @@ gateway: curl http://localhost:8083/healthz
 order: curl http://localhost:8084/healthz
 auth: curl http://localhost:8085/healthz
 payment: curl http://localhost:8086/healthz
+loyalty: curl http://localhost:8088/healthz
+customer: curl http://localhost:8089/healthz
 PowerShell alt: irm http://localhost:8081/healthz
 
 
@@ -52,10 +65,29 @@ PS C:\Projects\novapos>
 Use this same URL for product-service, order-service, auth-service, and inventory-service in the prototype:
 
 # For current shell session:
-$env:DATABASE_URL = "postgres://postgres:postgres@localhost:5432/novapos"
+$env:DATABASE_URL = "postgres://novapos:novapos@localhost:5432/novapos
+cd services\product-service
+sqlx database create     # safe to re-run
+sqlx migrate run
+
+cd ..\order-service
+sqlx migrate run
+
+cd ..\auth-service
+sqlx migrate run
+
+cd ..\inventory-service
+sqlx migrate run
+
+cd ..\customer-service
+sqlx migrate run
+
+cd ..\loyalty-service
+sqlx migrate run
+
 
 # Make it persistent for future shells and on this 
-setx DATABASE_URL "postgres://postgres:postgres@localhost:5432/novapos"
+setx DATABASE_URL "postgres://novapos:novapos@localhost:5432/novapos
 
 Yes, if you use the setx command, the environment variable will be set persistently for your user account. It will remain available in all new PowerShell or Command Prompt sessions—even after restarting your computer or server.
 

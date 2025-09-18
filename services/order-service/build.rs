@@ -33,7 +33,10 @@ fn main() {
     let debug_lib_dir = vcpkg_root.join("debug").join("lib");
 
     if release_lib_dir.exists() {
-        println!("cargo:rustc-link-search=native={}", release_lib_dir.display());
+        println!(
+            "cargo:rustc-link-search=native={}",
+            release_lib_dir.display()
+        );
     }
     if debug_lib_dir.exists() {
         println!("cargo:rustc-link-search=native={}", debug_lib_dir.display());
@@ -70,12 +73,18 @@ fn find_rdkafka_vcpkg_root(build_root: &Path) -> Option<PathBuf> {
     let entries = fs::read_dir(build_root).ok()?;
     for entry in entries.flatten() {
         let path = entry.path();
-        let Some(name) = path.file_name() else { continue; };
+        let Some(name) = path.file_name() else {
+            continue;
+        };
         if !name.to_string_lossy().starts_with("rdkafka-sys-") {
             continue;
         }
 
-        let candidate = path.join("out").join("build").join("vcpkg_installed").join("x64-windows");
+        let candidate = path
+            .join("out")
+            .join("build")
+            .join("vcpkg_installed")
+            .join("x64-windows");
         if !candidate.exists() {
             continue;
         }
@@ -102,21 +111,31 @@ fn copy_runtime_dlls(source_dir: &Path, destination_dir: &Path) {
     }
 
     if let Err(err) = fs::create_dir_all(destination_dir) {
-        println!("cargo:warning=order-service: unable to prepare {}: {}", destination_dir.display(), err);
+        println!(
+            "cargo:warning=order-service: unable to prepare {}: {}",
+            destination_dir.display(),
+            err
+        );
         return;
     }
 
     let entries = match fs::read_dir(source_dir) {
         Ok(entries) => entries,
         Err(err) => {
-            println!("cargo:warning=order-service: unable to read {}: {}", source_dir.display(), err);
+            println!(
+                "cargo:warning=order-service: unable to read {}: {}",
+                source_dir.display(),
+                err
+            );
             return;
         }
     };
 
     for entry in entries.flatten() {
         let path = entry.path();
-        let Some(ext) = path.extension().and_then(|e| e.to_str()) else { continue; };
+        let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
+            continue;
+        };
         if !ext.eq_ignore_ascii_case("dll") {
             continue;
         }
@@ -138,7 +157,12 @@ fn copy_runtime_dlls(source_dir: &Path, destination_dir: &Path) {
 
         if should_copy {
             if let Err(err) = fs::copy(&path, &destination) {
-                println!("cargo:warning=order-service: failed to copy {} to {}: {}", path.display(), destination.display(), err);
+                println!(
+                    "cargo:warning=order-service: failed to copy {} to {}: {}",
+                    path.display(),
+                    destination.display(),
+                    err
+                );
             }
         }
     }

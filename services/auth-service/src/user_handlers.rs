@@ -26,6 +26,16 @@ pub struct User {
     pub role: String,
 }
 
+#[derive(FromRow)]
+struct AuthRow {
+    id: Uuid,
+    tenant_id: Uuid,
+    name: String,
+    email: String,
+    role: String,
+    password_hash: String,
+}
+
 pub async fn create_user(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -55,7 +65,12 @@ pub async fn create_user(
     .bind(password_hash)
     .fetch_one(&state.db)
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {e}")))?;
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Database error: {e}"),
+        )
+    })?;
 
     Ok(Json(user))
 }
@@ -72,9 +87,63 @@ pub async fn list_users(
     .bind(tenant_id)
     .fetch_all(&state.db)
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {e}")))?;
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Database error: {e}"),
+        )
+    })?;
 
     Ok(Json(users))
+}
+
+#[derive(Deserialize)]
+pub struct LoginRequest {
+    pub email: String,
+    pub password: String,
+}
+
+#[derive(Serialize)]
+pub struct LoginResponse {
+    pub token: String,
+    pub user: User,
+}
+
+pub async fn login_user(
+    State(state): State<AppState>,
+    Json(login): Json<LoginRequest>,
+) -> Result<Json<LoginResponse>, (StatusCode, String)> {
+    let LoginRequest { email, password } = login;
+    // Find user by email
+    let auth_rec = sqlx::query_as::<_, AuthRow>(
+        "SELECT id, tenant_id, name, email, role, password_hash FROM users WHERE email = $1",
+    )
+    .bind(&email)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("DB query failed: {}", e),
+        )
+    })?;
+    let auth_data = match auth_rec {
+        Some(row) => row,
+        None => return Err((StatusCode::UNAUTHORIZED, "Invalid credentials".into())),
+    };
+    if auth_data.password_hash != password {
+        return Err((StatusCode::UNAUTHORIZED, "Invalid credentials".into()));
+    }
+    // Generate session token (not stored on server; client will cache for offline use)
+    let token = Uuid::new_v4().to_string();
+    let user = User {
+        id: auth_data.id,
+        tenant_id: auth_data.tenant_id,
+        name: auth_data.name,
+        email: auth_data.email,
+        role: auth_data.role,
+    };
+    Ok(Json(LoginResponse { token, user }))
 }
 
 fn extract_tenant_id(headers: &HeaderMap) -> Result<Uuid, (StatusCode, String)> {

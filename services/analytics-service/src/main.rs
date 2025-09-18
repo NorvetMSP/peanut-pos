@@ -1,6 +1,6 @@
 mod analytics_handlers;
 
-use analytics_handlers::{get_anomalies, get_forecast};
+use analytics_handlers::{get_anomalies, get_forecast, get_summary};
 use axum::{routing::get, Router};
 use futures_util::StreamExt;
 use rdkafka::consumer::{Consumer, StreamConsumer};
@@ -27,6 +27,7 @@ pub struct Stats {
 pub struct AppState {
     pub db: PgPool,
     pub data: Arc<Mutex<HashMap<Uuid, Stats>>>,
+    pub product_counts: Arc<Mutex<HashMap<Uuid, HashMap<Uuid, i32>>>>,
 }
 
 #[derive(serde::Serialize)]
@@ -71,8 +72,10 @@ async fn main() -> anyhow::Result<()> {
         .expect("failed to create kafka producer");
 
     let data_map = Arc::new(Mutex::new(HashMap::<Uuid, Stats>::new()));
+    let product_counts_map = Arc::new(Mutex::new(HashMap::<Uuid, HashMap<Uuid, i32>>::new()));
     let db_pool = db.clone();
     let data_ref = Arc::clone(&data_map);
+    let product_counts_ref = Arc::clone(&product_counts_map);
     let alert_producer = producer.clone();
     tokio::spawn(async move {
         let mut stream = consumer.stream();
@@ -89,6 +92,34 @@ async fn main() -> anyhow::Result<()> {
                                     (tid_str.as_str(), total_val.as_f64())
                                 {
                                     if let Ok(tenant_id) = Uuid::parse_str(tid) {
+                                        // Update product counts for top 5 items
+                                        if let Some(items_val) = val.get("items") {
+                                            if let Some(arr) = items_val.as_array() {
+                                                let mut counts = product_counts_ref.lock().unwrap();
+                                                let tenant_counts = counts
+                                                    .entry(tenant_id)
+                                                    .or_insert_with(HashMap::new);
+                                                for item in arr {
+                                                    if let Some(pid_str) = item
+                                                        .get("product_id")
+                                                        .and_then(|v| v.as_str())
+                                                    {
+                                                        if let Some(qty) = item
+                                                            .get("quantity")
+                                                            .and_then(|v| v.as_i64())
+                                                        {
+                                                            if let Ok(pid) =
+                                                                Uuid::parse_str(pid_str)
+                                                            {
+                                                                *tenant_counts
+                                                                    .entry(pid)
+                                                                    .or_insert(0) += qty as i32;
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
                                         let (sales_inc, orders_inc, refunds_inc, refund_count_inc) = {
                                             let mut map = data_ref.lock().unwrap();
                                             let entry = map.entry(tenant_id).or_default();
@@ -188,11 +219,13 @@ async fn main() -> anyhow::Result<()> {
     let state = AppState {
         db: db.clone(),
         data: data_map.clone(),
+        product_counts: product_counts_map.clone(),
     };
     let app = Router::new()
-        .route("/healthz", get(|| async { "ok" }))
+        .route("/healthz", get(health))
         .route("/analytics/forecast", get(get_forecast))
         .route("/analytics/anomalies", get(get_anomalies))
+        .route("/analytics/summary", get(get_summary))
         .with_state(state);
 
     let host = std::env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
@@ -208,6 +241,3 @@ async fn main() -> anyhow::Result<()> {
 
     Ok(())
 }
-
-
-
