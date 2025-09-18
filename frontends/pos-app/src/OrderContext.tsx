@@ -2,8 +2,8 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { useAuth } from './AuthContext';
 
-const ORDER_SERVICE_URL = (import.meta.env.VITE_ORDER_SERVICE_URL ?? 'http://localhost:8082').replace(/\/$/, '');
-const INTEGRATION_GATEWAY_URL = (import.meta.env.VITE_INTEGRATION_GATEWAY_URL ?? 'http://localhost:8090').replace(/\/$/, '');
+const ORDER_SERVICE_URL = (import.meta.env.VITE_ORDER_SERVICE_URL ?? 'http://localhost:8084').replace(/\/$/, '');
+const INTEGRATION_GATEWAY_URL = (import.meta.env.VITE_INTEGRATION_GATEWAY_URL ?? 'http://localhost:8083').replace(/\/$/, '');
 const ORDER_STATUS_WS_URL = (() => {
   const raw = import.meta.env.VITE_ORDER_STATUS_WS_URL;
   if (typeof raw === 'string' && raw.trim().length > 0) {
@@ -746,5 +746,3 @@ export const useOrders = (): OrderContextValue => {
   if (!ctx) throw new Error('useOrders must be used within OrderProvider');
   return ctx;
 };
-
-

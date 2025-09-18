@@ -3,7 +3,7 @@ use axum::{
         header::{ACCEPT, CONTENT_TYPE},
         HeaderName, HeaderValue, Method,
     },
-    routing::{get, post},
+    routing::{delete, get, post, put},
     Router,
 };
 use rdkafka::producer::FutureProducer;
@@ -14,7 +14,7 @@ use tokio::net::TcpListener;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
 mod product_handlers;
-use product_handlers::{create_product, list_products, update_product};
+use product_handlers::{create_product, delete_product, list_products, update_product};
 /// Shared application state
 #[derive(Clone)]
 pub struct AppState {
@@ -61,9 +61,15 @@ async fn main() -> anyhow::Result<()> {
                 .collect::<Vec<_>>(),
         ))
         .allow_methods(
-            [Method::GET, Method::POST, Method::PUT, Method::OPTIONS]
-                .into_iter()
-                .collect::<Vec<_>>(),
+            [
+                Method::GET,
+                Method::POST,
+                Method::PUT,
+                Method::DELETE,
+                Method::OPTIONS,
+            ]
+            .into_iter()
+            .collect::<Vec<_>>(),
         )
         .allow_headers(
             [
@@ -80,7 +86,7 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/healthz", get(health))
         .route("/products", post(create_product).get(list_products))
-        .route("/products/:id", axum::routing::put(update_product))
+        .route("/products/:id", put(update_product).delete(delete_product))
         .with_state(state)
         .layer(cors);
     // Start server

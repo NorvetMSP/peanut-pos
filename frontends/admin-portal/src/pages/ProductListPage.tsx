@@ -53,6 +53,7 @@ const ProductListPage: React.FC = () => {
   const [isLoading, setIsLoading] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [updatingProductId, setUpdatingProductId] = useState<string | null>(null);
+  const [deletingProductId, setDeletingProductId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
@@ -259,6 +260,43 @@ const ProductListPage: React.FC = () => {
     }
   };
 
+  const handleDeleteProduct = async (product: ServiceProduct): Promise<void> => {
+    if (!ensureTenantContext()) return;
+
+    const confirmed = typeof window === 'undefined'
+      ? true
+      : window.confirm(`Delete "${product.name}"? This action cannot be undone.`);
+    if (!confirmed) return;
+
+    setError(null);
+    setSuccessMessage(null);
+    setDeletingProductId(product.id);
+    try {
+      const headers = buildHeaders();
+      const response = await fetch(`${PRODUCT_SERVICE_URL}/products/${product.id}`, {
+        method: 'DELETE',
+        headers,
+      });
+
+      if (response.status === 204) {
+        setProducts(prev => prev.filter(item => item.id !== product.id));
+        if (editingProductId === product.id) {
+          resetEditState();
+        }
+        setSuccessMessage('Product deleted successfully.');
+      } else if (response.status === 404) {
+        setError('Product not found or already removed.');
+      } else {
+        const detail = await response.text();
+        throw new Error(detail || 'Delete failed');
+      }
+    } catch (err) {
+      console.error('Unable to delete product', err);
+      setError('Unable to delete product. Please try again.');
+    } finally {
+      setDeletingProductId(null);
+    }
+  };
   const handleRefresh = () => {
     setSuccessMessage(null);
     setError(null);
@@ -409,7 +447,7 @@ const ProductListPage: React.FC = () => {
                               type="button"
                               className="px-3 py-2 rounded bg-gray-200 dark:bg-gray-700 text-gray-800 dark:text-gray-100"
                               onClick={resetEditState}
-                              disabled={updatingProductId === prod.id}
+                              disabled={updatingProductId === prod.id || deletingProductId === prod.id}
                             >
                               Cancel
                             </button>
@@ -420,7 +458,7 @@ const ProductListPage: React.FC = () => {
                               onMouseOver={event => (event.currentTarget.style.background = '#153a5b')}
                               onMouseOut={event => (event.currentTarget.style.background = '#19b4b9')}
                               onClick={() => void handleSaveEdit()}
-                              disabled={updatingProductId === prod.id}
+                              disabled={updatingProductId === prod.id || deletingProductId === prod.id}
                             >
                               {updatingProductId === prod.id ? 'Saving...' : 'Save'}
                             </button>
@@ -445,7 +483,7 @@ const ProductListPage: React.FC = () => {
                               type="button"
                               className="px-3 py-2 rounded bg-gray-200 dark:bg-gray-700 text-gray-800 dark:text-gray-100"
                               onClick={() => handleStartEdit(prod)}
-                              disabled={updatingProductId === prod.id}
+                              disabled={updatingProductId === prod.id || deletingProductId === prod.id}
                             >
                               Edit
                             </button>
@@ -453,9 +491,17 @@ const ProductListPage: React.FC = () => {
                               type="button"
                               className={`px-3 py-2 rounded text-white ${prod.active ? 'bg-red-500 hover:bg-red-600' : 'bg-emerald-500 hover:bg-emerald-600'}`}
                               onClick={() => void handleToggleActive(prod)}
-                              disabled={updatingProductId === prod.id}
+                              disabled={updatingProductId === prod.id || deletingProductId === prod.id}
                             >
                               {updatingProductId === prod.id ? 'Updating...' : prod.active ? 'Deactivate' : 'Activate'}
+                            </button>
+                            <button
+                              type="button"
+                              className="px-3 py-2 rounded bg-red-600 text-white hover:bg-red-700"
+                              onClick={() => void handleDeleteProduct(prod)}
+                              disabled={deletingProductId === prod.id || updatingProductId === prod.id}
+                            >
+                              {deletingProductId === prod.id ? 'Deleting...' : 'Delete'}
                             </button>
                           </div>
                         </td>
