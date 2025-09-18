@@ -31,7 +31,7 @@ const SalesPage: React.FC = () => {
   const navigate = useNavigate();
 
   useEffect(() => {
-    if (!isLoggedIn) navigate('/');
+    if (!isLoggedIn) navigate('/login');
   }, [isLoggedIn, navigate]);
 
   const handlePayment = async (method: 'card' | 'cash' | 'crypto') => {
@@ -54,7 +54,7 @@ const SalesPage: React.FC = () => {
           <img src={logoTransparent} alt="NovaPOS Logo" className="h-10 w-auto" />
           <span className="text-2xl font-bold text-primary dark:text-white tracking-tight">NovaPOS</span>
         </div>
-        <button className="bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600" onClick={() => { logout(); navigate('/'); }}>Logout</button>
+        <button className="bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600" onClick={() => { logout(); navigate('/login'); }}>Logout</button>
       </header>
 
       {/* Centered Main Content */}
@@ -97,6 +97,7 @@ const SalesPage: React.FC = () => {
 };
 
 export default SalesPage;
+
 
 
 

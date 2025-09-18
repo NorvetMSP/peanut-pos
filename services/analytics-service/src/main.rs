@@ -45,6 +45,10 @@ struct LowStockEvent {
     threshold: i32,
 }
 
+async fn health() -> &'static str {
+    "ok"
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().with_env_filter("info").init();
@@ -241,3 +245,5 @@ async fn main() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+

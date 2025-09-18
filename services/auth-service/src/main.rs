@@ -1,7 +1,14 @@
 use axum::{
+    http::{
+        header::{ACCEPT, CONTENT_TYPE},
+        HeaderName,
+        HeaderValue,
+        Method,
+    },
     routing::{get, post},
     Router,
 };
+use tower_http::cors::{AllowOrigin, CorsLayer};
 use sqlx::PgPool;
 use std::env;
 use std::net::SocketAddr;
@@ -28,11 +35,24 @@ async fn main() -> anyhow::Result<()> {
     let db_pool = PgPool::connect(&database_url).await?;
     let state = AppState { db: db_pool };
 
+    let cors = CorsLayer::new()
+        .allow_origin(AllowOrigin::list([
+            HeaderValue::from_static("http://localhost:3000"),
+            HeaderValue::from_static("http://localhost:5173"),
+        ]))
+        .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+        .allow_headers([
+            ACCEPT,
+            CONTENT_TYPE,
+            HeaderName::from_static("x-tenant-id"),
+        ]);
+
     let app = Router::new()
         .route("/healthz", get(health))
         .route("/login", post(login_user))
         .route("/users", post(create_user).get(list_users))
-        .with_state(state);
+        .with_state(state)
+        .layer(cors);
 
     let host = env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
     let port: u16 = env::var("PORT")

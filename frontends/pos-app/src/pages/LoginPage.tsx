@@ -1,24 +1,25 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../AuthContext';
 
 const LoginPage: React.FC = () => {
-  const auth = useAuth();
+  const { login, loginError, isAuthenticating, isLoggedIn } = useAuth();
   const navigate = useNavigate();
   const [credentials, setCredentials] = useState({ username: '', password: '' });
-  const [error, setError] = useState<string | null>(null);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  useEffect(() => {
+    if (isLoggedIn) {
+      navigate('/sales', { replace: true });
+    }
+  }, [isLoggedIn, navigate]);
+
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     const { username, password } = credentials;
-    const success = auth.login(username, password);
-    if (!success) {
-      setError('Invalid credentials, please try again.');
-    } else {
-      setError(null);
-      navigate('/sales');
-    }
+    await login(username, password);
   };
+
+  const isSubmitDisabled = isAuthenticating;
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-gray-100 dark:bg-gray-900">
@@ -48,15 +49,25 @@ const LoginPage: React.FC = () => {
               required
             />
           </div>
-          {error && <p className="error text-red-500 text-center">{error}</p>}
+          {loginError && <p className="error text-red-500 text-center">{loginError}</p>}
           <button
             type="submit"
+            disabled={isSubmitDisabled}
             className="w-full py-2 px-4 rounded-md text-white"
-            style={{ background: '#19b4b9' }}
-            onMouseOver={e => (e.currentTarget.style.background = '#153a5b')}
-            onMouseOut={e => (e.currentTarget.style.background = '#19b4b9')}
+            style={{
+              background: isSubmitDisabled ? '#9ca3af' : '#19b4b9',
+              cursor: isSubmitDisabled ? 'not-allowed' : 'pointer',
+            }}
+            onMouseOver={e => {
+              if (!isSubmitDisabled) {
+                e.currentTarget.style.background = '#153a5b';
+              }
+            }}
+            onMouseOut={e => {
+              e.currentTarget.style.background = isSubmitDisabled ? '#9ca3af' : '#19b4b9';
+            }}
           >
-            Log In
+            {isSubmitDisabled ? 'Logging in...' : 'Log In'}
           </button>
         </form>
       </div>
@@ -65,3 +76,4 @@ const LoginPage: React.FC = () => {
 };
 
 export default LoginPage;
+

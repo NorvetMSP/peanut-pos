@@ -28,7 +28,9 @@ async fn main() -> anyhow::Result<()> {
     let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
     let db = PgPool::connect(&database_url).await?;
     // Ensure database schema is up to date before serving traffic
-    sqlx::migrate!("./migrations").run(&db).await?;
+    let mut migrator = sqlx::migrate!("./migrations");
+    migrator.set_ignore_missing(true);
+    migrator.run(&db).await?;
     // Initialize Kafka producer for downstream events
     let kafka_producer: FutureProducer = rdkafka::ClientConfig::new()
         .set(
@@ -58,3 +60,4 @@ async fn main() -> anyhow::Result<()> {
     axum::serve(listener, app).await?;
     Ok(())
 }
+

@@ -1,4 +1,4 @@
-You’re in the repo root, but the Cargo workspace is under services/. Use one of these:
+You???re in the repo root, but the Cargo workspace is under services/. Use one of these:
 
 Option A: Use the workspace manifest path from root
 
@@ -22,6 +22,8 @@ docker compose up -d
 docker compose up -d --build order-service
 docker compose up -d --build loyalty-service
 docker compose up -d --build customer-service
+docker compose ps confirms all services  are running.
+
 
 See the services (health endpoints)
 
@@ -65,31 +67,68 @@ PS C:\Projects\novapos>
 Use this same URL for product-service, order-service, auth-service, and inventory-service in the prototype:
 
 # For current shell session:
-$env:DATABASE_URL = "postgres://novapos:novapos@localhost:5432/novapos
-cd services\product-service
-sqlx database create     # safe to re-run
-sqlx migrate run
-
-cd ..\order-service
-sqlx migrate run
-
-cd ..\auth-service
-sqlx migrate run
-
-cd ..\inventory-service
-sqlx migrate run
-
-cd ..\customer-service
-sqlx migrate run
-
-cd ..\loyalty-service
-sqlx migrate run
+$env:DATABASE_URL = "postgres://novapos:novapos@localhost:5432/novapos"
 
 
 # Make it persistent for future shells and on this 
 setx DATABASE_URL "postgres://novapos:novapos@localhost:5432/novapos
 
-Yes, if you use the setx command, the environment variable will be set persistently for your user account. It will remain available in all new PowerShell or Command Prompt sessions—even after restarting your computer or server.
+sqlx database drop -y -D 'postgres://novapos:novapos@localhost:5432/novapos'
+sqlx database create -D 'postgres://novapos:novapos@localhost:5432/novapos'
+powershell -ExecutionPolicy Bypass -File .\migrate-all.ps1
+
+***************MANUAL Drop and Recreate DATABASE
+PS C:\Projects\novapos> psql -U novapos -d novapos -h localhost -p 5432
+Password for user novapos: 
+
+psql (16.10)
+WARNING: Console code page (437) differs from Windows code page (1252)
+         8-bit characters might not work correctly. See psql reference
+         page "Notes for Windows users" for details.
+Type "help" for help.
+
+novapos=# DROP DATABASE IF EXISTS novapos;
+ERROR:  cannot drop the currently open database
+novapos=# \c postgres
+You are now connected to database "postgres" as user "novapos".
+postgres=# DROP DATABASE IF EXISTS novapos;
+DROP DATABASE
+postgres=# CREATE DATABASE novapos OWNER novapos;
+CREATE DATABASE
+
+
+cd services\product-service
+sqlx database create     # safe to re-run
+sqlx migrate run --ignore-missing
+
+cd ..\order-service
+sqlx migrate run --ignore-missing
+
+cd ..\auth-service
+sqlx migrate run --ignore-missing
+
+cd ..\inventory-service
+sqlx migrate run --ignore-missing
+
+cd ..\customer-service
+sqlx migrate run --ignore-missing
+
+cd ..\loyalty-service
+sqlx migrate run --ignore-missing
+
+cd ..\analytics-service
+sqlx migrate run --ignore-missing
+
+cd ..\integration-gateway
+sqlx migrate run --ignore-missing
+
+cd ..\payment-service
+sqlx migrate run --ignore-missing
+
+
+
+
+Yes, if you use the setx command, the environment variable will be set persistently for your user account. It will remain available in all new PowerShell or Command Prompt sessions???even after restarting your computer or server.
 
 However, note:
 
@@ -97,3 +136,11 @@ It will not be available in already-open shells; you must open a new shell to se
 It is set for your user, not system-wide (unless you use /M for machine-wide).
 
 *******************************************************************************************
+
+Default POS credentials (from auth-service migration 3002)
+Email: admin@novapos.local
+Password: admin123
+Role: super_admin (tenant NovaPOS HQ)
+
+
+
