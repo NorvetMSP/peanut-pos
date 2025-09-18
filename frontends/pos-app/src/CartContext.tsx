@@ -1,17 +1,17 @@
 // src/CartContext.tsx
 import React, { createContext, useContext, useEffect, useState } from 'react';
 
-// Define product and cart item types
-interface Product { id: number; name: string; price: number; }
+// Define product and cart item types aligned with service payloads
+interface Product { id: string; name: string; price: number; sku?: string | null; }
 interface CartItem extends Product { quantity: number; }
 
 interface CartContextValue {
   cart: CartItem[];
   addItem: (product: Product) => void;
-  removeItem: (productId: number) => void;
+  removeItem: (productId: string) => void;
   clearCart: () => void;
-  incrementItemQuantity: (productId: number) => void;
-  decrementItemQuantity: (productId: number) => void;
+  incrementItemQuantity: (productId: string) => void;
+  decrementItemQuantity: (productId: string) => void;
   totalAmount: number;
 }
 const CartContext = createContext<CartContextValue | undefined>(undefined);
@@ -48,13 +48,13 @@ export const CartProvider: React.FC<{ children: React.ReactNode }> = ({ children
     });
   };
 
-  const incrementItemQuantity = (productId: number) => {
+  const incrementItemQuantity = (productId: string) => {
     setCart(prev => prev.map(item =>
       item.id === productId ? { ...item, quantity: item.quantity + 1 } : item
     ));
   };
 
-  const decrementItemQuantity = (productId: number) => {
+  const decrementItemQuantity = (productId: string) => {
     setCart(prev => prev.map(item =>
       item.id === productId && item.quantity > 1
         ? { ...item, quantity: item.quantity - 1 }
@@ -62,7 +62,7 @@ export const CartProvider: React.FC<{ children: React.ReactNode }> = ({ children
     ));
   };
 
-  const removeItem = (productId: number) => {
+  const removeItem = (productId: string) => {
     setCart(prev => prev.filter(item => item.id !== productId));
   };
 
@@ -86,3 +86,4 @@ export const useCart = () => {
   if (!ctx) throw new Error('useCart must be used within CartProvider');
   return ctx;
 };
+

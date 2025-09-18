@@ -19,9 +19,11 @@ docker compose build
 docker compose up -d
 // tear down..... docker compose down
 //If you need to rebuild just one service after code changes:
+docker compose up -d --build auth-service
 docker compose up -d --build order-service
 docker compose up -d --build loyalty-service
 docker compose up -d --build customer-service
+docker compose up -d --build product-service
 docker compose ps confirms all services  are running.
 
 

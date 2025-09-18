@@ -1,24 +1,32 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../AuthContext';
 
 const LoginPage: React.FC = () => {
-  const { login: authLogin } = useAuth();
+  const { login, loginError, isAuthenticating, isLoggedIn } = useAuth();
   const navigate = useNavigate();
-  const [credentials, setCredentials] = useState({ username: '', password: '' });
-  const [error, setError] = useState<string | null>(null);
+  const [credentials, setCredentials] = useState({ email: '', password: '' });
+  const [localError, setLocalError] = useState<string | null>(null);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  useEffect(() => {
+    if (isLoggedIn) {
+      navigate('/home', { replace: true });
+    }
+  }, [isLoggedIn, navigate]);
+
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    const { username, password } = credentials;
-    const success = authLogin(username, password);
-    if (!success) {
-      setError('Invalid credentials, please try again.');
-    } else {
-      setError(null);
-      navigate('/home');  // go to home page on successful login
+    setLocalError(null);
+    const success = await login(credentials.email, credentials.password);
+    if (success) {
+      navigate('/home', { replace: true });
+    } else if (!loginError) {
+      setLocalError('Login failed. Please try again.');
     }
   };
+
+  const errorMessage = loginError ?? localError;
+  const isSubmitDisabled = isAuthenticating;
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-gray-100 dark:bg-gray-900">
@@ -28,38 +36,48 @@ const LoginPage: React.FC = () => {
         </h1>
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>
-            <label className="block text-gray-700 dark:text-gray-200 mb-1">Username</label>
+            <label className="block text-gray-700 dark:text-gray-200 mb-1" htmlFor="email">Email</label>
             <input
-              type="text"
-              value={credentials.username}
-              onChange={e => setCredentials({ ...credentials, username: e.target.value })}
-              className="w-full px-3 py-2 border border-gray-300 rounded-md text-gray-900 
-                         focus:outline-none focus:ring-2 focus:ring-primary focus:border-primary"
-              placeholder="Enter username"
+              id="email"
+              type="email"
+              value={credentials.email}
+              onChange={e => setCredentials({ ...credentials, email: e.target.value })}
+              className="w-full px-3 py-2 border border-gray-300 rounded-md text-gray-900 focus:outline-none focus:ring-2 focus:ring-primary focus:border-primary"
+              placeholder="admin@novapos.local"
               required
+              disabled={isSubmitDisabled}
             />
           </div>
           <div>
-            <label className="block text-gray-700 dark:text-gray-200 mb-1">Password</label>
+            <label className="block text-gray-700 dark:text-gray-200 mb-1" htmlFor="password">Password</label>
             <input
+              id="password"
               type="password"
               value={credentials.password}
               onChange={e => setCredentials({ ...credentials, password: e.target.value })}
-              className="w-full px-3 py-2 border border-gray-300 rounded-md text-gray-900 
-                         focus:outline-none focus:ring-2 focus:ring-primary focus:border-primary"
+              className="w-full px-3 py-2 border border-gray-300 rounded-md text-gray-900 focus:outline-none focus:ring-2 focus:ring-primary focus:border-primary"
               placeholder="Enter password"
               required
+              disabled={isSubmitDisabled}
             />
           </div>
-          {error && <p className="text-red-500 text-center">{error}</p>}
+          {errorMessage && <p className="text-red-500 text-center text-sm">{errorMessage}</p>}
           <button
             type="submit"
+            disabled={isSubmitDisabled}
             className="w-full py-2 px-4 rounded-md text-white"
-            style={{ background: '#19b4b9' }}
-            onMouseOver={e => (e.currentTarget.style.background = '#153a5b')}
-            onMouseOut={e => (e.currentTarget.style.background = '#19b4b9')}
+            style={{
+              background: isSubmitDisabled ? '#9ca3af' : '#19b4b9',
+              cursor: isSubmitDisabled ? 'not-allowed' : 'pointer',
+            }}
+            onMouseOver={e => {
+              if (!isSubmitDisabled) e.currentTarget.style.background = '#153a5b';
+            }}
+            onMouseOut={e => {
+              e.currentTarget.style.background = isSubmitDisabled ? '#9ca3af' : '#19b4b9';
+            }}
           >
-            Log In
+            {isSubmitDisabled ? 'Logging in...' : 'Log In'}
           </button>
         </form>
       </div>

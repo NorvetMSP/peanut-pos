@@ -1,18 +1,16 @@
 use axum::{
     http::{
         header::{ACCEPT, CONTENT_TYPE},
-        HeaderName,
-        HeaderValue,
-        Method,
+        HeaderName, HeaderValue, Method,
     },
     routing::{get, post},
     Router,
 };
-use tower_http::cors::{AllowOrigin, CorsLayer};
 use sqlx::PgPool;
 use std::env;
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
+use tower_http::cors::{AllowOrigin, CorsLayer};
 
 mod user_handlers;
 use user_handlers::{create_user, list_users, login_user};
@@ -38,12 +36,14 @@ async fn main() -> anyhow::Result<()> {
     let cors = CorsLayer::new()
         .allow_origin(AllowOrigin::list([
             HeaderValue::from_static("http://localhost:3000"),
+            HeaderValue::from_static("http://localhost:3001"),
             HeaderValue::from_static("http://localhost:5173"),
         ]))
         .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
         .allow_headers([
             ACCEPT,
             CONTENT_TYPE,
+            HeaderName::from_static("authorization"),
             HeaderName::from_static("x-tenant-id"),
         ]);
 

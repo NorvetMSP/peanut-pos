@@ -37,7 +37,7 @@ pub async fn update_product(
     };
     // Update the product
     let product = query_as::<_, Product>(
-        "UPDATE products SET name = $1, price = $2, description = $3, active = $4\n         WHERE id = $5 AND tenant_id = $6\n         RETURNING id, tenant_id, name, price, description, active"
+        "UPDATE products SET name = $1, price = $2, description = $3, active = $4\n         WHERE id = $5 AND tenant_id = $6\n         RETURNING id, tenant_id, name, price::FLOAT8 as price, description, active"
     )
     .bind(upd.name)
     .bind(upd.price)
@@ -101,7 +101,7 @@ pub async fn create_product(
     let desc = description.unwrap_or_default();
     // Insert product into database
     let product = query_as::<_, Product>(
-        "INSERT INTO products (id, tenant_id, name, price, description, active) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id, tenant_id, name, price, description, active"
+        "INSERT INTO products (id, tenant_id, name, price, description, active) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id, tenant_id, name, price::FLOAT8 as price, description, active"
     )
     .bind(product_id)
     .bind(tenant_id)
@@ -158,7 +158,7 @@ pub async fn list_products(
     };
     // Query products for tenant
     let products = query_as::<_, Product>(
-        "SELECT id, tenant_id, name, price, description, active FROM products WHERE tenant_id = $1",
+        "SELECT id, tenant_id, name, price::FLOAT8 as price, description, active FROM products WHERE tenant_id = $1",
     )
     .bind(tenant_id)
     .fetch_all(&state.db)

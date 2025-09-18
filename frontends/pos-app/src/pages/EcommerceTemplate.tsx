@@ -2,45 +2,35 @@ import React from "react";
 import { useCart } from "../CartContext";
 
 // Map CartContext CartItem to template's item format
-type Item = {
-  id: string | number;
+interface Item {
+  id: string;
   category?: string;
   title: string;
   price: number;
   qty: number;
   image?: string;
-};
+}
 
-
-// TODO: Fetch shipping options from backend if available
 const defaultShippingOptions = [
   { id: "standard", label: "Standard Delivery", cost: 5.0 },
   { id: "express", label: "Express (2-day)", cost: 12.0 },
   { id: "pickup", label: "In-store Pickup", cost: 0.0 },
 ];
 
-  // Removed unused destructured elements
-
 export default function EcommerceTemplate() {
-  const { cart, addItem, removeItem } = useCart();
+  const { cart, removeItem, incrementItemQuantity, decrementItemQuantity } = useCart();
   const [shippingId, setShippingId] = React.useState<string>("standard");
   const [code, setCode] = React.useState<string>("");
   const [shippingOptions] = React.useState(defaultShippingOptions);
   const [discount, setDiscount] = React.useState<number>(0);
   const [promoError, setPromoError] = React.useState<string>("");
 
-  // Example: fetch shipping options from backend
-  // React.useEffect(() => {
-  //   fetch('/api/shipping-options').then(res => res.json()).then(setShippingOptions);
-  // }, []);
-
-  // Map context cart to template items
   const items: Item[] = cart.map((i) => ({
     id: i.id,
     title: i.name,
     price: i.price,
     qty: i.quantity,
-    image: undefined, // Add image if available in context
+    image: undefined,
   }));
 
   const itemsCount = items.reduce((n, i) => n + i.qty, 0);
@@ -48,10 +38,8 @@ export default function EcommerceTemplate() {
   const shipping = shippingOptions.find((o) => o.id === shippingId)?.cost ?? 0;
   const total = Math.max(0, subtotal + shipping - discount);
 
-  // Promo code validation logic
   const handlePromo = (e: React.FormEvent) => {
     e.preventDefault();
-    // Example: simple promo code logic
     if (code.trim().toLowerCase() === "save10") {
       setDiscount(10);
       setPromoError("");
@@ -62,22 +50,21 @@ export default function EcommerceTemplate() {
       setDiscount(0);
       setPromoError("Invalid promo code");
     }
-    // TODO: Integrate with backend for real promo validation
   };
 
-  // Use context actions for quantity and removal
-  const dec = (id: string | number) => {
+  const dec = (id: string) => {
     const item = cart.find((i) => i.id === id);
     if (item && item.quantity > 1) {
-      removeItem(item.id);
-      for (let q = 1; q < item.quantity - 1 + 1; q++) addItem(item);
+      decrementItemQuantity(id);
     }
   };
-  const inc = (id: string | number) => {
+  const inc = (id: string) => {
     const item = cart.find((i) => i.id === id);
-    if (item) addItem(item);
+    if (item) {
+      incrementItemQuantity(id);
+    }
   };
-  const remove = (id: string | number) => removeItem(id as number);
+  const remove = (id: string) => removeItem(id);
 
   const eur = (n: number) =>
     new Intl.NumberFormat(undefined, { style: "currency", currency: "EUR", maximumFractionDigits: 2 }).format(n);
@@ -158,7 +145,7 @@ export default function EcommerceTemplate() {
                 >
                   {shippingOptions.map((o) => (
                     <option key={o.id} value={o.id} className="text-gray-500">
-                      {o.label} — {eur(o.cost)}
+                      {o.label} - {eur(o.cost)}
                     </option>
                   ))}
                 </select>
@@ -186,7 +173,7 @@ export default function EcommerceTemplate() {
               )}
               <button
                 className="bg-black border-black text-white w-full text-xs mt-4 p-2 rounded-none cursor-pointer focus:outline-none focus:ring-2 focus:ring-green-500"
-                onClick={() => window.location.href = '/checkout'}
+                onClick={() => { window.location.href = '/checkout'; }}
                 aria-label="Proceed to checkout"
               >
                 CHECKOUT

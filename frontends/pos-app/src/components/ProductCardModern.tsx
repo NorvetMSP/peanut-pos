@@ -2,11 +2,12 @@ import React from 'react';
 import './ProductCardModern.css';
 
 type Product = {
-  id: number;
+  id: string;
   name: string;
   description: string;
   price: number;
   image: string;
+  sku?: string | null;
   onAdd: () => void;
   onWishlist?: () => void;
 };
@@ -23,7 +24,7 @@ const ProductCardModern: React.FC<{ product: Product }> = ({ product }) => (
     </div>
     <div className="description">
       <h2>{product.name}</h2>
-      <h4>Popular Product</h4>
+      {product.sku && <h4>SKU: {product.sku}</h4>}
       <h1>${product.price.toFixed(2)}</h1>
       <p>{product.description}</p>
       <button onClick={product.onAdd}>Add to Cart</button>

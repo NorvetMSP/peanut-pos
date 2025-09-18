@@ -2,7 +2,7 @@ import React from 'react';
 import './CartCard.css';
 
 type CartItem = {
-  id: number;
+  id: string;
   name: string;
   price: number;
   quantity: number;
