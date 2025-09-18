@@ -1,9 +1,31 @@
 import React from "react";
 import { useCart } from "../CartContext";
+import { useAuth } from "../AuthContext";
 import './CheckoutPageModern.css';
+
+const PRODUCT_SERVICE_URL = (import.meta.env.VITE_PRODUCT_SERVICE_URL ?? "http://localhost:8081").replace(/\/$/, "");
+const STORAGE_PREFIX = "productCache";
+
+const mapProductActiveFlags = (raw: unknown): Record<string, boolean> => {
+  if (!Array.isArray(raw)) return {};
+  const result: Record<string, boolean> = {};
+  for (const entry of raw) {
+    if (!entry || typeof entry !== "object") continue;
+    const candidate = entry as Record<string, unknown>;
+    const rawId = candidate.id;
+    if (typeof rawId !== "string" && typeof rawId !== "number") continue;
+    const id = typeof rawId === "string" ? rawId : String(rawId);
+    const activeValue = candidate.active;
+    result[id] = typeof activeValue === "boolean" ? activeValue : true;
+  }
+  return result;
+};
+
 
 export default function CheckoutPage() {
   const { cart, totalAmount } = useCart();
+  const { currentUser, token } = useAuth();
+  const tenantId = currentUser?.tenant_id ? String(currentUser.tenant_id) : null;
   const [paymentMethod, setPaymentMethod] = React.useState<'card' | 'cash' | 'crypto'>('card');
   const [cardDetails, setCardDetails] = React.useState({ number: '', name: '', expiry: '', cvc: '' });
   const [billing, setBilling] = React.useState({ address: '', city: '', zip: '' });
@@ -15,6 +37,48 @@ export default function CheckoutPage() {
   const [submitted, setSubmitted] = React.useState(false);
   const [orderNumber, setOrderNumber] = React.useState<string | null>(null);
   const [review, setReview] = React.useState(false);
+
+  // Pull the freshest active flags, falling back to cached catalog when offline.
+  const resolveCatalogSnapshot = React.useCallback(async (): Promise<Record<string, boolean>> => {
+    if (!tenantId) return {};
+    const headers: Record<string, string> = { "X-Tenant-ID": tenantId };
+    if (token) headers["Authorization"] = `Bearer ${token}`;
+    const storage = typeof window !== "undefined" ? window.localStorage : null;
+
+    try {
+      const response = await fetch(`${PRODUCT_SERVICE_URL}/products`, { headers });
+      if (!response.ok) {
+        throw new Error(`Failed to fetch products (${response.status})`);
+      }
+      const payload = await response.json();
+      return mapProductActiveFlags(payload);
+    } catch (err) {
+      console.warn('Using cached catalog for submission validation', err);
+      if (!storage) return {};
+      const cached = storage.getItem(`${STORAGE_PREFIX}:${tenantId}`);
+      if (!cached) return {};
+      try {
+        const parsed = JSON.parse(cached);
+        return mapProductActiveFlags(parsed);
+      } catch (cacheError) {
+        console.warn('Unable to parse cached catalog during checkout validation', cacheError);
+        return {};
+      }
+    }
+  }, [tenantId, token]);
+
+  const detectInactiveItems = React.useCallback(async (): Promise<string[]> => {
+    if (!cart.length) return [];
+    const catalogSnapshot = await resolveCatalogSnapshot();
+    if (!Object.keys(catalogSnapshot).length) return [];
+    const flagged = cart.reduce<string[]>((acc, item) => {
+      if (catalogSnapshot[item.id] === false) {
+        acc.push(item.name);
+      }
+      return acc;
+    }, []);
+    return Array.from(new Set(flagged));
+  }, [cart, resolveCatalogSnapshot]);
 
   const handleCardChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     setCardDetails({ ...cardDetails, [e.target.name]: e.target.value });
@@ -59,13 +123,31 @@ export default function CheckoutPage() {
     }
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    // Simulate order number generation
-    const generatedOrderNumber = 'NP-' + Math.floor(100000 + Math.random() * 900000).toString();
-    setOrderNumber(generatedOrderNumber);
-    setSubmitted(true);
-    // TODO: process order
+  const handleSubmit = (event?: React.SyntheticEvent) => {
+    event?.preventDefault?.();
+
+    const finalizeOrder = () => {
+      const generatedOrderNumber = 'NP-' + Math.floor(100000 + Math.random() * 900000).toString();
+      setOrderNumber(generatedOrderNumber);
+      setSubmitted(true);
+      // TODO: process order
+    };
+
+    detectInactiveItems()
+      .then(inactiveItems => {
+        if (inactiveItems.length > 0) {
+          const detail = inactiveItems.join(', ');
+          const message = `Inactive items detected: ${detail}. Manager override assumed; proceeding with locked pricing.`;
+          console.warn(message);
+          if (typeof window !== 'undefined' && typeof window.alert === 'function') {
+            window.alert(message);
+          }
+        }
+      })
+      .catch(err => {
+        console.warn('Unable to verify catalog before checkout submission', err);
+      })
+      .finally(finalizeOrder);
   };
 
   return (
