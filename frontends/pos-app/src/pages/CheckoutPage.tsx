@@ -1,7 +1,9 @@
 import React from "react";
+import { useNavigate } from "react-router-dom";
 import { useCart } from "../CartContext";
 import { useAuth } from "../AuthContext";
-import './CheckoutPageModern.css';
+import { useOrders } from "../OrderContext";
+import "./CheckoutPageModern.css";
 
 const PRODUCT_SERVICE_URL = (import.meta.env.VITE_PRODUCT_SERVICE_URL ?? "http://localhost:8081").replace(/\/$/, "");
 const STORAGE_PREFIX = "productCache";
@@ -21,11 +23,22 @@ const mapProductActiveFlags = (raw: unknown): Record<string, boolean> => {
   return result;
 };
 
+type SubmissionOutcome = {
+  mode: "queued" | "submitted";
+  reference: string;
+  status: string;
+  paymentStatus?: string;
+  paymentUrl?: string | null;
+  note?: string;
+};
 
 export default function CheckoutPage() {
-  const { cart, totalAmount } = useCart();
+  const navigate = useNavigate();
+  const { cart, totalAmount, clearCart } = useCart();
   const { currentUser, token } = useAuth();
+  const { submitOrder, isOnline } = useOrders();
   const tenantId = currentUser?.tenant_id ? String(currentUser.tenant_id) : null;
+
   const [paymentMethod, setPaymentMethod] = React.useState<'card' | 'cash' | 'crypto'>('card');
   const [cardDetails, setCardDetails] = React.useState({ number: '', name: '', expiry: '', cvc: '' });
   const [billing, setBilling] = React.useState({ address: '', city: '', zip: '' });
@@ -34,11 +47,11 @@ export default function CheckoutPage() {
   const [cryptoWallet, setCryptoWallet] = React.useState('');
   const [cashNote, setCashNote] = React.useState('');
   const [errors, setErrors] = React.useState<string[]>([]);
-  const [submitted, setSubmitted] = React.useState(false);
-  const [orderNumber, setOrderNumber] = React.useState<string | null>(null);
   const [review, setReview] = React.useState(false);
+  const [submissionOutcome, setSubmissionOutcome] = React.useState<SubmissionOutcome | null>(null);
+  const [submissionError, setSubmissionError] = React.useState<string | null>(null);
+  const [isProcessing, setIsProcessing] = React.useState(false);
 
-  // Pull the freshest active flags, falling back to cached catalog when offline.
   const resolveCatalogSnapshot = React.useCallback(async (): Promise<Record<string, boolean>> => {
     if (!tenantId) return {};
     const headers: Record<string, string> = { "X-Tenant-ID": tenantId };
@@ -120,34 +133,98 @@ export default function CheckoutPage() {
     setErrors(errs);
     if (errs.length === 0) {
       setReview(true);
+      setSubmissionOutcome(null);
+      setSubmissionError(null);
     }
   };
 
-  const handleSubmit = (event?: React.SyntheticEvent) => {
-    event?.preventDefault?.();
+  const handleSubmit = async () => {
+    if (isProcessing) return;
+    const errs = validate();
+    setErrors(errs);
+    if (errs.length > 0) {
+      setSubmissionError('Please resolve the highlighted issues before submitting.');
+      return;
+    }
+    if (!cart.length) {
+      setSubmissionError('Cart is empty. Add items before submitting.');
+      return;
+    }
 
-    const finalizeOrder = () => {
-      const generatedOrderNumber = 'NP-' + Math.floor(100000 + Math.random() * 900000).toString();
-      setOrderNumber(generatedOrderNumber);
-      setSubmitted(true);
-      // TODO: process order
-    };
+    setSubmissionError(null);
+    setIsProcessing(true);
 
-    detectInactiveItems()
-      .then(inactiveItems => {
-        if (inactiveItems.length > 0) {
-          const detail = inactiveItems.join(', ');
-          const message = `Inactive items detected: ${detail}. Manager override assumed; proceeding with locked pricing.`;
-          console.warn(message);
-          if (typeof window !== 'undefined' && typeof window.alert === 'function') {
-            window.alert(message);
-          }
+    try {
+      const inactiveItems = await detectInactiveItems();
+      if (inactiveItems.length > 0) {
+        const detail = inactiveItems.join(', ');
+        const message = `Inactive items detected: ${detail}. Manager override assumed; proceeding with locked pricing.`;
+        console.warn(message);
+        if (typeof window !== 'undefined' && typeof window.alert === 'function') {
+          window.alert(message);
         }
-      })
-      .catch(err => {
-        console.warn('Unable to verify catalog before checkout submission', err);
-      })
-      .finally(finalizeOrder);
+      }
+
+      const orderItems = cart.map(item => ({
+        product_id: item.id,
+        quantity: item.quantity,
+        unit_price: item.price,
+        line_total: Number((item.price * item.quantity).toFixed(2)),
+      }));
+
+      const metadata: Record<string, unknown> = {
+        customer,
+        shipping,
+        billing,
+        payment_method: paymentMethod,
+        submitted_at: Date.now(),
+      };
+      if (paymentMethod === 'card') metadata['card_last4'] = cardDetails.number.slice(-4);
+      if (paymentMethod === 'cash' && cashNote) metadata['cash_note'] = cashNote;
+      if (paymentMethod === 'crypto' && cryptoWallet) metadata['crypto_wallet'] = cryptoWallet;
+
+      const payload = {
+        items: orderItems,
+        payment_method: paymentMethod,
+        total: Number(totalAmount.toFixed(2)),
+        customer_id: customer.email.trim() || undefined,
+        metadata,
+      };
+
+      const result = await submitOrder(payload);
+
+      clearCart();
+      setReview(false);
+      setErrors([]);
+
+      if (result.status === 'queued') {
+        setSubmissionOutcome({
+          mode: 'queued',
+          reference: result.tempId,
+          status: 'Queued (offline)',
+          paymentStatus: 'Awaiting sync',
+          paymentUrl: null,
+          note: isOnline ? 'Submission failed, queued for retry.' : 'Device offline; order will sync automatically when back online.',
+        });
+      } else {
+        const paymentStatus = result.paymentError
+          ? `Payment error: ${result.paymentError}`
+          : result.payment?.status ?? (paymentMethod === 'cash' ? 'paid' : 'pending');
+        setSubmissionOutcome({
+          mode: 'submitted',
+          reference: result.order.id,
+          status: result.order.status ?? 'Submitted',
+          paymentStatus,
+          paymentUrl: result.payment?.payment_url ?? null,
+          note: result.paymentError ?? undefined,
+        });
+      }
+    } catch (err) {
+      console.error('Order submission failed', err);
+      setSubmissionError(err instanceof Error ? err.message : 'Order submission failed.');
+    } finally {
+      setIsProcessing(false);
+    }
   };
 
   return (
@@ -179,6 +256,11 @@ export default function CheckoutPage() {
         <div className="checkout-section">
           {!review ? (
             <form onSubmit={handleReview} noValidate>
+              {!isOnline && (
+                <div className="info">
+                  Offline mode - order will be queued and synced automatically once reconnected.
+                </div>
+              )}
               <label>Customer Info</label>
               <input name="name" value={customer.name} onChange={handleCustomerChange} placeholder="Full Name" />
               <input name="email" value={customer.email} onChange={handleCustomerChange} placeholder="Email" />
@@ -225,10 +307,15 @@ export default function CheckoutPage() {
                   {errors.map((err, i) => <div key={i}>{err}</div>)}
                 </div>
               )}
-              <button type="submit" className="action-btn">Review & Confirm</button>
+              <button type="submit" className="action-btn" disabled={isProcessing}>{isProcessing ? 'Reviewing...' : 'Review & Confirm'}</button>
             </form>
           ) : (
             <>
+              {!isOnline && (
+                <div className="info">
+                  Offline mode - completing the sale will queue the order for automatic sync.
+                </div>
+              )}
               <h2>Review & Confirm</h2>
               <div style={{ textAlign: 'left', marginBottom: '1rem' }}>
                 <div><strong>Customer Info:</strong> {customer.name}, {customer.email}, {customer.phone}</div>
@@ -246,17 +333,44 @@ export default function CheckoutPage() {
                 )}
               </div>
               <div style={{ fontWeight: 'bold', marginBottom: '1rem' }}>Order Total: ${totalAmount.toFixed(2)}</div>
-              <button className="action-btn" onClick={handleSubmit}>Place Order</button>
+              {submissionError && (
+                <div className="error" style={{ marginBottom: '1rem' }}>{submissionError}</div>
+              )}
+              <button className="action-btn" onClick={handleSubmit} disabled={isProcessing}>
+                {isProcessing ? 'Processing...' : 'Complete Sale'}
+              </button>
+              <button className="action-btn" style={{ marginTop: '0.75rem', background: '#e2e8f0', color: '#153a5b' }} onClick={() => setReview(false)} disabled={isProcessing}>
+                Edit Details
+              </button>
             </>
           )}
         </div>
-        {submitted && orderNumber && (
-          <div className="bg-green-100 text-green-700 p-4 rounded mt-4 text-center">
-            <div className="text-lg font-bold mb-2">Order placed successfully!</div>
-            <div className="mb-1">Your order number is <span className="font-mono bg-white px-2 py-1 rounded text-primary">{orderNumber}</span></div>
-            <div className="mb-1">Thank you for shopping with NovaPOS!</div>
-            <div className="text-xs text-gray-500 mt-2">NovaPOS &copy; 2025</div>
+        {submissionOutcome && (
+          <div className={`p-4 rounded mt-4 text-center ${submissionOutcome.mode === 'queued' ? 'bg-amber-100 text-amber-800' : 'bg-emerald-100 text-emerald-700'}`}>
+            <div className="text-lg font-bold mb-2">
+              {submissionOutcome.mode === 'queued' ? 'Order queued for sync' : 'Order accepted by store'}
+            </div>
+            <div className="mb-1">Reference <span className="font-mono bg-white px-2 py-1 rounded text-primary">{submissionOutcome.reference}</span></div>
+            <div className="mb-1">Status: {submissionOutcome.status}</div>
+            {submissionOutcome.paymentStatus && <div className="mb-1">Payment: {submissionOutcome.paymentStatus}</div>}
+            {submissionOutcome.paymentUrl && (
+              <div className="mb-1 text-sm">
+                Payment link: <a className="text-primary" href={submissionOutcome.paymentUrl} target="_blank" rel="noreferrer">Open payment page</a>
+              </div>
+            )}
+            {submissionOutcome.note && <div className="text-xs text-amber-700 mt-2">{submissionOutcome.note}</div>}
+            <div className="mt-3 flex flex-wrap justify-center gap-2">
+              <button className="action-btn" style={{ background: '#153a5b' }} onClick={() => navigate('/history')}>
+                View Orders
+              </button>
+              <button className="action-btn" onClick={() => navigate('/sales')}>
+                New Sale
+              </button>
+            </div>
           </div>
+        )}
+        {submissionError && !review && (
+          <div className="error" style={{ marginTop: '1rem' }}>{submissionError}</div>
         )}
         <div className="checkout-footer">NovaPOS &copy; 2025</div>
       </div>

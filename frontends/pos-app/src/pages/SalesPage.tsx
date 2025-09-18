@@ -7,7 +7,7 @@ import CartCard from '../components/CartCard';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../AuthContext';
 import { useCart } from '../CartContext';
-import { simulatePayment } from '../utils/payments';
+import { useOrders } from '../OrderContext';
 
 const PRODUCT_SERVICE_URL = (import.meta.env.VITE_PRODUCT_SERVICE_URL ?? 'http://localhost:8081').replace(/\/$/, '');
 const FALLBACK_IMAGE = productIcon;
@@ -30,7 +30,8 @@ const getStorage = () => (typeof window !== 'undefined' ? window.localStorage : 
 
 const SalesPage: React.FC = () => {
   const { logout, isLoggedIn, currentUser, token } = useAuth();
-  const { cart, addItem, removeItem, clearCart, incrementItemQuantity, decrementItemQuantity, totalAmount } = useCart();
+  const { cart, addItem, removeItem, incrementItemQuantity, decrementItemQuantity, totalAmount } = useCart();
+  const { queuedOrders, isOnline, isSyncing } = useOrders();
 
   const [products, setProducts] = useState<ServiceProduct[]>([]);
   const [query, setQuery] = useState('');
@@ -125,6 +126,7 @@ const SalesPage: React.FC = () => {
           setProducts(active);
         }
       } catch (err) {
+        console.warn('Unable to load products', err);
         const hadCached = loadFromCache();
         if (isMounted) {
           if (!hadCached) {
@@ -166,18 +168,6 @@ const SalesPage: React.FC = () => {
     }
   };
 
-  const handlePayment = async (method: 'card' | 'cash' | 'crypto') => {
-    alert(`Processing ${method.toUpperCase()} payment...`);
-    try {
-      await simulatePayment(method, totalAmount);
-      alert(`${method.charAt(0).toUpperCase() + method.slice(1)} payment successful!`);
-      clearCart();
-      navigate('/checkout');
-    } catch (err) {
-      alert(`Payment failed: ${err}`);
-    }
-  };
-
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-100 to-gray-300 dark:from-gray-900 dark:to-gray-800 flex flex-col">
       <header className="flex items-center justify-between px-6 py-4 bg-white dark:bg-gray-900 shadow-md">
@@ -185,8 +175,27 @@ const SalesPage: React.FC = () => {
           <img src={logoTransparent} alt="NovaPOS Logo" className="h-10 w-auto" />
           <span className="text-2xl font-bold text-primary dark:text-white tracking-tight">NovaPOS</span>
         </div>
-        <button className="bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600" onClick={() => { logout(); navigate('/login'); }}>Logout</button>
+        <div className="flex items-center gap-3">
+          <button
+            className="px-4 py-2 rounded border border-cyan-500 text-cyan-700 hover:bg-cyan-500 hover:text-white transition-colors"
+            onClick={() => navigate('/history')}
+          >
+            Orders{queuedOrders.length > 0 ? ` (${queuedOrders.length})` : ''}
+          </button>
+          <button className="bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600" onClick={() => { logout(); navigate('/login'); }}>Logout</button>
+        </div>
       </header>
+
+      {!isOnline && (
+        <div className="w-full bg-amber-200 text-amber-900 px-6 py-3 text-sm text-center">
+          Offline mode - {queuedOrders.length} order{queuedOrders.length === 1 ? '' : 's'} queued. Sales will sync automatically once reconnected.
+        </div>
+      )}
+      {isOnline && queuedOrders.length > 0 && (
+        <div className="w-full bg-sky-200 text-sky-900 px-6 py-3 text-sm text-center">
+          {isSyncing ? 'Synchronizing queued orders...' : `${queuedOrders.length} queued order${queuedOrders.length === 1 ? '' : 's'} awaiting sync.`}
+        </div>
+      )}
 
       <div className="flex-1 flex flex-col w-full items-center">
         <main className="flex flex-col gap-6 px-4 py-8 w-full max-w-5xl mx-auto">
@@ -248,7 +257,7 @@ const SalesPage: React.FC = () => {
               onSubtract: () => decrementQty(item),
             }))}
             total={totalAmount}
-            onCheckout={() => handlePayment('card')}
+            onCheckout={() => navigate('/checkout')}
           />
         </main>
       </div>
