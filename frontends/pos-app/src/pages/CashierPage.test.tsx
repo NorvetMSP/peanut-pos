@@ -1,6 +1,5 @@
-﻿import React from 'react';
 import { describe, beforeEach, afterEach, expect, it, vi } from 'vitest';
-import { render, fireEvent, waitFor, screen } from '@testing-library/react';
+import { render, fireEvent, waitFor, screen, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { AuthProvider } from '../AuthContext';
 import { OrderProvider } from '../OrderContext';
@@ -88,7 +87,7 @@ describe('CashierPage integration flows', () => {
     expect(screen.queryByText('Product Two')).toBeNull();
     fireEvent.change(searchInput, { target: { value: '' } });
 
-    const submitButton = await screen.findByText('Submit Sale');
+    const submitButton = await screen.findByRole('button', { name: /Submit \/ Complete Sale/i });
     fireEvent.click(submitButton);
 
     await screen.findByText('Item Unavailable');
@@ -96,29 +95,34 @@ describe('CashierPage integration flows', () => {
     fireEvent.click(screen.getByText('Replace'));
 
     await waitFor(() => {
-      const ordersButton = screen.getByText(/Orders/);
-      expect(ordersButton.textContent).toContain('(1)');
+      const recentOrdersButton = screen.getByRole('button', { name: /Recent Orders \(F2\)/i });
+      const badge = within(recentOrdersButton).queryByText('1');
+      expect(badge).not.toBeNull();
     });
 
     Object.defineProperty(window.navigator, 'onLine', { value: true, configurable: true });
     window.dispatchEvent(new Event('online'));
 
     await waitFor(() => {
-      const ordersButton = screen.getByText(/Orders/);
-      expect(ordersButton.textContent).not.toContain('(');
+      const recentOrdersButton = screen.getByRole('button', { name: /Recent Orders \(F2\)/i });
+      const badge = within(recentOrdersButton).queryByText('1');
+      expect(badge).toBeNull();
     });
 
     await new Promise(resolve => setTimeout(resolve, 1200));
     fireEvent.click(screen.getAllByText('Add')[0]);
-    fireEvent.click(screen.getByText('Submit Sale'));
+    fireEvent.click(screen.getByRole('button', { name: /Submit \/ Complete Sale/i }));
 
     await waitFor(() => {
-      expect(screen.getByText('Your cart is empty.')).toBeTruthy();
+      expect(screen.getByText(/Your cart is empty/)).toBeTruthy();
     });
 
-    fireEvent.click(screen.getByText(/Orders/));
+    fireEvent.click(screen.getByRole('button', { name: /Recent Orders \(F2\)/i }));
     await screen.findByText(/Ref:/);
 
     view.unmount();
   });
 });
+
+
+

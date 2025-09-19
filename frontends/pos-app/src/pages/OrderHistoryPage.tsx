@@ -154,7 +154,7 @@ const OrderHistoryPage: React.FC = () => {
             >
               {isSyncing ? 'Syncing...' : 'Retry Sync'}
             </button>
-          </div
+          </div>
         </header>
 
         {!isOnline && (
@@ -296,5 +296,7 @@ const OrderHistoryPage: React.FC = () => {
 };
 
 export default OrderHistoryPage;
+
+
 
 

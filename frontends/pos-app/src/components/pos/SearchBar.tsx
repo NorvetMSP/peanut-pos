@@ -6,8 +6,8 @@ type SearchBarProps = {
 };
 
 const SearchBar: React.FC<SearchBarProps> = ({ query, onQueryChange }) => (
-  <div className="flex-1">
-    <label className="block text-sm font-medium text-gray-600 mb-1" htmlFor="pos-product-search">
+  <div className="cashier-field">
+    <label className="cashier-field__label" htmlFor="pos-product-search">
       Search products
     </label>
     <input
@@ -15,7 +15,7 @@ const SearchBar: React.FC<SearchBarProps> = ({ query, onQueryChange }) => (
       value={query}
       onChange={event => onQueryChange(event.target.value)}
       placeholder="Search products..."
-      className="w-full px-3 py-2 border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-cyan-500"
+      className="cashier-input"
       type="search"
     />
   </div>

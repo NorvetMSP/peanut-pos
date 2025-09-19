@@ -7,17 +7,13 @@ type QueuedOrdersBannerProps = {
 };
 
 const QueuedOrdersBanner: React.FC<QueuedOrdersBannerProps> = ({ count, syncing, onSync }) => (
-  <div className="w-full bg-sky-200 text-sky-900 px-6 py-3 text-sm text-center flex items-center justify-center gap-3">
+  <div className="cashier-banner cashier-banner--queue">
     {syncing ? (
       <>Synchronizing queued orders...</>
     ) : (
       <>
-        {count} order{count === 1 ? '' : 's'} waiting to sync.
-        <button
-          type="button"
-          onClick={onSync}
-          className="ml-2 px-3 py-1 rounded bg-sky-700 text-white text-xs font-semibold hover:bg-sky-800"
-        >
+        {count} order{count === 1 ? '' : 's'} awaiting sync.
+        <button type="button" className="cashier-queue-sync" onClick={onSync}>
           Retry Sync
         </button>
       </>

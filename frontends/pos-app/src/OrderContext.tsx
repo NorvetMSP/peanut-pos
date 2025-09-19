@@ -42,7 +42,7 @@ type OrderItemPayload = {
   line_total: number;
 };
 
-type DraftOrderPayload = {
+export type DraftOrderPayload = {
   items: OrderItemPayload[];
   payment_method: PaymentMethod;
   total: number;
@@ -92,7 +92,7 @@ type OrderHistoryEntry = {
   syncedAt?: number;
 };
 
-type SubmitOrderResult =
+export type SubmitOrderResult =
   | { status: 'queued'; tempId: string; queuedCount: number }
   | { status: 'submitted'; order: OrderResponse; payment?: PaymentResponse; paymentError?: string };
 
@@ -746,3 +746,4 @@ export const useOrders = (): OrderContextValue => {
   if (!ctx) throw new Error('useOrders must be used within OrderProvider');
   return ctx;
 };
+

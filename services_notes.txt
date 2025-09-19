@@ -65,6 +65,16 @@ PS C:\Projects\novapos> docker exec -it novapos-pg psql -U postgres -c "CREATE D
 CREATE DATABASE
 PS C:\Projects\novapos> 
 
+If you want to stay connected, open psql against the default postgres database and kill the stragglers manually:
+psql postgres://novapos:novapos@localhost:5432/postgres
+then inside psql run:
+SELECT pg_terminate_backend(pid)
+FROM pg_stat_activity
+WHERE datname = 'novapos'
+  AND pid <> pg_backend_pid();
+That terminates every session using novapos. E
+
+
 
 Use this same URL for product-service, order-service, auth-service, and inventory-service in the prototype:
 

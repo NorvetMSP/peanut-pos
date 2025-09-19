@@ -9,67 +9,73 @@ type CartSidebarProps = {
   onRemoveItem: (productId: string) => void;
 };
 
+const formatCurrency = (value: number): string => `$${value.toFixed(2)}`;
+
 const CartSidebar: React.FC<CartSidebarProps> = ({ items, inactiveItemIds = [], onAddQty, onSubQty, onRemoveItem }) => {
   const total = items.reduce((sum, item) => sum + item.price * item.quantity, 0);
+  const itemCount = items.reduce((sum, item) => sum + item.quantity, 0);
 
   return (
-    <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-4 flex flex-col max-h-[60vh]">
-      <h2 className="text-xl font-bold mb-3 text-gray-800 dark:text-gray-100">Cart</h2>
-      <div className="flex-1 overflow-y-auto pr-1">
+    <div className="cashier-cart-panel">
+      <div className="cashier-cart-panel__header">
+        <h2>Cart</h2>
+        <span>{itemCount} item{itemCount === 1 ? '' : 's'}</span>
+      </div>
+      <div className="cashier-cart-items">
         {items.length === 0 ? (
-          <p className="text-gray-500 dark:text-gray-400">Your cart is empty.</p>
+          <p className="cashier-cart-panel__empty">
+            Your cart is empty. Add items from the catalog to begin a sale.
+          </p>
         ) : (
-          <ul className="space-y-2">
-            {items.map(item => {
-              const isInactive = inactiveItemIds.includes(item.id);
-              return (
-                <li key={item.id} className="flex items-center justify-between bg-gray-50 dark:bg-gray-700 rounded px-3 py-2">
-                  <div className="flex-1 mr-2">
-                    <div className="text-sm font-semibold text-gray-800 dark:text-gray-100">
-                      {item.name}
-                      {isInactive && <span className="text-red-600 text-xs ml-1">(inactive)</span>}
-                    </div>
-                    <div className="text-xs text-gray-500 dark:text-gray-400">
-                      Qty {item.quantity} × ${item.price.toFixed(2)}
-                    </div>
+          items.map(item => {
+            const isInactive = inactiveItemIds.includes(item.id);
+            const lineTotal = item.price * item.quantity;
+            return (
+              <div key={item.id} className="cashier-cart-item">
+                <div className="cashier-cart-item__top">
+                  <div className="cashier-cart-item__info">
+                    <div className="cashier-cart-item__title">{item.name}</div>
+                    <div className="cashier-cart-item__subtitle">Qty {item.quantity} × {formatCurrency(item.price)}</div>
+                    {isInactive && <div className="cashier-inactive-pill">⚠ Item inactive — replace or remove</div>}
                   </div>
-                  <div className="flex items-center">
+                  <button
+                    type="button"
+                    className="cashier-cart-item__delete"
+                    onClick={() => onRemoveItem(item.id)}
+                    title="Remove item"
+                  >
+                    ×
+                  </button>
+                </div>
+                <div className="cashier-cart-item__bottom">
+                  <div className="cashier-cart-value">{formatCurrency(lineTotal)}</div>
+                  <div className="cashier-cart-qty">
                     <button
                       type="button"
-                      className="px-2 text-lg text-gray-700 dark:text-gray-200 disabled:opacity-50"
                       onClick={() => onSubQty(item.id)}
                       disabled={item.quantity <= 1}
                       aria-label="Decrease quantity"
                     >
-                      &minus;
+                      –
                     </button>
-                    <span className="px-2 text-sm text-gray-800 dark:text-gray-100">{item.quantity}</span>
+                    <span>{item.quantity}</span>
                     <button
                       type="button"
-                      className="px-2 text-lg text-gray-700 dark:text-gray-200"
                       onClick={() => onAddQty(item.id)}
                       aria-label="Increase quantity"
                     >
                       +
                     </button>
-                    <button
-                      type="button"
-                      className="ml-3 text-red-600 dark:text-red-400 text-xl"
-                      onClick={() => onRemoveItem(item.id)}
-                      title="Remove item"
-                    >
-                      &times;
-                    </button>
                   </div>
-                </li>
-              );
-            })}
-          </ul>
+                </div>
+              </div>
+            );
+          })
         )}
       </div>
-      <div className="mt-3 pt-3 border-t border-gray-200 dark:border-gray-700 text-lg font-semibold flex justify-between text-gray-800 dark:text-gray-100">
-        <span>Total:</span>
-        <span>${total.toFixed(2)}</span>
+      <div className="cashier-cart-total">
+        <span>Total</span>
+        <span>{formatCurrency(total)}</span>
       </div>
     </div>
   );
