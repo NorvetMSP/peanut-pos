@@ -21,7 +21,7 @@ pub struct NewOrder {
     pub items: Vec<OrderItem>,
     pub payment_method: String,
     pub total: f64,
-    pub customer_id: Option<Uuid>,
+    pub customer_id: Option<String>,
     pub offline: Option<bool>,
 }
 
@@ -33,6 +33,11 @@ pub struct Order {
     pub status: String,
     pub customer_id: Option<Uuid>,
     pub offline: bool,
+}
+
+#[derive(Serialize, Debug)]
+pub struct ClearOfflineResponse {
+    pub cleared: u64,
 }
 
 #[derive(Deserialize)]
@@ -75,14 +80,33 @@ pub async fn create_order(
         "COMPLETED"
     };
 
+    let customer_uuid = customer_id.as_ref().and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            match Uuid::parse_str(trimmed) {
+                Ok(uuid) => Some(uuid),
+                Err(err) => {
+                    tracing::warn!(
+                        customer_id = trimmed,
+                        ?err,
+                        "Ignoring invalid customer_id; proceeding without association"
+                    );
+                    None
+                }
+            }
+        }
+    });
+
     let order = sqlx::query_as::<_, Order>(
-        "INSERT INTO orders (id, tenant_id, total, status, customer_id, offline)          VALUES ($1, $2, $3, $4, $5, $6)          RETURNING id, tenant_id, total, status, customer_id, offline",
+        "INSERT INTO orders (id, tenant_id, total, status, customer_id, offline)          VALUES ($1, $2, $3, $4, $5, $6)          RETURNING id, tenant_id, total::FLOAT8 as total, status, customer_id, offline",
     )
     .bind(order_id)
     .bind(tenant_id)
     .bind(total)
     .bind(status)
-    .bind(customer_id)
+    .bind(customer_uuid)
     .bind(offline_flag)
     .fetch_one(&state.db)
     .await
@@ -99,7 +123,7 @@ pub async fn create_order(
             "tenant_id": tenant_id,
             "items": items,
             "total": total,
-            "customer_id": customer_id,
+            "customer_id": customer_uuid,
             "offline": order.offline
         });
         if let Err(err) = state
@@ -118,7 +142,7 @@ pub async fn create_order(
         pending_orders
             .lock()
             .unwrap()
-            .insert(order.id, (items, customer_id, offline_flag));
+            .insert(order.id, (items, customer_uuid, offline_flag));
     }
 
     Ok(Json(order))
@@ -140,7 +164,7 @@ pub async fn refund_order(
 
     let updated_order = sqlx::query_as::<_, Order>(
         "UPDATE orders SET status = 'REFUNDED' WHERE id = $1 AND tenant_id = $2
-         RETURNING id, tenant_id, total, status, customer_id, offline",
+         RETURNING id, tenant_id, total::FLOAT8 as total, status, customer_id, offline",
     )
     .bind(req.order_id)
     .bind(tenant_id)
@@ -201,7 +225,7 @@ pub async fn list_orders(
         ))?;
 
     let orders = sqlx::query_as::<_, Order>(
-        "SELECT id, tenant_id, total, status, customer_id, offline          FROM orders          WHERE tenant_id = $1          ORDER BY created_at DESC          LIMIT 20",
+        "SELECT id, tenant_id, total::FLOAT8 as total, status, customer_id, offline          FROM orders          WHERE tenant_id = $1          ORDER BY created_at DESC          LIMIT 20",
     )
     .bind(tenant_id)
     .fetch_all(&state.db)
@@ -214,4 +238,33 @@ pub async fn list_orders(
     })?;
 
     Ok(Json(orders))
+}
+
+pub async fn clear_offline_orders(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<ClearOfflineResponse>, (StatusCode, String)> {
+    let tenant_id = headers
+        .get("X-Tenant-ID")
+        .and_then(|hdr| hdr.to_str().ok())
+        .and_then(|value| Uuid::parse_str(value).ok())
+        .ok_or((
+            StatusCode::BAD_REQUEST,
+            "Missing or invalid X-Tenant-ID header".to_string(),
+        ))?;
+
+    let result = sqlx::query("DELETE FROM orders WHERE tenant_id = $1 AND offline = TRUE")
+        .bind(tenant_id)
+        .execute(&state.db)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to clear offline orders: {}", e),
+            )
+        })?;
+
+    Ok(Json(ClearOfflineResponse {
+        cleared: result.rows_affected(),
+    }))
 }

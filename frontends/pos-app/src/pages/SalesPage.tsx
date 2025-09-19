@@ -1,9 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import logoTransparent from '../assets/logo_transparent.png';
 import productIcon from '../assets/react.svg';
-import ProductCardModern from '../components/ProductCardModern';
-import '../components/ProductCardModern.css';
 import CartCard from '../components/CartCard';
+import './SalesPage.css';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../AuthContext';
 import { useCart } from '../CartContext';
@@ -118,6 +117,17 @@ const persistCatalog = (storage: Storage | null, cacheKey: string, products: Ser
   };
   storage.setItem(cacheKey, JSON.stringify(envelope));
   return envelope.updatedAt;
+};
+
+const extractUserField = (user: Record<string, unknown> | null | undefined, keys: string[]): string | null => {
+  if (!user) return null;
+  for (const key of keys) {
+    const value = user[key];
+    if (typeof value === 'string' && value.trim().length > 0) {
+      return value.trim();
+    }
+  }
+  return null;
 };
 
 const SalesPage: React.FC = () => {
@@ -260,9 +270,9 @@ const SalesPage: React.FC = () => {
   const filteredProducts = useMemo(() => {
     const trimmed = query.trim().toLowerCase();
     if (!trimmed) return products;
-    return products.filter((p) => {
-      const nameMatch = p.name.toLowerCase().includes(trimmed);
-      const skuMatch = p.sku ? p.sku.toLowerCase().includes(trimmed) : false;
+    return products.filter(product => {
+      const nameMatch = product.name.toLowerCase().includes(trimmed);
+      const skuMatch = product.sku ? product.sku.toLowerCase().includes(trimmed) : false;
       return nameMatch || skuMatch;
     });
   }, [products, query]);
@@ -316,6 +326,54 @@ const SalesPage: React.FC = () => {
   const tax = Number((subtotal * SALES_TAX_RATE).toFixed(2));
   const displayTotal = Number((subtotal + tax).toFixed(2));
 
+  const queuedOrdersCount = queuedOrders.length;
+
+  const storeLabel = useMemo(() => {
+    const record = currentUser as Record<string, unknown> | null | undefined;
+    const fromFields = extractUserField(record, ['store_name', 'store', 'location', 'branch', 'tenant_name']);
+    if (fromFields) return fromFields;
+    if (typeof currentUser?.tenant_id === 'string' && currentUser.tenant_id.trim().length > 0) {
+      return currentUser.tenant_id;
+    }
+    return 'Unassigned Store';
+  }, [currentUser]);
+
+  const userLabel = useMemo(() => {
+    const record = currentUser as Record<string, unknown> | null | undefined;
+    const fromFields = extractUserField(record, ['display_name', 'name', 'full_name', 'username', 'email']);
+    if (fromFields) return fromFields;
+    return 'Team Member';
+  }, [currentUser]);
+
+  const queueStatusLabel = useMemo(() => {
+    if (isOnline) {
+      if (queuedOrdersCount === 0) return 'Queue empty';
+      return `${queuedOrdersCount} queued`;
+    }
+    if (queuedOrdersCount === 0) return 'No offline orders';
+    return `${queuedOrdersCount} offline`;
+  }, [isOnline, queuedOrdersCount]);
+
+  const syncStatusLabel = useMemo(() => {
+    if (!isOnline) return 'Offline mode';
+    if (!lastSyncTime) return 'Synced just now';
+    return `Synced ${formatRelativeTime(lastSyncTime)}`;
+  }, [isOnline, lastSyncTime]);
+
+  const totalProductCount = products.length;
+  const filteredProductCount = filteredProducts.length;
+
+  const productCountLabel = useMemo(() => {
+    if (totalProductCount === 0) return 'No products';
+    if (filteredProductCount === totalProductCount) {
+      return `${totalProductCount} items`;
+    }
+    return `${filteredProductCount} of ${totalProductCount} items`;
+  }, [filteredProductCount, totalProductCount]);
+
+  const cartItemCount = cart.length;
+  const cartUnitCount = totalUnits;
+
   const incrementQty = (item: { id: string }) => {
     incrementItemQuantity(item.id);
   };
@@ -325,115 +383,223 @@ const SalesPage: React.FC = () => {
     }
   };
 
+  const handleAddToCart = (product: ServiceProduct) => {
+    addItem({
+      id: product.id,
+      name: product.name,
+      price: product.price,
+      sku: product.sku ?? undefined,
+    });
+  };
+
   return (
-    <div className="min-h-screen bg-gradient-to-br from-gray-100 to-gray-300 dark:from-gray-900 dark:to-gray-800 flex flex-col">
-      <header className="flex items-center justify-between px-6 py-4 bg-white dark:bg-gray-900 shadow-md">
-        <div className="flex items-center gap-3">
-          <img src={logoTransparent} alt="NovaPOS Logo" className="h-10 w-auto" />
-          <span className="text-2xl font-bold text-primary dark:text-white tracking-tight">NovaPOS</span>
-        </div>
-        <div className="flex items-center gap-3">
-          <button
-            className="px-4 py-2 rounded border border-cyan-500 text-cyan-700 hover:bg-cyan-500 hover:text-white transition-colors"
-            onClick={() => navigate('/history')}
-          >
-            Orders{queuedOrders.length > 0 ? ` (${queuedOrders.length})` : ''}
-          </button>
-          <button className="bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600" onClick={() => { logout(); navigate('/login'); }}>Logout</button>
+    <div className="sales-root">
+      <header className="sales-header">
+        <div className="sales-header__inner">
+          <div className="sales-header__top">
+            <div className="sales-brand">
+              <img src={logoTransparent} alt="NovaPOS Logo" />
+              <div>
+                <div className="sales-brand__title">NovaPOS Catalog</div>
+                <div className="sales-status-list">
+                  <span className="sales-badge sales-badge--muted">Store: {storeLabel}</span>
+                  <span className="sales-badge sales-badge--muted">User: {userLabel}</span>
+                  <span
+                    className={`sales-badge ${isOnline ? 'sales-badge--online' : 'sales-badge--offline'}`}
+                  >
+                    {isOnline ? 'Online' : 'Offline'}
+                  </span>
+                  <span className="sales-badge sales-badge--muted">{syncStatusLabel}</span>
+                </div>
+              </div>
+            </div>
+            <div className="sales-header__actions">
+              <button
+                type="button"
+                className="sales-button sales-button--light"
+                onClick={() => navigate('/pos')}
+              >
+                POS Terminal
+              </button>
+              <button
+                type="button"
+                className="sales-button sales-button--light"
+                onClick={() => navigate('/history')}
+              >
+                Orders
+                {queuedOrdersCount > 0 && <span className="sales-orders-badge">{queuedOrdersCount}</span>}
+              </button>
+              <button
+                type="button"
+                className="sales-button sales-button--danger"
+                onClick={() => {
+                  logout();
+                  navigate('/login');
+                }}
+              >
+                Logout
+              </button>
+            </div>
+          </div>
+          <div className="sales-header__controls">
+            <div className="sales-field">
+              <label className="sales-field__label" htmlFor="catalog-search">
+                Search catalog
+              </label>
+              <input
+                id="catalog-search"
+                type="search"
+                value={query}
+                onChange={event => setQuery(event.target.value)}
+                placeholder="Search products by name or SKU"
+                className="sales-input"
+                aria-label="Search products by name or SKU"
+              />
+            </div>
+            <div className="sales-meta">
+              <span className="sales-meta__item">Catalog: {productCountLabel}</span>
+              <span className="sales-meta__item">Last sync: {lastSyncLabel}</span>
+              {lastFetchLabel && <span className="sales-meta__item">Fetch time: {lastFetchLabel}</span>}
+              {isCatalogStale && (
+                <span className="sales-meta__item sales-meta__item--warning">Catalog older than expected</span>
+              )}
+              {isRefreshing && <span className="sales-meta__item sales-meta__item--info">Refreshing...</span>}
+            </div>
+          </div>
         </div>
       </header>
 
       {!isOnline && (
-        <div className="w-full bg-amber-200 text-amber-900 px-6 py-3 text-sm text-center">
-          Offline mode - {queuedOrders.length} order{queuedOrders.length === 1 ? '' : 's'} queued. Sales will sync automatically once reconnected.
+        <div className="sales-banner sales-banner--offline">
+          Offline mode - {queuedOrdersCount} order{queuedOrdersCount === 1 ? '' : 's'} queued. Sales will sync automatically once reconnected.
         </div>
       )}
-      {isOnline && queuedOrders.length > 0 && (
-        <div className="w-full bg-sky-200 text-sky-900 px-6 py-3 text-sm text-center">
-          {isSyncing ? 'Synchronizing queued orders...' : `${queuedOrders.length} queued order${queuedOrders.length === 1 ? '' : 's'} awaiting sync.`}
+      {isOnline && queuedOrdersCount > 0 && (
+        <div className="sales-banner sales-banner--queue">
+          {isSyncing ? 'Synchronizing queued orders...' : `${queuedOrdersCount} order${queuedOrdersCount === 1 ? '' : 's'} awaiting sync.`}
         </div>
       )}
 
-      <div className="flex-1 flex flex-col w-full items-center">
-        <main className="flex flex-col gap-6 px-4 py-8 w-full max-w-5xl mx-auto">
-          <section className="w-full">
-            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-2">
-              <h2 className="text-xl font-semibold text-gray-800 dark:text-gray-100">Products</h2>
-              <input
-                type="search"
-                value={query}
-                onChange={(event) => setQuery(event.target.value)}
-                placeholder="Search products by name or SKU"
-                className="w-full sm:w-80 px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                aria-label="Search products"
-              />
-            </div>
-            <div className="flex flex-wrap items-center justify-between gap-3 text-xs text-gray-500 mb-3">
-              <span>Last sync: {lastSyncLabel}</span>
-              <div className="flex flex-wrap items-center gap-3">
-                {lastFetchLabel && <span>Last load: {lastFetchLabel}</span>}
-                {isCatalogStale && <span className="text-amber-600">Catalog older than expected</span>}
-                {isRefreshing && <span className="text-indigo-500">Refreshing...</span>}
+      <main className="sales-main">
+        <div className="sales-main__grid">
+          <section className="sales-card sales-card--catalog">
+            <div className="sales-card__header">
+              <div>
+                <h2 className="sales-card__title">Product Catalog</h2>
+                <p className="sales-card__subtitle">Browse and curate the store offerings.</p>
               </div>
+              <span className="sales-card__indicator">
+                {isLoadingProducts ? 'Loading...' : productCountLabel}
+              </span>
             </div>
             {isLoadingProducts && (
-              <div className="text-sm text-gray-500 mb-2">Loading products...</div>
-            )}
-            {isOfflineResult && !isLoadingProducts && (
-              <div className="text-sm text-amber-600 mb-2">Offline mode: showing last synced catalog.</div>
+              <div className="sales-card__notice sales-card__notice--info">Loading products...</div>
             )}
             {error && !isLoadingProducts && (
-              <div className="text-sm text-red-600 mb-2">{error}</div>
+              <div className="sales-card__notice sales-card__notice--error">{error}</div>
             )}
-            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-6">
+            {isOfflineResult && !isLoadingProducts && (
+              <div className="sales-card__notice sales-card__notice--offline">
+                Offline mode: showing last synced catalog.
+              </div>
+            )}
+            {isCatalogStale && !isLoadingProducts && (
+              <div className="sales-card__notice sales-card__notice--warning">
+                Catalog appears out of date. Try refreshing soon.
+              </div>
+            )}
+            <div className="sales-product-grid">
               {filteredProducts.map(product => (
-                <ProductCardModern
-                  key={product.id}
-                  product={{
-                    id: product.id,
-                    name: product.name,
-                    description: product.description,
-                    price: product.price,
-                    sku: product.sku ?? undefined,
-                    image: product.image_url ?? FALLBACK_IMAGE,
-                    onAdd: () => addItem({
-                      id: product.id,
-                      name: product.name,
-                      price: product.price,
-                      sku: product.sku ?? undefined,
-                    }),
-                    onWishlist: () => alert(`Added ${product.name} to wishlist!`),
-                  }}
-                />
-              ))}
-              {!isLoadingProducts && filteredProducts.length === 0 && (
-                <div className="col-span-full text-center text-gray-500">
-                  No products found. Try adjusting your search.
+                <div key={product.id} className="sales-product-card">
+                  <div className="sales-product-card__image">
+                    {product.image_url ? (
+                      <img src={product.image_url} alt={product.name} />
+                    ) : (
+                      <div className="sales-product-card__placeholder">
+                        <img src={FALLBACK_IMAGE} alt="" aria-hidden="true" />
+                        <span>No image</span>
+                      </div>
+                    )}
+                  </div>
+                  <div className="sales-product-card__body">
+                    <div className="sales-product-card__header">
+                      <span className="sales-product-card__name">{product.name}</span>
+                      <span className="sales-product-card__price">${product.price.toFixed(2)}</span>
+                    </div>
+                    {product.sku && <span className="sales-product-card__sku">SKU: {product.sku}</span>}
+                    <p
+                      className={`sales-product-card__description${
+                        product.description ? '' : ' sales-product-card__description--muted'
+                      }`}
+                    >
+                      {product.description || 'No description provided.'}
+                    </p>
+                    <div className="sales-product-card__footer">
+                      <button
+                        type="button"
+                        className="sales-product-card__add"
+                        onClick={() => handleAddToCart(product)}
+                        aria-label={`Add ${product.name} to cart`}
+                      >
+                        Add to Cart
+                      </button>
+                    </div>
+                  </div>
                 </div>
-              )}
+              ))}
             </div>
+            {!isLoadingProducts && filteredProducts.length === 0 && (
+              <div className="sales-card__empty-state">
+                No products found. Try adjusting your search or filters.
+              </div>
+            )}
           </section>
 
-          <CartCard
-            items={cart.map(item => ({
-              id: item.id,
-              name: item.name,
-              price: item.price,
-              quantity: item.quantity,
-              onRemove: () => removeItem(item.id),
-              onIncrement: () => incrementQty(item),
-              onDecrement: () => decrementQty(item),
-              status: cartDiagnostics[item.id],
-            }))}
-            subtotal={subtotal}
-            tax={tax}
-            total={displayTotal}
-            taxRate={SALES_TAX_RATE}
-            onCheckout={() => navigate('/checkout')}
-            onClear={clearCart}
-          />
-        </main>
-      </div>
+          <aside className="sales-sidebar">
+            <div className="sales-card sales-card--snapshot">
+              <h3 className="sales-card__title">Cart Snapshot</h3>
+              <div className="sales-snapshot-grid">
+                <div>
+                  <span className="sales-snapshot__label">Items</span>
+                  <span className="sales-snapshot__value">{cartItemCount}</span>
+                </div>
+                <div>
+                  <span className="sales-snapshot__label">Units</span>
+                  <span className="sales-snapshot__value">{cartUnitCount}</span>
+                </div>
+                <div>
+                  <span className="sales-snapshot__label">Total</span>
+                  <span className="sales-snapshot__value">${displayTotal.toFixed(2)}</span>
+                </div>
+                <div>
+                  <span className="sales-snapshot__label">Queue</span>
+                  <span className="sales-snapshot__badge">{queueStatusLabel}</span>
+                </div>
+              </div>
+            </div>
+            <div className="sales-cart-shell">
+              <CartCard
+                items={cart.map(item => ({
+                  id: item.id,
+                  name: item.name,
+                  price: item.price,
+                  quantity: item.quantity,
+                  onRemove: () => removeItem(item.id),
+                  onIncrement: () => incrementQty(item),
+                  onDecrement: () => decrementQty(item),
+                  status: cartDiagnostics[item.id],
+                }))}
+                subtotal={subtotal}
+                tax={tax}
+                total={displayTotal}
+                taxRate={SALES_TAX_RATE}
+                onCheckout={() => navigate('/checkout')}
+                onClear={clearCart}
+              />
+            </div>
+          </aside>
+        </div>
+      </main>
     </div>
   );
 };

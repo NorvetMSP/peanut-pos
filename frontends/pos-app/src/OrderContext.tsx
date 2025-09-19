@@ -29,6 +29,8 @@ const STATUS_POLL_INTERVAL_MS = (() => {
   return 15000;
 })();
 
+const AUTO_FLUSH_MIN_INTERVAL_MS = 5000;
+
 const TERMINAL_STATUS_KEYWORDS = ['complete', 'completed', 'accepted', 'fulfilled', 'cancel', 'cancelled', 'void', 'voided', 'declined', 'failed', 'refunded', 'closed'];
 const PENDING_STATUS_KEYWORDS = ['pending', 'processing', 'awaiting', 'submitted'];
 const PENDING_PAYMENT_KEYWORDS = ['pending', 'processing', 'awaiting', 'requires', 'open'];
@@ -42,7 +44,7 @@ type OrderItemPayload = {
   line_total: number;
 };
 
-type DraftOrderPayload = {
+export type DraftOrderPayload = {
   items: OrderItemPayload[];
   payment_method: PaymentMethod;
   total: number;
@@ -92,7 +94,7 @@ type OrderHistoryEntry = {
   syncedAt?: number;
 };
 
-type SubmitOrderResult =
+export type SubmitOrderResult =
   | { status: 'queued'; tempId: string; queuedCount: number }
   | { status: 'submitted'; order: OrderResponse; payment?: PaymentResponse; paymentError?: string };
 
@@ -273,12 +275,18 @@ export const OrderProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const [wsRetryToken, setWsRetryToken] = useState(0);
 
   const queueRef = useRef<QueuedOrder[]>(queuedOrders);
+  const isOnlineRef = useRef<boolean>(isOnline);
+  const autoFlushRef = useRef<number>(0);
   const wsRef = useRef<WebSocket | null>(null);
   const wsTimeoutRef = useRef<number | null>(null);
 
   useEffect(() => {
     queueRef.current = queuedOrders;
   }, [queuedOrders]);
+
+  useEffect(() => {
+    isOnlineRef.current = isOnline;
+  }, [isOnline]);
 
   useEffect(() => {
     if (!isBrowser) return;
@@ -467,7 +475,9 @@ export const OrderProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   }, [addRecentOrder, callIntegrationGateway, postOrder, updateRecentOrder]);
 
   const flushQueue = useCallback(async () => {
-    if (!navigator.onLine) return;
+    if (!isBrowser) return;
+    const navigatorOffline = typeof navigator !== 'undefined' && navigator.onLine === false;
+    if (!isOnlineRef.current && navigatorOffline) return;
     if (queueRef.current.length === 0) return;
     if (!tenantId) return;
     if (isSyncing) return;
@@ -481,6 +491,23 @@ export const OrderProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       setIsSyncing(false);
     }
   }, [isSyncing, processQueuedEntry, tenantId]);
+
+  useEffect(() => {
+    if (!isBrowser) return;
+    if (!isOnline) {
+      autoFlushRef.current = 0;
+      return;
+    }
+    if (isSyncing) return;
+    if (queueRef.current.length === 0) {
+      autoFlushRef.current = 0;
+      return;
+    }
+    const now = Date.now();
+    if (now - autoFlushRef.current < AUTO_FLUSH_MIN_INTERVAL_MS) return;
+    autoFlushRef.current = now;
+    flushQueue().catch(err => console.warn('Unable to flush queue while online', err));
+  }, [flushQueue, isOnline, isSyncing, queuedOrders.length]);
 
   useEffect(() => {
     if (!isBrowser) return;

@@ -10,6 +10,7 @@ import { resolveServiceUrl } from '../utils/env';
 import './AdminSectionModern.css';
 
 const AUTH_SERVICE_URL = resolveServiceUrl('VITE_AUTH_SERVICE_URL', 'http://localhost:8085');
+const ORDER_SERVICE_URL = resolveServiceUrl('VITE_ORDER_SERVICE_URL', 'http://localhost:8084');
 
 type TenantRecord = {
   id: string;
@@ -101,6 +102,7 @@ const SettingsPage: React.FC = () => {
   const [loadingKeys, setLoadingKeys] = useState(false);
   const [creatingTenant, setCreatingTenant] = useState(false);
   const [creatingKey, setCreatingKey] = useState(false);
+  const [clearingQueue, setClearingQueue] = useState(false);
 
   const [newTenantName, setNewTenantName] = useState('');
   const [keyLabel, setKeyLabel] = useState('');
@@ -118,9 +120,10 @@ const SettingsPage: React.FC = () => {
   }, [isLoggedIn, navigate]);
 
   const buildHeaders = useCallback(
-    (includeJson = false): Record<string, string> => {
+    (includeJson = false, tenantOverride?: string | null): Record<string, string> => {
       const headers: Record<string, string> = {};
-      if (tenantHeader) headers['X-Tenant-ID'] = tenantHeader;
+      const targetTenant = tenantOverride ?? tenantHeader;
+      if (targetTenant) headers['X-Tenant-ID'] = targetTenant;
       if (token) headers['Authorization'] = `Bearer ${token}`;
       if (includeJson) headers['Content-Type'] = 'application/json';
       return headers;
@@ -323,6 +326,56 @@ const SettingsPage: React.FC = () => {
     }
   };
 
+  const handleClearQueue = useCallback(async (): Promise<void> => {
+    const targetTenantId = selectedTenantId ?? tenantHeader;
+    if (!targetTenantId) {
+      setError("Select a tenant before clearing the offline queue.");
+      return;
+    }
+
+    setClearingQueue(true);
+    setError(null);
+    setSuccessMessage(null);
+
+    try {
+      const headers = buildHeaders(false, targetTenantId);
+      const response = await fetch(`${ORDER_SERVICE_URL}/orders/offline/clear`, {
+        method: "POST",
+        headers,
+      });
+
+      if (!response.ok) {
+        const message = await response.text();
+        throw new Error(message || `Request failed (${response.status})`);
+      }
+
+      let cleared = 0;
+      try {
+        const payload = (await response.json()) as { cleared?: number };
+        if (payload && typeof payload.cleared === "number") {
+          cleared = payload.cleared;
+        }
+      } catch (parseError) {
+        console.warn("Unable to parse clear queue response", parseError);
+      }
+
+      const message =
+        cleared === 0
+          ? "No offline orders were found for the selected tenant."
+          : `Cleared ${cleared} offline order${cleared === 1 ? "" : "s"} for the selected tenant.`;
+      setSuccessMessage(message);
+    } catch (err) {
+      console.error("Unable to clear offline queue", err);
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Unable to clear offline orders. Please try again.",
+      );
+    } finally {
+      setClearingQueue(false);
+    }
+  }, [buildHeaders, selectedTenantId, tenantHeader]);
+
   const tenantOptions = useMemo(
     () => tenants.map(item => ({ value: item.id, label: item.name })),
     [tenants]
@@ -430,6 +483,17 @@ const SettingsPage: React.FC = () => {
                 </select>
               </div>
             </div>
+
+          <div className="mt-4 flex justify-end">
+            <button
+              type="button"
+              className="admin-section-btn"
+              onClick={() => void handleClearQueue()}
+              disabled={clearingQueue || !selectedTenantId}
+            >
+              {clearingQueue ? 'Clearing...' : 'Clear Offline Queue'}
+            </button>
+          </div>
 
             <form className="mt-6 grid gap-4 md:grid-cols-2" onSubmit={event => { void handleCreateKey(event); }}>
               <div className="flex flex-col">

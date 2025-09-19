@@ -128,6 +128,12 @@ const OrderHistoryPage: React.FC = () => {
           </div>
           <div className="flex flex-wrap gap-3">
             <button
+              className="px-4 py-2 rounded border border-cyan-500 text-cyan-700 hover:bg-cyan-500 hover:text-white transition-colors"
+              onClick={() => navigate('/pos')}
+            >
+              POS Terminal
+            </button>
+            <button
               className="px-4 py-2 rounded bg-gray-200 dark:bg-gray-800 hover:bg-gray-300 dark:hover:bg-gray-700"
               onClick={() => navigate('/sales')}
             >
@@ -290,5 +296,7 @@ const OrderHistoryPage: React.FC = () => {
 };
 
 export default OrderHistoryPage;
+
+
 
 

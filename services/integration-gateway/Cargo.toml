@@ -21,3 +21,4 @@ hmac = "0.12"
 sha2 = "0.10"
 hex = "0.4"
 sqlx = { version = "0.6", features = ["runtime-tokio-native-tls", "postgres", "macros", "uuid"] }
+tower-http = { version = "0.5", features = ["cors"] }

@@ -1,4 +1,8 @@
 use axum::{
+    http::{
+        header::{ACCEPT, CONTENT_TYPE},
+        HeaderName, HeaderValue, Method,
+    },
     routing::{get, post},
     Router,
 };
@@ -13,10 +17,11 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::net::TcpListener;
+use tower_http::cors::{AllowOrigin, CorsLayer};
 use uuid::Uuid;
 
 mod order_handlers;
-use order_handlers::{create_order, list_orders, refund_order, OrderItem};
+use order_handlers::{clear_offline_orders, create_order, list_orders, refund_order, OrderItem};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -67,11 +72,47 @@ async fn main() -> anyhow::Result<()> {
         pending_orders: Some(pending_orders.clone()),
     };
 
+    let allowed_origins = [
+        "http://localhost:3000",
+        "http://localhost:3001",
+        "http://localhost:5173",
+    ];
+
+    let cors = CorsLayer::new()
+        .allow_origin(AllowOrigin::list(
+            allowed_origins
+                .iter()
+                .filter_map(|origin| origin.parse::<HeaderValue>().ok())
+                .collect::<Vec<_>>(),
+        ))
+        .allow_methods(
+            [
+                Method::GET,
+                Method::POST,
+                Method::PUT,
+                Method::DELETE,
+                Method::OPTIONS,
+            ]
+            .into_iter()
+            .collect::<Vec<_>>(),
+        )
+        .allow_headers(
+            [
+                ACCEPT,
+                CONTENT_TYPE,
+                HeaderName::from_static("authorization"),
+                HeaderName::from_static("x-tenant-id"),
+            ]
+            .into_iter()
+            .collect::<Vec<_>>(),
+        );
     let app = Router::new()
         .route("/healthz", get(health))
         .route("/orders", post(create_order).get(list_orders))
+        .route("/orders/offline/clear", post(clear_offline_orders))
         .route("/orders/refund", post(refund_order))
-        .with_state(state);
+        .with_state(state)
+        .layer(cors);
 
     let db_pool = db.clone();
     let producer = kafka_producer.clone();

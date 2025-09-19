@@ -1,0 +1,1151 @@
+NovaPOS Cashier POS Screen Implementation
+Below is a complete set of React + TypeScript files implementing the NovaPOS Cashier POS screen and logic.
+The code is structured for integration into the  frontends/pos-app  directory, using Tailwind CSS for
+styling and React Router for navigation. Each file is described with its path and purpose.
+Pages
+frontends/pos-app/src/pages/CashierPage.tsx
+importReact,{useEffect ,useState }from'react';
+import{useNavigate }from'react-router-dom' ;
+import{useAuth }from'../AuthContext' ;
+import{useCart }from'../CartContext' ;
+import{useOrders }from'../OrderContext' ;
+importtype{PaymentMethod }from'../OrderContext' ;
+import{useProducts }from'../hooks/useProducts' ;
+import{useOfflineQueue }from'../hooks/useOfflineQueue' ;
+import{useSyncOnReconnect }from'../hooks/useSyncOnReconnect' ;
+importOfflineBanner from'../components/pos/OfflineBanner' ;
+importQueuedOrdersBanner from'../components/pos/QueuedOrdersBanner' ;
+importSearchBar from'../components/pos/SearchBar' ;
+importCategoryFilter from'../components/pos/CategoryFilter' ;
+importProductGrid from'../components/pos/ProductGrid' ;
+importCartSidebar from'../components/pos/CartSidebar' ;
+importSubmitSalePanel from'../components/pos/SubmitSalePanel' ;
+importRecentOrdersDrawer from'../components/pos/RecentOrdersDrawer' ;
+importReplaceItemModal from'../components/pos/ReplaceItemModal' ;
+constCashierPage :React.FC =()=>{
+constnavigate =useNavigate ();
+const{isLoggedIn ,logout}=useAuth();
+const{cart,addItem,removeItem ,incrementItemQuantity ,
+decrementItemQuantity ,clearCart ,totalAmount }=useCart();
+const{isOnline ,queuedOrders ,isSyncing ,submitOrder }=useOrders ();
+const{products ,isLoading :isLoadingProducts ,error,isOfflineResult ,
+categories ,reload:reloadProducts }=useProducts ();
+const[query,setQuery ]=useState <string>('');
+const[categoryFilter ,setCategoryFilter ]=useState <string>('All');
+const[drawerOpen ,setDrawerOpen ]=useState <boolean>(false);
+const[paymentMethod ,setPaymentMethod ]=useState <PaymentMethod >('cash');
+const[inactiveItems ,setInactiveItems ]=useState <string[]>([]);
+1
+const[pendingSubmit ,setPendingSubmit ]=useState <boolean>(false);
+useSyncOnReconnect ();// Ensure offline orders sync on reconnect
+// Redirect to login if not authenticated
+useEffect (()=>{
+if(!isLoggedIn )navigate ('/login' ,{replace:true});
+},[isLoggedIn ,navigate ]);
+// Filter products by search query and category
+constfilteredProducts =products .filter(p=>{
+constmatchesQuery =
+query.trim()===''||
+p.name.toLowerCase ().includes (query.toLowerCase ())||
+(p.sku??'').toLowerCase ().includes (query.toLowerCase ());
+constmatchesCategory =
+categoryFilter ==='All'||
+(p.category &&p.category .toLowerCase ()===categoryFilter .toLowerCase ())
+||
+(p.description &&
+p.description .toLowerCase ().includes (categoryFilter .toLowerCase ()));
+returnmatchesQuery &&matchesCategory ;
+});
+// Identify any cart items that are inactive (not present in current product 
+list)
+constinactiveCartItemIds =cart
+.filter(item=>!products .find(p=>p.id===item.id))
+.map(item=>item.id);
+// Mark currently inactive item (for ReplaceItemModal)
+constcurrentInactiveId =inactiveItems .length>0?inactiveItems [0]:null;
+constcurrentInactiveItem =currentInactiveId ?cart.find(ci=>ci.id===
+currentInactiveId ):null;
+// Handle clicking the "Submit Sale" button
+consthandleSubmitSale =async()=>{
+if(!cart.length)return;// no items to submit
+// Check for inactive items before submitting
+try{
+// Fetch latest catalog to verify active status of items
+constheaders:Record<string,string>={};
+const{currentUser ,token}=useAuth();// get tenant and token for 
+request
+consttenantId =currentUser ?.tenant_id ?String(currentUser .tenant_id ):
+null;
+if(tenantId )headers['X-Tenant-ID' ]=tenantId ;
+if(token)headers['Authorization' ]=`Bearer ${token}`;
+constresponse =awaitfetch(`$
+{import.meta.env.VITE_PRODUCT_SERVICE_URL ??'http://localhost:8081' }/
+2
+products` ,{headers });
+letallProducts :any[]=[];
+if(response .ok){
+allProducts =awaitresponse .json();// includes inactive products
+}else{
+// If fetch fails (offline), use cached products from localStorage
+constcacheKey =`productCache: ${tenantId }`;
+constcached=localStorage .getItem(cacheKey );
+allProducts =cached?JSON.parse(cached):[];
+}
+// Map product ID to active flag
+constactiveMap :Record<string,boolean>={};
+for(constprodofallProducts ){
+if(prod&&(typeofprod.id==='string' ||typeofprod.id===
+'number' )){
+constid=typeofprod.id==='string' ?prod.id :String(prod.id);
+activeMap [id]=prod.active!==false;
+}
+}
+// Determine which cart items are inactive
+constflaggedIds :string[]=[];
+for(constitemofcart){
+if(activeMap [item.id]===false){
+flaggedIds .push(item.id);
+}
+}
+if(flaggedIds .length>0){
+// Open ReplaceItemModal for the first inactive item (sequence through 
+others if multiple)
+setInactiveItems (flaggedIds );
+setPendingSubmit (true);
+return;
+}
+}catch(err){
+console.error('Error checking inactive items' ,err);
+// If any error in validation, we proceed with submission (assuming items 
+are active)
+}
+// If no inactive items, proceed to submit immediately
+triggerOrderSubmission ();
+};
+// Perform the actual order submission via OrderContext
+consttriggerOrderSubmission =async()=>{
+constitemsPayload =cart.map(item=>({
+product_id :item.id,
+quantity :item.quantity ,
+unit_price :item.price ,
+3
+line_total :Number((item.price*item.quantity ).toFixed(2)),
+}));
+constpayload ={
+items:itemsPayload ,
+payment_method :paymentMethod ,
+total:Number(totalAmount .toFixed(2)),
+};
+try{
+constresult=awaitsubmitOrder (payload);
+clearCart ();// clear cart after successful submission (online or queued)
+// If order queued (offline), no further action needed (banner will show 
+queued status)
+if(result.status==='submitted' ){
+// If payment URL is returned for card/crypto, open it for payment
+if(result.payment &&(result.payment.paymentUrl ||
+result.payment.payment_url )){
+constpayUrl=result.payment.paymentUrl ??
+result.payment.payment_url ;
+if(payUrl){
+window.open(payUrl,'_blank' );
+}
+}
+// Optionally, could display a success notification or modal here
+}
+}catch(error){
+console.error('Order submission failed' ,error);
+// TODO: Handle submission error (e.g., network error) if not already 
+queued by context
+}
+setPendingSubmit (false);
+};
+// Effect: if pendingSubmit is true and all inactive items have been handled, 
+trigger final submission
+useEffect (()=>{
+if(pendingSubmit &&inactiveItems .length===0){
+triggerOrderSubmission ();
+}
+},[pendingSubmit ,inactiveItems ]);
+// Handle replacement of an inactive item from modal
+consthandleReplaceItem =(oldItemId :string,replacementProductId :string)
+=>{
+constoldItem =cart.find(ci=>ci.id===oldItemId );
+constreplacement =products .find(p=>p.id===replacementProductId );
+if(!oldItem ||!replacement )return;
+const{id,name,price,sku}=replacement ;
+// Remove the inactive item, then add the replacement product with the same 
+4
+quantity
+constqty=oldItem.quantity ;
+removeItem (oldItemId );
+for(leti=0;i<qty;i++){
+addItem({id,name,price,
+sku});// CartContext will increment quantity if already exists
+}
+// Remove this item from the inactiveItems queue and proceed to next or 
+submission
+setInactiveItems (prev=>prev.filter(x=>x!==oldItemId ));
+};
+// Handle removal of an inactive item from modal
+consthandleRemoveItem =(oldItemId :string)=>{
+removeItem (oldItemId );
+setInactiveItems (prev=>prev.filter(x=>x!==oldItemId ));
+};
+// Handle cancel in ReplaceItemModal (abort submission)
+consthandleCancelReplace =()=>{
+setInactiveItems ([]);
+setPendingSubmit (false);
+};
+return(
+<divclassName ="min-h-screen flex flex-col bg-gray-100 dark:bg-gray-900" >
+{/* Header */ }
+<headerclassName ="flex items-center justify-between px-6 py-4 bg-white 
+dark:bg-gray-800 shadow-md" >
+<divclassName ="flex items-center gap-3" >
+<imgsrc="/assets/logo_transparent.png" alt="NovaPOS Logo"
+className ="h-10 w-auto" />
+<spanclassName ="text-2xl font-bold text-gray-800 dark:text-gray-100 
+tracking-tight" >NovaPOS</span>
+</div>
+<divclassName ="flex items-center gap-3" >
+<button
+className ="px-4 py-2 rounded border border-cyan-500 text-cyan-700 
+hover:bg-cyan-500 hover:text-white transition-colors"
+onClick={()=>setDrawerOpen (true)}
+>
+Orders{queuedOrders .length>0?` (${queuedOrders .length})`:''}
+</button>
+<button
+className ="bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600"
+onClick={()=>{logout();navigate ('/login' );}}
+>
+Logout
+5
+</button>
+</div>
+</header>
+{/* Offline/Queued banners */ }
+{!isOnline &&(
+<OfflineBanner queuedCount ={queuedOrders .length}/>
+)}
+{isOnline &&queuedOrders .length>0&&(
+<QueuedOrdersBanner
+count={queuedOrders .length}
+syncing={isSyncing }
+onSync={()=>{/* Trigger manual retry sync */ const{retryQueue }
+=useOfflineQueue ();retryQueue ().catch(console.warn);}}
+/>
+)}
+{/* Main content: Products + Cart/Checkout */ }
+<mainclassName ="flex-1 flex flex-col md:flex-row md:items-start 
+md:justify-center px-4 py-6 gap-6" >
+{/* Product list section */ }
+<section className ="flex-1 max-w-3xl" >
+<divclassName ="flex flex-col sm:flex-row sm:items-center sm:justify-
+between gap-4 mb-4" >
+<SearchBar query={query}onQueryChange ={setQuery }/>
+{categories .length>1&&(
+<CategoryFilter categories ={categories }selected ={categoryFilter }
+onSelect ={setCategoryFilter }/>
+)}
+</div>
+{isLoadingProducts &&(
+<divclassName ="text-sm text-gray-500 mb-2" >Loading products ...</
+div>
+)}
+{isOfflineResult &&!isLoadingProducts &&(
+<divclassName ="text-sm text-amber-600 mb-2" >Offline mode:showing
+lastsyncedcatalog.</div>
+)}
+{error&&!isLoadingProducts &&(
+<divclassName ="text-sm text-red-600 mb-2" >{error}</div>
+)}
+<ProductGrid products ={filteredProducts }onAddProduct ={prod=>
+addItem({id:prod.id,name:prod.name ,price:prod.price ,sku:prod.sku })}/>
+{!isLoadingProducts &&filteredProducts .length===0&&(
+<divclassName ="text-center text-gray-500 mt-4" >
+Noproducts found.Tryadjusting yoursearchorcategory filter.
+</div>
+)}
+6
+</section>
+{/* Cart and checkout section */ }
+<asideclassName ="w-full max-w-md mx-auto" >
+<CartSidebar
+items={cart}
+onAddQty ={incrementItemQuantity }
+onSubQty ={decrementItemQuantity }
+onRemoveItem ={removeItem }
+/>
+<SubmitSalePanel
+total={totalAmount }
+paymentMethod ={paymentMethod }
+onPaymentMethodChange ={setPaymentMethod }
+onSubmit ={handleSubmitSale }
+submitting ={false}{/*willbecontrolled internally via
+idempotent logic*/}
+/>
+</aside>
+</main>
+{/* Recent orders side-drawer */ }
+<RecentOrdersDrawer open={drawerOpen }onClose={()=>
+setDrawerOpen (false)}/>
+{/* Modal for replacing inactive items */ }
+{currentInactiveItem &&(
+<ReplaceItemModal
+item={currentInactiveItem }
+products ={products }
+onReplace ={(replacementId )=>
+handleReplaceItem (currentInactiveItem .id,replacementId )}
+onRemove ={()=>handleRemoveItem (currentInactiveItem .id)}
+onCancel ={handleCancelReplace }
+/>
+)}
+</div>
+);
+};
+exportdefault CashierPage ;
+Note:  Be sure to add the new route for the CashierPage in your router (e.g., in App.tsx ): 
+<Routepath="/pos"element={<CashierPage />}/>
+7
+Components (POS)
+frontends/pos-app/src/components/pos/OfflineBanner.tsx
+importReactfrom'react';
+interface OfflineBannerProps {
+queuedCount :number;
+}
+constOfflineBanner :React.FC <OfflineBannerProps >=({queuedCount })=>(
+<divclassName ="w-full bg-amber-200 text-amber-900 px-6 py-3 text-sm text-
+center">
+Offline mode–{queuedCount }order{queuedCount ===1?'':'s'}queued.
+Saleswillsyncautomatically oncereconnected .
+</div>
+);
+exportdefault OfflineBanner ;
+frontends/pos-app/src/components/pos/QueuedOrdersBanner.tsx
+importReactfrom'react';
+interface QueuedOrdersBannerProps {
+count:number;
+syncing:boolean;
+onSync:()=>void;
+}
+constQueuedOrdersBanner :React.FC <QueuedOrdersBannerProps >=({count,
+syncing,onSync})=>(
+<divclassName ="w-full bg-sky-200 text-sky-900 px-6 py-3 text-sm text-center 
+flex items-center justify-center" >
+{syncing ?(
+<>Synchronizing queuedorders...</>
+):(
+<>
+{count}queuedorder{count===1?'':'s'}awaiting sync.
+<button
+onClick={onSync}
+disabled ={syncing ||count===0}
+className ="ml-4 px-3 py-1 border border-sky-800 rounded text-sky-800 
+hover:bg-sky-300 disabled:opacity-50"
+>
+{syncing ?'Syncing...' :'Retry Sync' }
+</button>
+</>
+8
+)}
+</div>
+);
+exportdefault QueuedOrdersBanner ;
+frontends/pos-app/src/components/pos/SearchBar.tsx
+importReactfrom'react';
+interface SearchBarProps {
+query:string;
+onQueryChange :(value:string)=>void;
+}
+constSearchBar :React.FC <SearchBarProps >=({query,onQueryChange })=>(
+<input
+type="search"
+value={query}
+onChange ={e=>onQueryChange (e.target.value)}
+placeholder ="Search products..."
+className ="w-full sm:w-64 px-4 py-2 border border-gray-300 rounded-lg 
+focus:outline-none focus:ring-2 focus:ring-cyan-500"
+aria-label ="Search products"
+/>
+);
+exportdefault SearchBar ;
+frontends/pos-app/src/components/pos/CategoryFilter.tsx
+importReactfrom'react';
+interface CategoryFilterProps {
+categories :string[];
+selected :string;
+onSelect :(category :string)=>void;
+}
+constCategoryFilter :React.FC <CategoryFilterProps >=({categories ,selected ,
+onSelect })=>{
+if(categories .length<=1){
+returnnull;// Hide filter if no categories (or only "All")
+}
+return(
+<select
+value={selected }
+onChange ={e=>onSelect (e.target.value)}
+className ="px-4 py-2 border border-gray-300 rounded-lg focus:outline-none 
+9
+focus:ring-2 focus:ring-cyan-500"
+aria-label ="Filter by category"
+>
+{categories .map(cat=>(
+<optionkey={cat}value={cat}>
+{cat}
+</option>
+))}
+</select>
+);
+};
+exportdefault CategoryFilter ;
+frontends/pos-app/src/components/pos/ProductGrid.tsx
+importReactfrom'react';
+importtype{Product }from'../../hooks/useProducts' ;
+interface ProductGridProps {
+products :Product[];
+onAddProduct :(product:Product)=>void;
+}
+constProductGrid :React.FC <ProductGridProps >=({products ,onAddProduct })=>
+(
+<divclassName ="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4" >
+{products .map(product =>(
+<div
+key={product.id}
+className ="flex flex-col items-center bg-white dark:bg-gray-800 rounded 
+shadow p-4 cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-700"
+>
+<img
+src={product.image_url ||'/assets/product_placeholder.png' }
+alt={product.name}
+className ="w-16 h-16 object-cover mb-2"
+/>
+<divclassName ="text-center" >
+<divclassName ="text-sm font-medium text-gray-800 dark:text-
+gray-100" >{product.name}</div>
+<divclassName ="text-sm text-gray-500 dark:text-gray-400" >$
+{product.price.toFixed(2)}</div>
+</div>
+<button
+onClick={()=>onAddProduct (product)}
+className ="mt-2 px-3 py-1 bg-cyan-600 text-white text-sm rounded 
+hover:bg-cyan-700 focus:outline-none"
+10
+>
+Add
+</button>
+</div>
+))}
+</div>
+);
+exportdefault ProductGrid ;
+frontends/pos-app/src/components/pos/CartSidebar.tsx
+importReactfrom'react';
+import{CartItem }from'../../CartContext' ;
+interface CartSidebarProps {
+items:CartItem [];
+onAddQty :(productId :string)=>void;
+onSubQty :(productId :string)=>void;
+onRemoveItem :(productId :string)=>void;
+}
+constCartSidebar :React.FC <CartSidebarProps >=({items,onAddQty ,onSubQty ,
+onRemoveItem })=>{
+consttotal=items.reduce((sum,it)=>sum+it.price*it.quantity ,0);
+return(
+<divclassName ="bg-white dark:bg-gray-800 rounded-lg shadow p-4 flex flex-
+col max-h-[60vh]" >
+<h2className ="text-xl font-bold mb-3 text-gray-800 dark:text-
+gray-100" >Cart</h2>
+<divclassName ="flex-1 overflow-y-auto pr-1" >
+{items.length===0?(
+<pclassName ="text-gray-500 dark:text-gray-400" >Yourcartisempty.</
+p>
+):(
+<ulclassName ="space-y-2" >
+{items.map(item=>{
+constisInactive =!item/* placeholder: we might mark inactive 
+items here if needed */ ;
+return(
+<likey={item.id}className ="flex items-center justify-between 
+bg-gray-50 dark:bg-gray-700 rounded px-3 py-2" >
+<divclassName ="flex-1 mr-2" >
+<divclassName ="text-sm font-semibold text-gray-800 
+dark:text-gray-100" >
+{item.name}{/* Mark if inactive: */ }{/* isInactive && 
+<span className="text-red-600 text-xs ml-1">(inactive)</span> */ }
+</div>
+11
+<divclassName ="text-xs text-gray-500 dark:text-gray-400" >
+{item.quantity }×${item.price.toFixed(2)}
+</div>
+</div>
+<divclassName ="flex items-center" >
+<button
+className ="px-2 text-lg text-gray-700 dark:text-gray-200 
+disabled:opacity-50"
+onClick={()=>onSubQty (item.id)}
+disabled ={item.quantity <=1}
+aria-label ="Decrease quantity"
+>
+&minus;
+</button>
+<spanclassName ="px-2 text-sm" >{item.quantity }</span>
+<button
+className ="px-2 text-lg text-gray-700 dark:text-gray-200"
+onClick={()=>onAddQty (item.id)}
+aria-label ="Increase quantity"
+>
++
+</button>
+<button
+className ="ml-3 text-red-600 dark:text-red-400 text-xl"
+onClick={()=>onRemoveItem (item.id)}
+title="Remove item"
+>
+&times;
+</button>
+</div>
+</li>
+);
+})}
+</ul>
+)}
+</div>
+<divclassName ="mt-3 pt-3 border-t border-gray-200 dark:border-gray-700 
+text-lg font-semibold flex justify-between text-gray-800 dark:text-gray-100" >
+<span>Total:</span>
+<span>${total.toFixed(2)}</span>
+</div>
+</div>
+);
+};
+exportdefault CartSidebar ;
+12
+frontends/pos-app/src/components/pos/SubmitSalePanel.tsx
+importReactfrom'react';
+importtype{PaymentMethod }from'../../OrderContext' ;
+interface SubmitSalePanelProps {
+total:number;
+paymentMethod :PaymentMethod ;
+onPaymentMethodChange :(method:PaymentMethod )=>void;
+onSubmit :()=>void;
+submitting :boolean;
+}
+constSubmitSalePanel :React.FC <SubmitSalePanelProps >=({total,
+paymentMethod ,onPaymentMethodChange ,onSubmit ,submitting })=>(
+<divclassName ="mt-4 bg-white dark:bg-gray-800 rounded-lg shadow p-4" >
+<divclassName ="flex items-center justify-between mb-3" >
+<spanclassName ="text-lg font-bold text-gray-800 dark:text-
+gray-100" >Total:${total.toFixed(2)}</span>
+<select
+value={paymentMethod }
+onChange ={e=>onPaymentMethodChange (e.target.valueasPaymentMethod )}
+className ="px-3 py-1 border border-gray-300 rounded focus:outline-none 
+focus:ring-1 focus:ring-cyan-500"
+aria-label ="Select payment method"
+>
+<optionvalue="cash">Cash</option>
+<optionvalue="card">Card</option>
+<optionvalue="crypto" >Crypto</option>
+</select>
+</div>
+<button
+onClick={onSubmit }
+disabled ={submitting }
+className ="w-full py-2 bg-cyan-600 text-white font-semibold rounded 
+hover:bg-cyan-700 disabled:opacity-50"
+>
+{submitting ?'Processing...' :'Submit Sale' }
+</button>
+</div>
+);
+exportdefault SubmitSalePanel ;
+frontends/pos-app/src/components/pos/RecentOrdersDrawer.tsx
+importReact,{useEffect }from'react';
+import{useOrders }from'../../OrderContext' ;
+13
+interface RecentOrdersDrawerProps {
+open:boolean;
+onClose:()=>void;
+}
+constRecentOrdersDrawer :React.FC <RecentOrdersDrawerProps >=({open,
+onClose })=>{
+const{recentOrders }=useOrders ();
+// Close on Escape key
+useEffect (()=>{
+if(!open)return;
+consthandleKey =(e:KeyboardEvent )=>{if(e.key==='Escape' )
+onClose();};
+window.addEventListener ('keydown' ,handleKey );
+return()=>window.removeEventListener ('keydown' ,handleKey );
+},[open,onClose]);
+if(!open)returnnull;
+return(
+<divclassName ="fixed inset-0 z-50 flex" >
+{/* Overlay */ }
+<divclassName ="absolute inset-0 bg-black bg-opacity-50" onClick={onClose}
+></div>
+{/* Drawer panel */ }
+<divclassName ="relative ml-auto h-full w-full max-w-sm bg-white dark:bg-
+gray-800 shadow-xl p-4 overflow-y-auto" >
+<h2className ="text-xl font-bold mb-4 text-gray-800 dark:text-
+gray-100" >RecentOrders</h2>
+{recentOrders .length===0?(
+<pclassName ="text-gray-600 dark:text-gray-400" >Norecentorders.</p>
+):(
+<ulclassName ="space-y-3" >
+{recentOrders .map(order=>(
+<likey={order.reference ||order.id}className ="p-3 bg-gray-50 
+dark:bg-gray-700 rounded" >
+<divclassName ="flex justify-between text-sm" >
+<spanclassName ="font-semibold" >Ref:{order.reference }</span>
+<span>{newDate(order.createdAt ).toLocaleString ()}</span>
+</div>
+<divclassName ="text-xs mt-1" >
+Status:<spanclassName ="font-medium" >{order.status}</
+span><br/>
+{order.paymentStatus &&<>Payment:<spanclassName ="font-
+medium">{order.paymentStatus }</span><br/></>}
+Total:${order.total.toFixed(2)}<br/>
+{order.offline &&<spanclassName ="text-amber-600" >Queued
+(offline)</span>}
+{order.note&&<spanclassName ="text-red-600" >Error:
+14
+{order.note}</span>}
+</div>
+{order.paymentUrl &&(
+<ahref={order.paymentUrl }target="_blank" rel="noopener 
+noreferrer" className ="text-cyan-700 text-xs underline mt-1 inline-block" >
+Complete Payment
+</a>
+)}
+</li>
+))}
+</ul>
+)}
+<buttononClick={onClose}className ="absolute top-2 right-2 text-2xl 
+text-gray-500 hover:text-gray-700" >&times;</button>
+</div>
+</div>
+);
+};
+exportdefault RecentOrdersDrawer ;
+frontends/pos-app/src/components/pos/ReplaceItemModal.tsx
+importReact,{useState }from'react';
+import{CartItem }from'../../CartContext' ;
+importtype{Product }from'../../hooks/useProducts' ;
+interface ReplaceItemModalProps {
+item:CartItem ;
+products :Product[];// active products list
+onReplace :(replacementProductId :string)=>void;
+onRemove :()=>void;
+onCancel :()=>void;
+}
+constReplaceItemModal :React.FC <ReplaceItemModalProps >=({item,products ,
+onReplace ,onRemove ,onCancel })=>{
+const[replacementId ,setReplacementId ]=useState <string>('');
+return(
+<divclassName ="fixed inset-0 z-50 flex items-center justify-center" >
+{/* Overlay */ }
+<divclassName ="absolute inset-0 bg-black bg-opacity-50"
+onClick={onCancel }></div>
+{/* Modal content */ }
+<divclassName ="relative bg-white dark:bg-gray-800 rounded-lg shadow-lg 
+p-6 w-11/12 max-w-sm" >
+<h3className ="text-lg font-bold mb-4 text-gray-800 dark:text-
+gray-100" >ItemUnavailable </h3>
+15
+<pclassName ="text-sm text-gray-700 dark:text-gray-300 mb-4" >
+<strong>{item.name}</strong>isnolongeravailable forsale.Youcan
+replace itwithanother itemorremoveitfromthecart.
+</p>
+<divclassName ="mb-4">
+<labelclassName ="block text-sm font-medium mb-1" >Replace with:</
+label>
+<select
+className ="w-full border border-gray-300 rounded px-3 py-2"
+value={replacementId }
+onChange ={e=>setReplacementId (e.target.value)}
+>
+<optionvalue="">--SelectProduct --</option>
+{products .filter(p=>p.id!==item.id).map(product =>(
+<optionkey={product.id}value={product.id}>{product.name}–$
+{product.price.toFixed(2)}</option>
+))}
+</select>
+</div>
+<divclassName ="flex items-center justify-end gap-2" >
+<buttonclassName ="px-4 py-2 bg-gray-200 dark:bg-gray-700 rounded"
+onClick={onCancel }>Cancel</button>
+<button
+className ="px-4 py-2 bg-red-600 text-white rounded"
+onClick={onRemove }
+>
+RemoveItem
+</button>
+<button
+className ="px-4 py-2 bg-cyan-600 text-white rounded 
+disabled:opacity-50"
+disabled ={!replacementId }
+onClick={()=>onReplace (replacementId )}
+>
+Replace
+</button>
+</div>
+</div>
+</div>
+);
+};
+exportdefault ReplaceItemModal ;
+16
+Hooks
+frontends/pos-app/src/hooks/useProducts.ts
+import{useEffect ,useState }from'react';
+import{useAuth }from'../AuthContext' ;
+// Product type including fields from product-service
+exportinterface Product {
+id:string;
+name:string;
+price:number;
+description :string;
+active:boolean;
+sku?:string|null;
+image_url? :string|null;
+category? :string;
+}
+interface UseProductsResult {
+products :Product[];
+categories :string[];
+isLoading :boolean;
+isOfflineResult :boolean;
+error:string|null;
+reload:()=>void;
+}
+exportconstuseProducts =():UseProductsResult =>{
+const{currentUser ,token}=useAuth();
+consttenantId =currentUser ?.tenant_id ?String(currentUser .tenant_id ):
+null;
+constPRODUCT_SERVICE_URL =(import.meta.env.VITE_PRODUCT_SERVICE_URL ??
+'http://localhost:8081' ).replace(/\/$/,'');
+const[products ,setProducts ]=useState <Product[]>([]);
+const[categories ,setCategories ]=useState <string[]>(['All']);
+const[isLoading ,setIsLoading ]=useState <boolean>(false);
+const[isOfflineResult ,setIsOfflineResult ]=useState <boolean>(false);
+const[error,setError ]=useState <string|null>(null);
+// Helper to normalize raw API data to Product type
+constnormalizeProducts =(data:any[]):Product[]=>{
+constlist:Product[]=[];
+for(constitemofdata){
+if(!item||typeofitem!=='object' )continue ;
+constid=item.id;
+17
+constname=item.name;
+constprice=typeofitem.price==='number' ?item.price :
+Number(item.price);
+if(typeofid!=='string' &&typeofid!=='number' )continue ;
+if(typeofname!=='string' ||Number.isNaN(price))continue ;
+list.push({
+id:typeofid==='string' ?id:String(id),
+name,
+price,
+description :item.description ??'',
+active:item.active !==false,
+sku:item.sku ??null,
+image_url :item.image_url ??null,
+});
+}
+returnlist;
+};
+constloadProducts =async()=>{
+if(!tenantId ){
+setProducts ([]);
+return;
+}
+setIsLoading (true);
+setError (null);
+setIsOfflineResult (false);
+constheaders:HeadersInit ={'X-Tenant-ID' :tenantId };
+if(token)headers['Authorization' ]=`Bearer ${token}`;
+try{
+constres=awaitfetch(`${PRODUCT_SERVICE_URL }/products` ,{headers });
+if(!res.ok)thrownewError(`Failed to fetch products ( ${res.status})`);
+constrawData =awaitres.json();
+letprodList =normalizeProducts (Array.isArray(rawData)?rawData :[]);
+// Cache the catalog in localStorage for offline use
+localStorage .setItem(`productCache: ${tenantId }`,
+JSON.stringify (prodList ));
+// Filter only active products for display
+prodList =prodList .filter(p=>p.active);
+setProducts (prodList );
+// Derive categories from product data (if available in description or 
+future field)
+constcats=newSet<string>(['All']);
+for(constpofprodList ){
+if(p.category &&p.category .trim()){
+cats.add(p.category .trim());
+}elseif(p.description ){
+// If category not explicitly provided, attempt to parse from 
+description format "Category: X"
+18
+constmatch=p.description .match(/Category:\s*([\w\s]+)/i );
+if(match)cats.add(match[1].trim());
+}
+}
+setCategories (Array.from(cats));
+}catch(err){
+console.warn('Unable to load products' ,err);
+// Load from cache on failure (offline)
+try{
+constcached=localStorage .getItem(`productCache: ${tenantId }`);
+if(cached){
+constparsed=JSON.parse(cached);
+constprodList =normalizeProducts (Array.isArray(parsed)?parsed:
+[]);
+constactiveList =prodList .filter(p=>p.active);
+setProducts (activeList );
+setIsOfflineResult (true);
+}else{
+setProducts ([]);
+}
+}catch{
+setProducts ([]);
+}
+setError ('Product catalog unavailable offline.' );
+}finally {
+setIsLoading (false);
+}
+};
+useEffect (()=>{
+loadProducts ();
+// Optionally reload when tenant changes
+},[tenantId ,token]);
+return{products ,categories ,isLoading ,isOfflineResult ,error,reload:
+loadProducts };
+};
+frontends/pos-app/src/hooks/useSubmitOrder.ts
+import{useCallback ,useRef,useState }from'react';
+import{useOrders }from'../OrderContext' ;
+importtype{DraftOrderPayload ,SubmitOrderResult }from'../OrderContext' ;
+interface UseSubmitOrderResult {
+submit:(order:DraftOrderPayload )=>Promise<SubmitOrderResult |null>;
+19
+submitting :boolean;
+}
+exportconstuseSubmitOrder =():UseSubmitOrderResult =>{
+const{submitOrder }=useOrders ();
+const[submitting ,setSubmitting ]=useState <boolean>(false);
+constlastSubmitTime =useRef<number>(0);
+constwrappedSubmit =useCallback (async(orderPayload :DraftOrderPayload )=>{
+constnow=Date.now();
+if(submitting ||now-lastSubmitTime .current <1000){
+// Prevent rapid double submissions within 1 second
+returnnull;
+}
+setSubmitting (true);
+lastSubmitTime .current =now;
+try{
+constresult=awaitsubmitOrder (orderPayload );
+returnresult;
+}catch(error){
+throwerror;
+}finally {
+setSubmitting (false);
+}
+},[submitOrder ,submitting ]);
+return{submit:wrappedSubmit ,submitting };
+};
+Note: The  DraftOrderPayload  and  SubmitOrderResult  types  are  assumed  to  be  exported  from
+OrderContext.tsx  (they correspond to the order submission payload and result structure).
+frontends/pos-app/src/hooks/useOfflineQueue.ts
+import{useOrders }from'../OrderContext' ;
+exportconstuseOfflineQueue =()=>{
+const{queuedOrders ,isSyncing ,retryQueue }=useOrders ();
+return{
+queuedOrders ,
+isSyncing ,
+retryQueue :async()=>{
+// Manually trigger retry of offline queue
+awaitretryQueue ();
+},
+};
+};
+20
+frontends/pos-app/src/hooks/useSyncOnReconnect.ts
+import{useEffect }from'react';
+import{useOrders }from'../OrderContext' ;
+/**
+ * Hook to automatically sync queued orders when the browser reconnects online.
+ */
+exportconstuseSyncOnReconnect =()=>{
+const{retryQueue }=useOrders ();
+useEffect (()=>{
+consthandleOnline =()=>{
+retryQueue ().catch(err=>console.warn('Sync on reconnect failed' ,err));
+};
+window.addEventListener ('online' ,handleOnline );
+return()=>{
+window.removeEventListener ('online' ,handleOnline );
+};
+},[retryQueue ]);
+};
+Tests
+Below are unit tests for core logic (Cart and Order offline queue) and an integration test for key flows
+(adding items, filtering, submitting orders offline and online). These tests use  Vitest  and React Testing
+Library to simulate usage of the POS screen.
+frontends/pos-app/src/CartContext.test.tsx
+import{renderHook ,act}from'@testing-library/react' ;
+import{CartProvider ,useCart }from'./CartContext' ;
+describe ('CartContext' ,()=>{
+it('adds items and updates total and quantity correctly' ,()=>{
+constwrapper:React.FC <{children :React.ReactNode }>=({children })=>
+<CartProvider >{children }</CartProvider >;
+const{result}=renderHook (()=>useCart(),{wrapper });
+// Initial cart empty
+expect(result.current.cart).toEqual([]);
+expect(result.current.totalAmount ).toBe(0);
+// Add a product
+act(()=>{
+result.current.addItem({id:'prod1',name:'Test Product' ,price:10});
+21
+});
+expect(result.current.cart.length).toBe(1);
+expect(result.current.cart[0].quantity ).toBe(1);
+expect(result.current.totalAmount ).toBe(10);
+// Add same product again (should increment quantity)
+act(()=>{
+result.current.addItem({id:'prod1',name:'Test Product' ,price:10});
+});
+expect(result.current.cart.length).toBe(1);
+expect(result.current.cart[0].quantity ).toBe(2);
+expect(result.current.totalAmount ).toBe(20);
+// Increment quantity using incrementItemQuantity
+act(()=>{
+result.current.incrementItemQuantity ('prod1');
+});
+expect(result.current.cart[0].quantity ).toBe(3);
+expect(result.current.totalAmount ).toBe(30);
+// Decrement quantity
+act(()=>{
+result.current.decrementItemQuantity ('prod1');
+});
+expect(result.current.cart[0].quantity ).toBe(2);
+// Remove item
+act(()=>{
+result.current.removeItem ('prod1');
+});
+expect(result.current.cart.length).toBe(0);
+expect(result.current.totalAmount ).toBe(0);
+});
+});
+frontends/pos-app/src/OrderContext.test.tsx
+import{renderHook ,act}from'@testing-library/react' ;
+import{AuthProvider }from'./AuthContext' ;
+import{OrderProvider ,useOrders }from'./OrderContext' ;
+// Utility to wrap with Auth + Order providers
+constwrapper:React.FC <{children :React.ReactNode }>=({children })=>(
+<AuthProvider >
+<OrderProvider >{children }</OrderProvider >
+</AuthProvider >
+22
+);
+describe ('OrderContext offline queue' ,()=>{
+beforeEach (()=>{
+// Set up a valid session (tenant and token) for AuthContext
+constsession ={token:'test-token' ,user:{tenant_id :'tenant-123' },
+timestamp :Date.now ()};
+window.localStorage .setItem('session' ,JSON.stringify (session));
+// Simulate offline
+Object.defineProperty (window.navigator ,'onLine' ,{writable :true,value:
+false});
+// Clear any stored offline orders
+window.localStorage .removeItem ('pos-offline-orders' );
+window.localStorage .removeItem ('pos-recent-orders' );
+});
+afterEach (()=>{
+// Clean up navigator onLine
+Object.defineProperty (window.navigator ,'onLine' ,{writable :true,value:
+true});
+window.localStorage .clear();
+});
+it('queues orders when offline and flushes on reconnect' ,async()=>{
+const{result}=renderHook (()=>useOrders (),{wrapper });
+// Prepare a draft order payload
+constdraftOrder ={
+items:[{product_id :'p1',quantity :1,unit_price :5.0,line_total :
+5.0}],
+payment_method :'cash'asconst,
+total:5.0,
+};
+// Submit order while offline (should queue)
+letsubmitResult ;
+awaitact(async()=>{
+submitResult =awaitresult.current.submitOrder (draftOrder );
+});
+expect(submitResult .status).toBe('queued' );
+expect(result.current.queuedOrders .length).toBe(1);
+// The recentOrders should include a queued offline entry
+expect(result.current.recentOrders [0].offline).toBe(true);
+expect(result.current.recentOrders [0].status).toMatch(/Queued/ );
+// Simulate coming online and flushing queue
+Object.defineProperty (window.navigator ,'onLine' ,{writable :true,value:
+true});
+awaitact(async()=>{
+awaitresult.current.retryQueue ();
+});
+// After sync, queuedOrders should be empty
+23
+expect(result.current.queuedOrders .length).toBe(0);
+// Recent orders entry should be updated to non-offline with an actual id 
+and possibly status
+constupdatedOrder =result.current.recentOrders .find(o=>o.reference &&!
+o.offline);
+expect(updatedOrder ).toBeDefined ();
+expect(updatedOrder .status.toLowerCase ()).not.toContain ('queued' );
+});
+});
+frontends/pos-app/src/pages/CashierPage.test.tsx
+importReactfrom'react';
+import{describe ,it,expect,beforeEach ,vi}from'vitest' ;
+import{render,fireEvent ,waitFor,screen}from'@testing-library/react' ;
+import{AuthProvider }from'../AuthContext' ;
+import{OrderProvider }from'../OrderContext' ;
+import{CartProvider }from'../CartContext' ;
+importCashierPage from'./CashierPage' ;
+// Helper to render CashierPage with all providers
+constrenderWithProviders =()=>{
+returnrender(
+<AuthProvider >
+<OrderProvider >
+<CartProvider >
+<CashierPage />
+</CartProvider >
+</OrderProvider >
+</AuthProvider >
+);
+};
+describe ('CashierPage integration flows' ,()=>{
+beforeEach (()=>{
+// Set up a logged-in session for AuthContext
+constsession ={token:'token-123' ,user:{tenant_id :'tenant-test' },
+timestamp :Date.now ()};
+localStorage .setItem('session' ,JSON.stringify (session));
+// Mock fetch for products and order submissions
+vi.stubGlobal ('fetch',vi.fn((input:RequestInfo ,init?:RequestInit )=>{
+consturl=typeofinput==='string' ?input:input.url ;
+// Return product list for product service
+if(url.includes ('/products' )){
+constresponseBody =[
+{id:'p1',name:'Product One' ,price:10,description :'',active:
+24
+true},
+{id:'p2',name:'Product Two' ,price:20,description :'',active:
+true},
+// Include an inactive product to test replacement flow
+{id:'pX',name:'Old Product' ,price:15,description :'',active:
+false},
+];
+returnPromise.resolve(newResponse (JSON.stringify (responseBody ),{
+status:200}));
+}
+// Handle order submission
+if(url.includes ('/orders' )){
+constorderResponse ={id:'order-123' ,status:'Submitted' };
+returnPromise.resolve(newResponse (JSON.stringify (orderResponse ),{
+status:200}));
+}
+if(url.includes ('/payments' )){
+constpayResponse ={status:'pending' ,payment_url :'http://pay.test/
+abc'};
+returnPromise.resolve(newResponse (JSON.stringify (payResponse ),{
+status:200}));
+}
+returnPromise.resolve(newResponse (null,{status:500}));
+}));
+});
+afterEach (()=>{
+vi.restoreAllMocks ();
+localStorage .clear();
+});
+it('loads products and allows adding to cart and filtering' ,async()=>{
+renderWithProviders ();
+// Wait for product list to load
+awaitscreen.findByText ('Product One' );
+expect(screen.getByText ('Product Two' )).toBeInTheDocument ();
+// Search filtering
+constsearchInput =screen.getByPlaceholderText ('Search products...' );
+fireEvent .change(searchInput ,{target:{value:'Product One' }});
+expect(screen.queryByText ('Product Two' )).not.toBeInTheDocument ();
+expect(screen.getByText ('Product One' )).toBeInTheDocument ();
+});
+it('adds items to cart and updates total' ,async()=>{
+renderWithProviders ();
+awaitscreen.findByText ('Product One' );
+// Click "Add" on Product One twice
+25
+constaddButtons =screen.getAllByText ('Add');
+fireEvent .click(addButtons [0]);
+fireEvent .click(addButtons [0]);
+// Cart should show Product One with quantity 2 and correct total
+awaitscreen.findByText ('Test Product' );
+constqtyElem =screen.getByText ('2');
+expect(qtyElem).toBeInTheDocument ();
+expect(screen.getByText ('$20.00' )).toBeInTheDocument ();// total for 2 × 
+$10
+});
+it('submits an order offline (queues) then online (direct submission)' ,async
+()=>{
+// Initialize with a cart containing an inactive item (pX) from localStorage 
+to test replace flow
+constofflineCart =[{id:'pX',name:'Old Product' ,price:15,quantity :
+1}];
+localStorage .setItem('pos-cart' ,JSON.stringify (offlineCart ));
+// Render while offline
+Object.defineProperty (navigator ,'onLine' ,{value:false,configurable :
+true});
+renderWithProviders ();
+// Should detect offline mode, show offline banner
+expect(awaitscreen.findByText (/Offline mode/ )).toBeInTheDocument ();
+// Submit order (offline)
+constsubmitBtn =awaitscreen.findByText ('Submit Sale' );
+fireEvent .click(submitBtn );
+// Expect the ReplaceItemModal to appear for the inactive item
+awaitscreen.findByText ('Item Unavailable' );
+// Choose replacement product and replace
+fireEvent .change(screen.getByLabelText ('Replace with:' ),{target:{value:
+'p1'}});
+fireEvent .click(screen.getByText ('Replace' ));
+// After replacing, submission should proceed (queue offline since still 
+offline)
+constordersButton =screen.getByText (/Orders/ );
+expect(ordersButton .textContent ).toMatch(/\(1\)$/ );// queued count 
+increments
+// Now simulate going online and flush queue
+Object.defineProperty (navigator ,'onLine' ,{value:true,configurable :
+true});
+// Trigger sync (e.g., via the Retry Sync button)
+fireEvent .click(screen.getByText ('Retry Sync' ));
+awaitwaitFor(()=>{
+// After sync, Orders button count should reset to 0
+expect(screen.getByText ('Orders' ).textContent ).not.toContain ('(');
+});
+// Now test direct online submission flow:
+26
+// Add a product to cart and submit while online
+fireEvent .click(screen.getAllByText ('Add')[0]);// add Product One
+Object.defineProperty (navigator ,'onLine' ,{value:true,configurable :
+true});
+fireEvent .click(screen.getByText ('Submit Sale' ));
+// Should clear cart and add recent order entry (check drawer for submitted 
+order)
+fireEvent .click(screen.getByText (/Orders/ ));
+constrecentOrder =awaitscreen.findByText (/Ref:/);
+expect(recentOrder ).toBeInTheDocument ();
+});
+});
+Notes on testing:  We use a stubbed  fetch to simulate API responses. The integration test covers:
+product loading and search filtering, adding products to cart, offline submission with item replacement, and
+online submission with clearing of the cart and recent orders listing. Adjust the test data or assertions as
+needed to match actual API responses and UI text. 
+27

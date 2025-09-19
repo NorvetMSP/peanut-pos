@@ -1,14 +1,14 @@
 // src/CartContext.tsx
 import React, { createContext, useContext, useEffect, useState } from 'react';
 
-interface Product {
+export interface Product {
   id: string;
   name: string;
   price: number;
   sku?: string | null;
 }
 
-interface CartItem extends Product {
+export interface CartItem extends Product {
   quantity: number;
 }
 
@@ -110,3 +110,4 @@ export const useCart = () => {
   if (!ctx) throw new Error('useCart must be used within CartProvider');
   return ctx;
 };
+

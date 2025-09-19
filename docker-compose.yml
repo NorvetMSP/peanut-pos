@@ -1,5 +1,3 @@
-version: "3.9"
-
 networks:
   novanet:
 
@@ -19,6 +17,7 @@ services:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+    restart: "no"
     networks: [novanet]
 
   redis:
@@ -44,6 +43,7 @@ services:
       - KAFKA_CFG_ZOOKEEPER_CONNECT=zookeeper:2181
       - ALLOW_PLAINTEXT_LISTENER=yes
       - KAFKA_CFG_LISTENERS=PLAINTEXT://:9092
+      - KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE=true
       - KAFKA_CFG_ADVERTISED_LISTENERS=PLAINTEXT://kafka:9092
     ports:
       - "9092:9092"
@@ -51,6 +51,12 @@ services:
       - zookeeper
     volumes:
       - kafkadata:/bitnami/kafka
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
     networks: [novanet]
 
   product-service:
@@ -61,7 +67,11 @@ services:
       - DATABASE_URL=postgres://novapos:novapos@postgres:5432/novapos
       - KAFKA_BOOTSTRAP=kafka:9092
       - RUST_LOG=info
-    depends_on: [postgres, kafka]
+    depends_on:
+      postgres:
+        condition: service_started
+      kafka:
+        condition: service_healthy
     ports: ["8081:8081"]
     networks: [novanet]
 
@@ -85,7 +95,13 @@ services:
       - KAFKA_BOOTSTRAP=kafka:9092
       - INTEGRATION_URL=http://integration-gateway:8083
       - RUST_LOG=info
-    depends_on: [postgres, kafka, integration-gateway]
+    depends_on:
+      postgres:
+        condition: service_started
+      kafka:
+        condition: service_healthy
+      integration-gateway:
+        condition: service_started
     ports: ["8084:8084"]
     networks: [novanet]
 
@@ -96,7 +112,9 @@ services:
     environment:
       - KAFKA_BOOTSTRAP=kafka:9092
       - RUST_LOG=info
-    depends_on: [kafka]
+    depends_on:
+      kafka:
+        condition: service_healthy
     ports: ["8086:8086"]
     networks: [novanet]
 
@@ -108,7 +126,11 @@ services:
       - DATABASE_URL=postgres://novapos:novapos@postgres:5432/novapos
       - KAFKA_BOOTSTRAP=kafka:9092
       - RUST_LOG=info
-    depends_on: [postgres, kafka]
+    depends_on:
+      postgres:
+        condition: service_started
+      kafka:
+        condition: service_healthy
     ports: ["8087:8087"]
     networks: [novanet]
 
@@ -120,7 +142,11 @@ services:
       - DATABASE_URL=postgres://novapos:novapos@postgres:5432/novapos
       - KAFKA_BOOTSTRAP=kafka:9092
       - RUST_LOG=info
-    depends_on: [postgres, kafka]
+    depends_on:
+      postgres:
+        condition: service_started
+      kafka:
+        condition: service_healthy
     ports: ["8082:8082"]
     networks: [novanet]
 
@@ -132,7 +158,11 @@ services:
       - DATABASE_URL=postgres://novapos:novapos@postgres:5432/novapos
       - KAFKA_BOOTSTRAP=kafka:9092
       - RUST_LOG=info
-    depends_on: [postgres, kafka]
+    depends_on:
+      postgres:
+        condition: service_started
+      kafka:
+        condition: service_healthy
     ports: ["8088:8088"]
     networks: [novanet]
 
@@ -162,7 +192,11 @@ services:
       # - COINBASE_COMMERCE_API_KEY=
       # - COINBASE_WEBHOOK_SECRET=
       - RUST_LOG=info
-    depends_on: [kafka, payment-service]
+    depends_on:
+      kafka:
+        condition: service_healthy
+      payment-service:
+        condition: service_started
     ports: ["8083:8083"]
     networks: [novanet]
 
@@ -183,5 +217,22 @@ services:
     ports: ["3001:80"]
     networks: [novanet]
 
-
-
+  kafka-topics-init:
+    image: bitnami/kafka:3.7
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+          set -e
+          echo 'Waiting for Kafka to be reachable...'
+          until kafka-topics.sh --bootstrap-server kafka:9092 --list >/dev/null 2>&1; do
+            sleep 2
+          done
+          for topic in payment.completed payment.failed order.completed; do
+            kafka-topics.sh --create --if-not-exists --topic "$$topic" --bootstrap-server kafka:9092 --replication-factor 1 --partitions 1
+          done
+    restart: "no"
+    networks: [novanet]
