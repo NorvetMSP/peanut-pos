@@ -17,7 +17,9 @@ cargo run --manifest-path services/Cargo.toml -p customer-service
 Full Docker Build including app
 docker compose build
 docker compose up -d
+docker compose up kafka-topics-init
 // tear down..... docker compose down
+
 //If you need to rebuild just one service after code changes:
 docker compose up -d --build auth-service
 docker compose up -d --build order-service
@@ -25,6 +27,38 @@ docker compose up -d --build loyalty-service
 docker compose up -d --build customer-service
 docker compose up -d --build product-service
 docker compose ps confirms all services  are running.
+
+
+patterns...to create topics
+
+docker compose exec kafka kafka-topics.sh --create --topic payment.completed --bootstrap-server kafka:9092 --replication-factor 1 --partitions 1
+docker compose exec kafka kafka-topics.sh --create --topic payment.failed --bootstrap-server kafka:9092 --replication-factor 1 --partitions 1
+docker compose exec kafka kafka-topics.sh --create --topic order.completed --bootstrap-server kafka:9092 --replication-factor 1 --partitions 1
+
+
+
+
+List containers on novapos_novanet:
+docker network inspect novapos_novanet
+→ check the Containers block to see which services are connected.
+
+
+Now that you know which containers sit on novapos_novanet, grab their service names/IDs from the Containers block and stream each one’s logs.
+
+Tail a single container (replace with the ID or name you copied, e.g. novapos-order-service-1):
+docker logs -f --tail 200 novapos-order-service-1
+
+If you prefer the compose aliases (you’re in C:\Projects\novapos):
+docker compose logs -f order-service
+docker compose logs -f payment-service …etc.
+
+Need everything at once?
+docker compose logs -f
+
+docker compose logs -f order-service
+docker compose logs -f integration-gateway
+docker compose logs -f payment-service
+
 
 
 See the services (health endpoints)

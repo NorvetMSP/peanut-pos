@@ -1,6 +1,9 @@
 use axum::{
     body::Body,
-    http::{Request, StatusCode},
+    http::{
+        header::{ACCEPT, CONTENT_TYPE},
+        HeaderName, HeaderValue, Method, Request, StatusCode,
+    },
     middleware::{self, Next},
     response::Response,
     routing::{get, post},
@@ -17,6 +20,7 @@ use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
 use tokio::sync::RwLock;
 use tokio::time::interval;
+use tower_http::cors::{AllowOrigin, CorsLayer};
 use uuid::Uuid;
 
 mod events;
@@ -100,6 +104,35 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // Build routes with authentication + rate-limiting middleware
+    let allowed_origins = [
+        "http://localhost:3000",
+        "http://localhost:3001",
+        "http://localhost:5173",
+    ];
+
+    let cors = CorsLayer::new()
+        .allow_origin(AllowOrigin::list(
+            allowed_origins
+                .iter()
+                .filter_map(|origin| origin.parse::<HeaderValue>().ok())
+                .collect::<Vec<_>>(),
+        ))
+        .allow_methods(
+            [Method::GET, Method::POST, Method::OPTIONS]
+                .into_iter()
+                .collect::<Vec<_>>(),
+        )
+        .allow_headers(
+            [
+                ACCEPT,
+                CONTENT_TYPE,
+                HeaderName::from_static("authorization"),
+                HeaderName::from_static("x-tenant-id"),
+                HeaderName::from_static("x-api-key"),
+            ]
+            .into_iter()
+            .collect::<Vec<_>>(),
+        );
     let protected_state = state.clone();
     let auth_state = state.clone();
     let protected_api = Router::new()
@@ -114,7 +147,8 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/healthz", get(health))
         .merge(protected_api)
-        .with_state(state);
+        .with_state(state)
+        .layer(cors);
 
     // Start server (bind host/port from env or defaults)
     let host = env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
