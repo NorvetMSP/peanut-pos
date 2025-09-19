@@ -5,6 +5,7 @@ import { resolveServiceUrl } from '../utils/env';
 import './AdminSectionModern.css';
 
 const PRODUCT_SERVICE_URL = resolveServiceUrl('VITE_PRODUCT_SERVICE_URL', 'http://localhost:8081');
+const DEFAULT_IMAGE_PLACEHOLDER = 'https://placehold.co/400x300?text=No+Image';
 
 type ServiceProduct = {
   id: string;
@@ -12,12 +13,14 @@ type ServiceProduct = {
   price: number;
   description: string;
   active: boolean;
+  image: string;
 };
 
 type ProductFormState = {
   name: string;
   price: string;
   description: string;
+  image: string;
 };
 
 type EditFormState = ProductFormState & { active: boolean };
@@ -33,12 +36,20 @@ const normalizeProduct = (input: unknown): ServiceProduct | null => {
   if (typeof id !== 'string' || typeof name !== 'string') return null;
   const price = typeof priceRaw === 'number' ? priceRaw : Number(priceRaw);
   if (!Number.isFinite(price)) return null;
+  const rawImage =
+    typeof candidate.image === 'string'
+      ? candidate.image
+      : typeof candidate.image_url === 'string'
+      ? candidate.image_url
+      : '';
+  const image = rawImage.trim();
   return {
     id,
     name,
     price,
     description: typeof candidate.description === 'string' ? candidate.description : '',
     active: typeof candidate.active === 'boolean' ? candidate.active : true,
+    image,
   };
 };
 
@@ -47,9 +58,9 @@ const ProductListPage: React.FC = () => {
   const navigate = useNavigate();
 
   const [products, setProducts] = useState<ServiceProduct[]>([]);
-  const [newProduct, setNewProduct] = useState<ProductFormState>({ name: '', price: '', description: '' });
+  const [newProduct, setNewProduct] = useState<ProductFormState>({ name: '', price: '', description: '', image: '' });
   const [editingProductId, setEditingProductId] = useState<string | null>(null);
-  const [editForm, setEditForm] = useState<EditFormState>({ name: '', price: '', description: '', active: true });
+  const [editForm, setEditForm] = useState<EditFormState>({ name: '', price: '', description: '', image: '', active: true });
   const [isLoading, setIsLoading] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [updatingProductId, setUpdatingProductId] = useState<string | null>(null);
@@ -109,7 +120,7 @@ const ProductListPage: React.FC = () => {
 
   const resetEditState = () => {
     setEditingProductId(null);
-    setEditForm({ name: '', price: '', description: '', active: true });
+    setEditForm({ name: '', price: '', description: '', image: '', active: true });
   };
 
   const handleAddProduct = async (event: React.FormEvent<HTMLFormElement>) => {
@@ -132,17 +143,22 @@ const ProductListPage: React.FC = () => {
 
     setIsSubmitting(true);
     try {
+      const imageValue = newProduct.image.trim();
+      const requestBody: Record<string, unknown> = {
+        name: trimmedName,
+        price: priceValue,
+        description: newProduct.description.trim(),
+      };
+      if (imageValue.length > 0) {
+        requestBody.image = imageValue;
+      }
       const response = await fetch(`${PRODUCT_SERVICE_URL}/products`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           ...buildHeaders(),
         },
-        body: JSON.stringify({
-          name: trimmedName,
-          price: priceValue,
-          description: newProduct.description.trim(),
-        }),
+        body: JSON.stringify(requestBody),
       });
       if (!response.ok) {
         throw new Error(`Failed to add product (${response.status})`);
@@ -152,7 +168,7 @@ const ProductListPage: React.FC = () => {
       if (created) {
         setProducts(prev => [...prev, created]);
       }
-      setNewProduct({ name: '', price: '', description: '' });
+      setNewProduct({ name: '', price: '', description: '', image: '' });
       setSuccessMessage('Product added successfully.');
     } catch (err) {
       console.error('Unable to add product', err);
@@ -170,6 +186,7 @@ const ProductListPage: React.FC = () => {
       name: product.name,
       price: product.price.toFixed(2),
       description: product.description,
+      image: product.image ?? '',
       active: product.active,
     });
   };
@@ -193,18 +210,25 @@ const ProductListPage: React.FC = () => {
     setSuccessMessage(null);
     setUpdatingProductId(editingProductId);
     try {
+      const imageValue = editForm.image.trim();
+      const requestBody: Record<string, unknown> = {
+        name: trimmedName,
+        price: priceValue,
+        description: editForm.description.trim(),
+        active: editForm.active,
+      };
+      if (imageValue.length > 0) {
+        requestBody.image = imageValue;
+      } else {
+        requestBody.image = '';
+      }
       const response = await fetch(`${PRODUCT_SERVICE_URL}/products/${editingProductId}`, {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
           ...buildHeaders(),
         },
-        body: JSON.stringify({
-          name: trimmedName,
-          price: priceValue,
-          description: editForm.description.trim(),
-          active: editForm.active,
-        }),
+        body: JSON.stringify(requestBody),
       });
       if (!response.ok) {
         throw new Error(`Failed to update product (${response.status})`);
@@ -241,6 +265,7 @@ const ProductListPage: React.FC = () => {
           price: product.price,
           description: product.description,
           active: !product.active,
+          image: product.image ?? '',
         }),
       });
       if (!response.ok) {
@@ -303,6 +328,7 @@ const ProductListPage: React.FC = () => {
     void fetchProducts();
   };
 
+  const newProductPreviewSrc = newProduct.image.trim().length > 0 ? newProduct.image.trim() : DEFAULT_IMAGE_PLACEHOLDER;
   const sortedProducts = useMemo(() => {
     return [...products].sort((a, b) => a.name.localeCompare(b.name));
   }, [products]);
@@ -360,11 +386,33 @@ const ProductListPage: React.FC = () => {
                   placeholder="Describe the product"
                 />
               </div>
+              <div className="md:col-span-2 flex flex-col">
+                <label className="text-sm font-medium text-gray-600 dark:text-gray-300">Image URL (optional)</label>
+                <input
+                  type="url"
+                  value={newProduct.image}
+                  onChange={event => setNewProduct(prev => ({ ...prev, image: event.target.value }))}
+                  className="mt-1 rounded-md border border-gray-300 px-3 py-2 text-gray-900 focus:outline-none focus:ring-2 focus:ring-primary focus:border-primary"
+                  placeholder="https://cdn.example.com/product.jpg"
+                />
+                <span className="mt-1 text-xs text-gray-500 dark:text-gray-400">Leave blank to use the default placeholder image.</span>
+              </div>
+              <div className="md:col-span-2 flex items-center gap-4">
+                <img
+                  src={newProductPreviewSrc}
+                  alt="Product preview"
+                  className="h-16 w-16 rounded-md border border-gray-200 object-cover"
+                  onError={event => {
+                    event.currentTarget.src = DEFAULT_IMAGE_PLACEHOLDER;
+                  }}
+                />
+                <span className="text-sm text-gray-600 dark:text-gray-400">Preview updates automatically when you enter a URL.</span>
+              </div>
               <div className="md:col-span-2 flex justify-end gap-2">
                 <button
                   type="button"
                   className="px-4 py-2 rounded bg-gray-200 text-gray-800 dark:bg-gray-700 dark:text-gray-200"
-                  onClick={() => setNewProduct({ name: '', price: '', description: '' })}
+                  onClick={() => setNewProduct({ name: '', price: '', description: '', image: '' })}
                   disabled={isSubmitting}
                 >
                   Clear
@@ -406,19 +454,39 @@ const ProductListPage: React.FC = () => {
                     editingProductId === prod.id ? (
                       <tr key={prod.id} className="bg-gray-50 dark:bg-gray-900">
                         <td className="px-4 py-2 text-gray-900 dark:text-gray-100">
-                          <input
-                            value={editForm.name}
-                            onChange={event => setEditForm(prev => ({ ...prev, name: event.target.value }))}
-                            className="w-full px-3 py-2 border border-gray-300 rounded-md text-gray-900 focus:outline-none focus:ring-2 focus:ring-primary focus:border-primary"
-                            required
-                          />
-                          <textarea
-                            value={editForm.description}
-                            onChange={event => setEditForm(prev => ({ ...prev, description: event.target.value }))}
-                            className="w-full mt-2 px-3 py-2 border border-gray-300 rounded-md text-gray-900 focus:outline-none focus:ring-2 focus:ring-primary focus:border-primary"
-                            rows={2}
-                            placeholder="Description"
-                          />
+                          <div className="flex items-start gap-3">
+                            <img
+                              src={editForm.image.trim().length > 0 ? editForm.image.trim() : DEFAULT_IMAGE_PLACEHOLDER}
+                              alt={(editForm.name || 'Product') + ' preview'}
+                              className="h-16 w-16 rounded-md border border-gray-200 object-cover"
+                              onError={event => {
+                                event.currentTarget.src = DEFAULT_IMAGE_PLACEHOLDER;
+                              }}
+                            />
+                            <div className="flex-1 space-y-2">
+                              <input
+                                value={editForm.name}
+                                onChange={event => setEditForm(prev => ({ ...prev, name: event.target.value }))}
+                                className="w-full px-3 py-2 border border-gray-300 rounded-md text-gray-900 focus:outline-none focus:ring-2 focus:ring-primary focus:border-primary"
+                                required
+                              />
+                              <textarea
+                                value={editForm.description}
+                                onChange={event => setEditForm(prev => ({ ...prev, description: event.target.value }))}
+                                className="w-full px-3 py-2 border border-gray-300 rounded-md text-gray-900 focus:outline-none focus:ring-2 focus:ring-primary focus:border-primary"
+                                rows={2}
+                                placeholder="Description"
+                              />
+                              <input
+                                type="url"
+                                value={editForm.image}
+                                onChange={event => setEditForm(prev => ({ ...prev, image: event.target.value }))}
+                                className="w-full px-3 py-2 border border-gray-300 rounded-md text-gray-900 focus:outline-none focus:ring-2 focus:ring-primary focus:border-primary"
+                                placeholder="https://cdn.example.com/product.jpg"
+                              />
+                              <p className="text-xs text-gray-500 dark:text-gray-400">Clear the field to revert to the default placeholder image.</p>
+                            </div>
+                          </div>
                         </td>
                         <td className="px-4 py-2 text-gray-900 dark:text-gray-100">
                           <input
@@ -468,8 +536,20 @@ const ProductListPage: React.FC = () => {
                     ) : (
                       <tr key={prod.id} className="border-b border-gray-200 dark:border-gray-700">
                         <td className="px-4 py-2 text-gray-900 dark:text-gray-100">
-                          <div className="font-semibold">{prod.name}</div>
-                          {prod.description && <div className="text-sm text-gray-500 dark:text-gray-400">{prod.description}</div>}
+                          <div className="flex items-start gap-3">
+                            <img
+                              src={prod.image.trim().length > 0 ? prod.image.trim() : DEFAULT_IMAGE_PLACEHOLDER}
+                              alt={prod.name + ' preview'}
+                              className="h-12 w-12 rounded-md border border-gray-200 object-cover"
+                              onError={event => {
+                                event.currentTarget.src = DEFAULT_IMAGE_PLACEHOLDER;
+                              }}
+                            />
+                            <div>
+                              <div className="font-semibold">{prod.name}</div>
+                              {prod.description && <div className="text-sm text-gray-500 dark:text-gray-400">{prod.description}</div>}
+                            </div>
+                          </div>
                         </td>
                         <td className="px-4 py-2 text-gray-900 dark:text-gray-100">${prod.price.toFixed(2)}</td>
                         <td className="px-4 py-2 text-gray-900 dark:text-gray-100">
