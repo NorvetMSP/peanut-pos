@@ -2,7 +2,10 @@ import React, { createContext, useCallback, useContext, useState } from 'react';
 import { Navigate, useLocation } from 'react-router-dom';
 
 type AuthUser = {
+  id?: string;
   tenant_id?: string;
+  name?: string;
+  email?: string;
   role?: string;
   [key: string]: unknown;
 };

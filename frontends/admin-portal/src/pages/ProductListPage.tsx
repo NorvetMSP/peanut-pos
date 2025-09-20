@@ -5,7 +5,7 @@ import { resolveServiceUrl } from '../utils/env';
 import './AdminSectionModern.css';
 
 const PRODUCT_SERVICE_URL = resolveServiceUrl('VITE_PRODUCT_SERVICE_URL', 'http://localhost:8081');
-const DEFAULT_IMAGE_PLACEHOLDER = 'https://placehold.co/400x300?text=No+Image';
+const DEFAULT_IMAGE_PLACEHOLDER = 'https://images.fineartamerica.com/images/artworkimages/mediumlarge/1/super-nova-rina-kaff.jpg"';
 
 type ServiceProduct = {
   id: string;
@@ -77,9 +77,15 @@ const ProductListPage: React.FC = () => {
   const buildHeaders = useCallback((): Record<string, string> => {
     const headers: Record<string, string> = {};
     if (tenantId) headers['X-Tenant-ID'] = tenantId;
+    const userId = currentUser && typeof currentUser.id === 'string' ? currentUser.id.trim() : '';
+    if (userId) headers['X-User-ID'] = userId;
+    const userEmail = currentUser && typeof currentUser.email === 'string' ? currentUser.email.trim() : '';
+    if (userEmail) headers['X-User-Email'] = userEmail;
+    const userName = currentUser && typeof currentUser.name === 'string' ? currentUser.name.trim() : '';
+    if (userName) headers['X-User-Name'] = userName;
     if (token) headers['Authorization'] = `Bearer ${token}`;
     return headers;
-  }, [tenantId, token]);
+  }, [currentUser, tenantId, token]);
 
   const ensureTenantContext = useCallback((): boolean => {
     if (!tenantId) {
