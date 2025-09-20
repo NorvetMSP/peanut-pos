@@ -14,7 +14,9 @@ use tokio::net::TcpListener;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
 mod product_handlers;
-use product_handlers::{create_product, delete_product, list_products, update_product};
+use product_handlers::{
+    create_product, delete_product, list_product_audit, list_products, update_product,
+};
 /// Shared application state
 #[derive(Clone)]
 pub struct AppState {
@@ -77,6 +79,9 @@ async fn main() -> anyhow::Result<()> {
                 CONTENT_TYPE,
                 HeaderName::from_static("authorization"),
                 HeaderName::from_static("x-tenant-id"),
+                HeaderName::from_static("x-user-id"),
+                HeaderName::from_static("x-user-name"),
+                HeaderName::from_static("x-user-email"),
             ]
             .into_iter()
             .collect::<Vec<_>>(),
@@ -87,6 +92,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/healthz", get(health))
         .route("/products", post(create_product).get(list_products))
         .route("/products/:id", put(update_product).delete(delete_product))
+        .route("/products/:id/audit", get(list_product_audit))
         .with_state(state)
         .layer(cors);
     // Start server

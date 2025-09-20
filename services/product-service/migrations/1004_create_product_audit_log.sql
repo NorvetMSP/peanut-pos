@@ -1,1 +1,14 @@
-CREATE TABLE product_audit_log (\r\n    id UUID PRIMARY KEY,\r\n    product_id UUID NOT NULL,\r\n    tenant_id UUID NOT NULL,\r\n    actor_id UUID NULL,\r\n    actor_name TEXT NULL,\r\n    actor_email TEXT NULL,\r\n    action TEXT NOT NULL,\r\n    changes JSONB NOT NULL,\r\n    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()\r\n);\r\n\r\nCREATE INDEX idx_product_audit_log_tenant ON product_audit_log (tenant_id);\r\nCREATE INDEX idx_product_audit_log_product ON product_audit_log (product_id);\r\n
+CREATE TABLE product_audit_log (
+	id UUID PRIMARY KEY,
+	product_id UUID NOT NULL,
+	tenant_id UUID NOT NULL,
+	actor_id UUID NULL,
+	actor_name TEXT NULL,
+	actor_email TEXT NULL,
+	action TEXT NOT NULL,
+	changes JSONB NOT NULL,
+	created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_product_audit_log_tenant ON product_audit_log (tenant_id);
+CREATE INDEX idx_product_audit_log_product ON product_audit_log (product_id);

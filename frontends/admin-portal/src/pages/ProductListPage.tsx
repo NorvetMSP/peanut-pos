@@ -27,6 +27,16 @@ type EditFormState = ProductFormState & { active: boolean };
 
 type ProductJson = Record<string, unknown>;
 
+type ProductAuditEntry = {
+  id: string;
+  action: string;
+  created_at: string;
+  actor_id?: string | null;
+  actor_name?: string | null;
+  actor_email?: string | null;
+  changes: unknown;
+};
+
 const normalizeProduct = (input: unknown): ServiceProduct | null => {
   if (!input || typeof input !== 'object') return null;
   const candidate = input as ProductJson;
@@ -67,6 +77,12 @@ const ProductListPage: React.FC = () => {
   const [deletingProductId, setDeletingProductId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
+
+  const [auditLogByProduct, setAuditLogByProduct] = useState<Record<string, ProductAuditEntry[]>>({});
+  const [auditLoadingByProduct, setAuditLoadingByProduct] = useState<Record<string, boolean>>({});
+  const [auditErrorByProduct, setAuditErrorByProduct] = useState<Record<string, string | null>>({});
+
+  const [historyProductId, setHistoryProductId] = useState<string | null>(null);
 
   useEffect(() => {
     if (!isLoggedIn) void navigate('/login', { replace: true });
@@ -119,6 +135,72 @@ const ProductListPage: React.FC = () => {
       setIsLoading(false);
     }
   }, [buildHeaders, ensureTenantContext]);
+
+  // Helper to normalize audit entries from API response
+  function normalizeAuditEntries(input: unknown): ProductAuditEntry[] {
+    if (!input) return [];
+    if (Array.isArray(input)) {
+      return input
+        .map(normalizeAuditEntry)
+        .filter((e): e is ProductAuditEntry => Boolean(e));
+    }
+    if (typeof input === 'object' && input !== null && Array.isArray((input as any).entries)) {
+      return (input as any).entries
+        .map(normalizeAuditEntry)
+        .filter((e: unknown): e is ProductAuditEntry => Boolean(e));
+    }
+    return [];
+  }
+
+  // Helper to normalize a single audit entry
+  function normalizeAuditEntry(entry: any): ProductAuditEntry | null {
+    if (!entry || typeof entry !== 'object') return null;
+    const { id, action, created_at, actor_id, actor_name, actor_email, changes } = entry;
+    if (typeof id !== 'string' || typeof action !== 'string' || typeof created_at !== 'string') return null;
+    return {
+      id,
+      action,
+      created_at,
+      actor_id: typeof actor_id === 'string' ? actor_id : null,
+      actor_name: typeof actor_name === 'string' ? actor_name : null,
+      actor_email: typeof actor_email === 'string' ? actor_email : null,
+      changes: changes ?? {},
+    };
+  }
+
+  const fetchProductAudit = useCallback(
+    async (productId: string, force = false): Promise<void> => {
+      if (!ensureTenantContext()) return;
+      if (!force && auditLogByProduct[productId]) return;
+      setAuditLoadingByProduct(prev => ({ ...prev, [productId]: true }));
+      setAuditErrorByProduct(prev => ({ ...prev, [productId]: null }));
+      try {
+        const response = await fetch(`${PRODUCT_SERVICE_URL}/products/${productId}/audit?limit=10`, {
+          headers: buildHeaders(),
+        });
+        if (!response.ok) {
+          throw new Error(`Failed to fetch product audit (${response.status})`);
+        }
+        const payload = (await response.json()) as unknown;
+        const entries = normalizeAuditEntries(payload);
+        setAuditLogByProduct(prev => ({ ...prev, [productId]: entries }));
+      } catch (err) {
+        console.error('Unable to load product audit', err);
+        setAuditErrorByProduct(prev => ({ ...prev, [productId]: 'Unable to load product history.' }));
+      } finally {
+        setAuditLoadingByProduct(prev => ({ ...prev, [productId]: false }));
+      }
+    },
+    [auditLogByProduct, buildHeaders, ensureTenantContext],
+  );
+
+  const handleToggleHistory = (productId: string): void => {
+    const nextId = historyProductId === productId ? null : productId;
+    setHistoryProductId(nextId);
+    if (nextId) {
+      void fetchProductAudit(productId);
+    }
+  };
 
   useEffect(() => {
     void fetchProducts();
@@ -195,6 +277,7 @@ const ProductListPage: React.FC = () => {
       image: product.image ?? '',
       active: product.active,
     });
+    void fetchProductAudit(product.id);
   };
 
   const handleSaveEdit = async (): Promise<void> => {
@@ -243,6 +326,7 @@ const ProductListPage: React.FC = () => {
       const updated = normalizeProduct(payload);
       if (updated) {
         setProducts(prev => prev.map(prod => (prod.id === updated.id ? updated : prod)));
+        void fetchProductAudit(updated.id, true);
       }
       setSuccessMessage('Product updated successfully.');
       resetEditState();
@@ -281,6 +365,7 @@ const ProductListPage: React.FC = () => {
       const updated = normalizeProduct(payload);
       if (updated) {
         setProducts(prev => prev.map(prod => (prod.id === updated.id ? updated : prod)));
+        void fetchProductAudit(product.id, true);
       }
       setSuccessMessage(`Product ${product.active ? 'deactivated' : 'activated'} successfully.`);
     } catch (err) {
@@ -311,6 +396,18 @@ const ProductListPage: React.FC = () => {
 
       if (response.status === 204) {
         setProducts(prev => prev.filter(item => item.id !== product.id));
+        setAuditLogByProduct(prev => {
+          const { [product.id]: _unused, ...rest } = prev;
+          return rest;
+        });
+        setAuditLoadingByProduct(prev => {
+          const { [product.id]: _unused, ...rest } = prev;
+          return rest;
+        });
+        setAuditErrorByProduct(prev => {
+          const { [product.id]: _unused, ...rest } = prev;
+          return rest;
+        });
         if (editingProductId === product.id) {
           resetEditState();
         }
@@ -456,144 +553,230 @@ const ProductListPage: React.FC = () => {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-200 dark:divide-gray-700">
-                  {sortedProducts.map(prod => (
-                    editingProductId === prod.id ? (
-                      <tr key={prod.id} className="bg-gray-50 dark:bg-gray-900">
-                        <td className="px-4 py-2 text-gray-900 dark:text-gray-100">
-                          <div className="flex items-start gap-3">
-                            <img
-                              src={editForm.image.trim().length > 0 ? editForm.image.trim() : DEFAULT_IMAGE_PLACEHOLDER}
-                              alt={(editForm.name || 'Product') + ' preview'}
-                              className="h-16 w-16 rounded-md border border-gray-200 object-cover"
-                              onError={event => {
-                                event.currentTarget.src = DEFAULT_IMAGE_PLACEHOLDER;
-                              }}
-                            />
-                            <div className="flex-1 space-y-2">
+                  {sortedProducts.map(prod => {
+                    const isEditing = editingProductId === prod.id;
+                    const auditEntries = auditLogByProduct[prod.id] ?? [];
+                    const auditLoading = auditLoadingByProduct[prod.id];
+                    const auditError = auditErrorByProduct[prod.id];
+                    const showHistory = isEditing || historyProductId === prod.id;
+
+                    if (isEditing) {
+                      return (
+                        <React.Fragment key={prod.id}>
+                          <tr className="bg-gray-50 dark:bg-gray-900">
+                            <td className="px-4 py-2 text-gray-900 dark:text-gray-100">
+                              <div className="flex items-start gap-3">
+                                <img
+                                  src={editForm.image.trim().length > 0 ? editForm.image.trim() : DEFAULT_IMAGE_PLACEHOLDER}
+                                  alt={(editForm.name || 'Product') + ' preview'}
+                                  className="h-16 w-16 rounded-md border border-gray-200 object-cover"
+                                  onError={event => {
+                                    event.currentTarget.src = DEFAULT_IMAGE_PLACEHOLDER;
+                                  }}
+                                />
+                                <div className="flex-1 space-y-2">
+                                  <input
+                                    value={editForm.name}
+                                    onChange={event => setEditForm(prev => ({ ...prev, name: event.target.value }))}
+                                    className="w-full px-3 py-2 border border-gray-300 rounded-md text-gray-900 focus:outline-none focus:ring-2 focus:ring-primary focus:border-primary"
+                                    required
+                                  />
+                                  <textarea
+                                    value={editForm.description}
+                                    onChange={event => setEditForm(prev => ({ ...prev, description: event.target.value }))}
+                                    className="w-full px-3 py-2 border border-gray-300 rounded-md text-gray-900 focus:outline-none focus:ring-2 focus:ring-primary focus:border-primary"
+                                    rows={2}
+                                    placeholder="Description"
+                                  />
+                                  <input
+                                    type="url"
+                                    value={editForm.image}
+                                    onChange={event => setEditForm(prev => ({ ...prev, image: event.target.value }))}
+                                    className="w-full px-3 py-2 border border-gray-300 rounded-md text-gray-900 focus:outline-none focus:ring-2 focus:ring-primary focus:border-primary"
+                                    placeholder="https://cdn.example.com/product.jpg"
+                                  />
+                                  <p className="text-xs text-gray-500 dark:text-gray-400">Clear the field to revert to the default placeholder image.</p>
+                                </div>
+                              </div>
+                            </td>
+                            <td className="px-4 py-2 text-gray-900 dark:text-gray-100">
                               <input
-                                value={editForm.name}
-                                onChange={event => setEditForm(prev => ({ ...prev, name: event.target.value }))}
-                                className="w-full px-3 py-2 border border-gray-300 rounded-md text-gray-900 focus:outline-none focus:ring-2 focus:ring-primary focus:border-primary"
+                                type="number"
+                                step="0.01"
+                                value={editForm.price}
+                                onChange={event => setEditForm(prev => ({ ...prev, price: event.target.value }))}
+                                className="w-32 px-3 py-2 border border-gray-300 rounded-md text-gray-900 focus:outline-none focus:ring-2 focus:ring-primary focus:border-primary"
                                 required
+                                min="0"
                               />
-                              <textarea
-                                value={editForm.description}
-                                onChange={event => setEditForm(prev => ({ ...prev, description: event.target.value }))}
-                                className="w-full px-3 py-2 border border-gray-300 rounded-md text-gray-900 focus:outline-none focus:ring-2 focus:ring-primary focus:border-primary"
-                                rows={2}
-                                placeholder="Description"
+                            </td>
+                            <td className="px-4 py-2 text-gray-900 dark:text-gray-100">
+                              <label className="flex items-center gap-2 text-sm">
+                                <input
+                                  type="checkbox"
+                                  checked={editForm.active}
+                                  onChange={event => setEditForm(prev => ({ ...prev, active: event.target.checked }))}
+                                />
+                                <span>{editForm.active ? 'Active' : 'Inactive'}</span>
+                              </label>
+                            </td>
+                            <td className="px-4 py-2 text-gray-900 dark:text-gray-100">
+                              <div className="flex gap-2">
+                                <button
+                                  type="button"
+                                  className="px-3 py-2 rounded bg-gray-200 dark:bg-gray-700 text-gray-800 dark:text-gray-100"
+                                  onClick={resetEditState}
+                                  disabled={updatingProductId === prod.id || deletingProductId === prod.id}
+                                >
+                                  Cancel
+                                </button>
+                                <button
+                                  type="button"
+                                  className="px-3 py-2 rounded text-white"
+                                  style={{ background: '#19b4b9' }}
+                                  onMouseOver={event => (event.currentTarget.style.background = '#153a5b')}
+                                  onMouseOut={event => (event.currentTarget.style.background = '#19b4b9')}
+                                  onClick={() => void handleSaveEdit()}
+                                  disabled={updatingProductId === prod.id || deletingProductId === prod.id}
+                                >
+                                  {updatingProductId === prod.id ? 'Saving...' : 'Save'}
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                          <tr className="bg-gray-50 dark:bg-gray-900">
+                            <td colSpan={4} className="px-4 pb-4 text-gray-900 dark:text-gray-100">
+                              <div className="mt-4 rounded border border-gray-200 dark:border-gray-700 bg-gray-100 dark:bg-gray-800 p-4">
+                                <h4 className="text-sm font-semibold mb-2">Recent Changes</h4>
+                                {auditLoading ? (
+                                  <p className="text-sm text-gray-500 dark:text-gray-400">Loading history...</p>
+                                ) : auditError ? (
+                                  <p className="text-sm text-red-600">{auditError}</p>
+                                ) : auditEntries.length === 0 ? (
+                                  <p className="text-sm text-gray-500 dark:text-gray-400">No audit history yet.</p>
+                                ) : (
+                                  <ul className="space-y-3 text-sm">
+                                    {auditEntries.map(entry => {
+                                      const actorLabel = entry.actor_name || entry.actor_email || 'Unknown user';
+                                      return (
+                                        <li key={entry.id} className="rounded bg-white/80 dark:bg-gray-900/60 border border-gray-200 dark:border-gray-700 p-3">
+                                          <div className="flex justify-between items-start">
+                                            <span className="font-medium">{entry.action.toUpperCase()}</span>
+                                            <span className="text-xs text-gray-500 dark:text-gray-400">{new Date(entry.created_at).toLocaleString()}</span>
+                                          </div>
+                                          <div className="text-xs text-gray-600 dark:text-gray-400 mt-1">{actorLabel}</div>
+                                          <pre className="mt-2 max-h-32 overflow-auto rounded bg-gray-900/80 text-gray-100 text-xs p-2">{JSON.stringify(entry.changes, null, 2)}</pre>
+                                        </li>
+                                      );
+                                    })}
+                                  </ul>
+                                )}
+                              </div>
+                            </td>
+                          </tr>
+                        </React.Fragment>
+                      );
+                    }
+
+                    const isHistoryVisible = historyProductId === prod.id;
+
+                    return (
+                      <React.Fragment key={prod.id}>
+                        <tr className="border-b border-gray-200 dark:border-gray-700">
+                          <td className="px-4 py-2 text-gray-900 dark:text-gray-100">
+                            <div className="flex items-start gap-3">
+                              <img
+                                src={prod.image.trim().length > 0 ? prod.image.trim() : DEFAULT_IMAGE_PLACEHOLDER}
+                                alt={prod.name + ' preview'}
+                                className="h-12 w-12 rounded-md border border-gray-200 object-cover"
+                                onError={event => {
+                                  event.currentTarget.src = DEFAULT_IMAGE_PLACEHOLDER;
+                                }}
                               />
-                              <input
-                                type="url"
-                                value={editForm.image}
-                                onChange={event => setEditForm(prev => ({ ...prev, image: event.target.value }))}
-                                className="w-full px-3 py-2 border border-gray-300 rounded-md text-gray-900 focus:outline-none focus:ring-2 focus:ring-primary focus:border-primary"
-                                placeholder="https://cdn.example.com/product.jpg"
-                              />
-                              <p className="text-xs text-gray-500 dark:text-gray-400">Clear the field to revert to the default placeholder image.</p>
+                              <div>
+                                <div className="font-semibold">{prod.name}</div>
+                                {prod.description && <div className="text-sm text-gray-500 dark:text-gray-400">{prod.description}</div>}
+                              </div>
                             </div>
-                          </div>
-                        </td>
-                        <td className="px-4 py-2 text-gray-900 dark:text-gray-100">
-                          <input
-                            type="number"
-                            step="0.01"
-                            value={editForm.price}
-                            onChange={event => setEditForm(prev => ({ ...prev, price: event.target.value }))}
-                            className="w-32 px-3 py-2 border border-gray-300 rounded-md text-gray-900 focus:outline-none focus:ring-2 focus:ring-primary focus:border-primary"
-                            required
-                            min="0"
-                          />
-                        </td>
-                        <td className="px-4 py-2 text-gray-900 dark:text-gray-100">
-                          <label className="flex items-center gap-2 text-sm">
-                            <input
-                              type="checkbox"
-                              checked={editForm.active}
-                              onChange={event => setEditForm(prev => ({ ...prev, active: event.target.checked }))}
-                            />
-                            <span>{editForm.active ? 'Active' : 'Inactive'}</span>
-                          </label>
-                        </td>
-                        <td className="px-4 py-2 text-gray-900 dark:text-gray-100">
-                          <div className="flex gap-2">
-                            <button
-                              type="button"
-                              className="px-3 py-2 rounded bg-gray-200 dark:bg-gray-700 text-gray-800 dark:text-gray-100"
-                              onClick={resetEditState}
-                              disabled={updatingProductId === prod.id || deletingProductId === prod.id}
-                            >
-                              Cancel
-                            </button>
-                            <button
-                              type="button"
-                              className="px-3 py-2 rounded text-white"
-                              style={{ background: '#19b4b9' }}
-                              onMouseOver={event => (event.currentTarget.style.background = '#153a5b')}
-                              onMouseOut={event => (event.currentTarget.style.background = '#19b4b9')}
-                              onClick={() => void handleSaveEdit()}
-                              disabled={updatingProductId === prod.id || deletingProductId === prod.id}
-                            >
-                              {updatingProductId === prod.id ? 'Saving...' : 'Save'}
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    ) : (
-                      <tr key={prod.id} className="border-b border-gray-200 dark:border-gray-700">
-                        <td className="px-4 py-2 text-gray-900 dark:text-gray-100">
-                          <div className="flex items-start gap-3">
-                            <img
-                              src={prod.image.trim().length > 0 ? prod.image.trim() : DEFAULT_IMAGE_PLACEHOLDER}
-                              alt={prod.name + ' preview'}
-                              className="h-12 w-12 rounded-md border border-gray-200 object-cover"
-                              onError={event => {
-                                event.currentTarget.src = DEFAULT_IMAGE_PLACEHOLDER;
-                              }}
-                            />
-                            <div>
-                              <div className="font-semibold">{prod.name}</div>
-                              {prod.description && <div className="text-sm text-gray-500 dark:text-gray-400">{prod.description}</div>}
+                          </td>
+                          <td className="px-4 py-2 text-gray-900 dark:text-gray-100">${prod.price.toFixed(2)}</td>
+                          <td className="px-4 py-2 text-gray-900 dark:text-gray-100">
+                            <span className={`inline-flex items-center rounded-full px-3 py-1 text-xs font-semibold ${prod.active ? 'bg-emerald-100 text-emerald-700' : 'bg-gray-300 text-gray-700'}`}>
+                              {prod.active ? 'Active' : 'Inactive'}
+                            </span>
+                          </td>
+                          <td className="px-4 py-2 text-gray-900 dark:text-gray-100">
+                            <div className="flex gap-2">
+                              <button
+                                type="button"
+                                className="px-3 py-2 rounded bg-gray-200 dark:bg-gray-700 text-gray-800 dark:text-gray-100"
+                                onClick={() => handleStartEdit(prod)}
+                                disabled={updatingProductId === prod.id || deletingProductId === prod.id}
+                              >
+                                Edit
+                              </button>
+                              <button
+                                type="button"
+                                className="px-3 py-2 rounded bg-indigo-600 text-white hover:bg-indigo-700"
+                                onClick={() => handleToggleHistory(prod.id)}
+                                disabled={updatingProductId === prod.id || deletingProductId === prod.id}
+                              >
+                                {isHistoryVisible ? 'Hide History' : 'History'}
+                              </button>
+                              <button
+                                type="button"
+                                className={`px-3 py-2 rounded text-white ${prod.active ? 'bg-red-500 hover:bg-red-600' : 'bg-emerald-500 hover:bg-emerald-600'}`}
+                                onClick={() => void handleToggleActive(prod)}
+                                disabled={updatingProductId === prod.id || deletingProductId === prod.id}
+                              >
+                                {updatingProductId === prod.id ? 'Updating...' : prod.active ? 'Deactivate' : 'Activate'}
+                              </button>
+                              <button
+                                type="button"
+                                className="px-3 py-2 rounded bg-red-600 text-white hover:bg-red-700"
+                                onClick={() => void handleDeleteProduct(prod)}
+                                disabled={deletingProductId === prod.id || updatingProductId === prod.id}
+                              >
+                                {deletingProductId === prod.id ? 'Deleting...' : 'Delete'}
+                              </button>
                             </div>
-                          </div>
-                        </td>
-                        <td className="px-4 py-2 text-gray-900 dark:text-gray-100">${prod.price.toFixed(2)}</td>
-                        <td className="px-4 py-2 text-gray-900 dark:text-gray-100">
-                          <span className={`inline-flex items-center rounded-full px-3 py-1 text-xs font-semibold ${prod.active ? 'bg-emerald-100 text-emerald-700' : 'bg-gray-300 text-gray-700'}`}>
-                            {prod.active ? 'Active' : 'Inactive'}
-                          </span>
-                        </td>
-                        <td className="px-4 py-2 text-gray-900 dark:text-gray-100">
-                          <div className="flex gap-2">
-                            <button
-                              type="button"
-                              className="px-3 py-2 rounded bg-gray-200 dark:bg-gray-700 text-gray-800 dark:text-gray-100"
-                              onClick={() => handleStartEdit(prod)}
-                              disabled={updatingProductId === prod.id || deletingProductId === prod.id}
-                            >
-                              Edit
-                            </button>
-                            <button
-                              type="button"
-                              className={`px-3 py-2 rounded text-white ${prod.active ? 'bg-red-500 hover:bg-red-600' : 'bg-emerald-500 hover:bg-emerald-600'}`}
-                              onClick={() => void handleToggleActive(prod)}
-                              disabled={updatingProductId === prod.id || deletingProductId === prod.id}
-                            >
-                              {updatingProductId === prod.id ? 'Updating...' : prod.active ? 'Deactivate' : 'Activate'}
-                            </button>
-                            <button
-                              type="button"
-                              className="px-3 py-2 rounded bg-red-600 text-white hover:bg-red-700"
-                              onClick={() => void handleDeleteProduct(prod)}
-                              disabled={deletingProductId === prod.id || updatingProductId === prod.id}
-                            >
-                              {deletingProductId === prod.id ? 'Deleting...' : 'Delete'}
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    )
-                  ))}
+                          </td>
+                        </tr>
+                        {isHistoryVisible && (
+                          <tr className="border-b border-gray-200 dark:border-gray-700">
+                            <td colSpan={4} className="px-4 pb-4 text-gray-900 dark:text-gray-100">
+                              <div className="mt-4 rounded border border-gray-200 dark:border-gray-700 bg-gray-100 dark:bg-gray-800 p-4">
+                                <h4 className="text-sm font-semibold mb-2">Recent Changes</h4>
+                                {auditLoading ? (
+                                  <p className="text-sm text-gray-500 dark:text-gray-400">Loading history...</p>
+                                ) : auditError ? (
+                                  <p className="text-sm text-red-600">{auditError}</p>
+                                ) : auditEntries.length === 0 ? (
+                                  <p className="text-sm text-gray-500 dark:text-gray-400">No audit history yet.</p>
+                                ) : (
+                                  <ul className="space-y-3 text-sm">
+                                    {auditEntries.map(entry => {
+                                      const actorLabel = entry.actor_name || entry.actor_email || 'Unknown user';
+                                      return (
+                                        <li key={entry.id} className="rounded bg-white/80 dark:bg-gray-900/60 border border-gray-200 dark:border-gray-700 p-3">
+                                          <div className="flex justify-between items-start">
+                                            <span className="font-medium">{entry.action.toUpperCase()}</span>
+                                            <span className="text-xs text-gray-500 dark:text-gray-400">{new Date(entry.created_at).toLocaleString()}</span>
+                                          </div>
+                                          <div className="text-xs text-gray-600 dark:text-gray-400 mt-1">{actorLabel}</div>
+                                          <pre className="mt-2 max-h-32 overflow-auto rounded bg-gray-900/80 text-gray-100 text-xs p-2">{JSON.stringify(entry.changes, null, 2)}</pre>
+                                        </li>
+                                      );
+                                    })}
+                                  </ul>
+                                )}
+                              </div>
+                            </td>
+                          </tr>
+                        )}
+                      </React.Fragment>
+                    );
+                  })}
                   {!isLoading && sortedProducts.length === 0 && (
                     <tr>
                       <td colSpan={4} className="px-4 py-2 text-center text-gray-500">No products available.</td>

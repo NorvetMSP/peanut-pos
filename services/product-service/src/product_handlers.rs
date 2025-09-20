@@ -1,20 +1,19 @@
 use crate::AppState;
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     Json,
 };
+use chrono::{DateTime, Utc};
 use rdkafka::producer::FutureRecord;
 use serde::ser::{SerializeStruct, Serializer};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::{query, query_as, PgPool};
-use std::time::Duration;
+use std::{env, time::Duration};
 use uuid::Uuid;
 
 const INVENTORY_DEFAULT_THRESHOLD: i32 = 5;
-const DEFAULT_PRODUCT_IMAGE: &str = "https://placehold.co/400x300?text=No+Image";
-
 #[derive(Deserialize)]
 pub struct UpdateProduct {
     pub name: String,
@@ -25,12 +24,17 @@ pub struct UpdateProduct {
     pub image: Option<String>,
 }
 
+fn default_product_image() -> String {
+    env::var("DEFAULT_PRODUCT_IMAGE_URL")
+        .unwrap_or_else(|_| "https://placehold.co/400x300?text=No+Image".to_string())
+}
+
 fn normalize_image_input(input: Option<String>) -> Option<String> {
     match input {
         Some(value) => {
             let trimmed = value.trim();
             if trimmed.is_empty() {
-                Some(DEFAULT_PRODUCT_IMAGE.to_string())
+                Some(default_product_image())
             } else {
                 Some(trimmed.to_string())
             }
@@ -214,7 +218,7 @@ pub async fn create_product(
         image,
     } = new_product;
     let desc = description.unwrap_or_default();
-    let image = normalize_image_input(image).unwrap_or_else(|| DEFAULT_PRODUCT_IMAGE.to_string());
+    let image = normalize_image_input(image).unwrap_or_else(default_product_image);
     // Insert product into database
     let product = query_as::<_, Product>(
         "INSERT INTO products (id, tenant_id, name, price, description, active, image) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id, tenant_id, name, price::FLOAT8 as price, description, image, active"
@@ -373,4 +377,69 @@ pub async fn delete_product(
     }
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+pub struct ProductAuditQuery {
+    limit: Option<i64>,
+}
+
+#[derive(Serialize, sqlx::FromRow)]
+pub struct ProductAuditEntry {
+    id: Uuid,
+    action: String,
+    changes: Value,
+    actor_id: Option<Uuid>,
+    actor_name: Option<String>,
+    actor_email: Option<String>,
+    created_at: DateTime<Utc>,
+}
+
+pub async fn list_product_audit(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(product_id): axum::extract::Path<Uuid>,
+    Query(params): Query<ProductAuditQuery>,
+) -> Result<Json<Vec<ProductAuditEntry>>, (StatusCode, String)> {
+    let tenant_id = if let Some(hdr) = headers.get("X-Tenant-ID") {
+        match hdr.to_str().ok().and_then(|s| Uuid::parse_str(s).ok()) {
+            Some(id) => id,
+            None => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "Invalid X-Tenant-ID header".to_string(),
+                ))
+            }
+        }
+    } else {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Missing X-Tenant-ID header".to_string(),
+        ));
+    };
+    let mut limit = params.limit.unwrap_or(10);
+    if limit < 1 {
+        limit = 1;
+    } else if limit > 50 {
+        limit = 50;
+    }
+    let entries = sqlx::query_as::<_, ProductAuditEntry>(
+        "SELECT id, action, changes, actor_id, actor_name, actor_email, created_at
+         FROM product_audit_log
+         WHERE product_id = $1 AND tenant_id = $2
+         ORDER BY created_at DESC
+         LIMIT $3",
+    )
+    .bind(product_id)
+    .bind(tenant_id)
+    .bind(limit)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Database error: {}", e),
+        )
+    })?;
+    Ok(Json(entries))
 }
