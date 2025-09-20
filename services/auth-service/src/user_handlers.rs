@@ -15,6 +15,7 @@ use sqlx::FromRow;
 use tracing::{error, warn};
 use uuid::Uuid;
 
+use crate::tokens::{IssuedTokens, TokenSubject};
 use crate::AppState;
 
 pub(crate) const ALLOWED_ROLES: &[&str] = &["super_admin", "admin", "manager", "cashier"];
@@ -190,7 +191,15 @@ pub struct LoginRequest {
 
 #[derive(Debug, Serialize)]
 pub struct LoginResponse {
+    /// Retained for backward compatibility with existing clients.
     pub token: String,
+    pub access_token: String,
+    pub refresh_token: String,
+    pub expires_in: i64,
+    pub refresh_expires_in: i64,
+    pub token_type: &'static str,
+    pub access_token_expires_at: String,
+    pub refresh_token_expires_at: String,
     pub user: User,
 }
 
@@ -322,7 +331,6 @@ pub async fn login_user(
         }
     }
 
-    let token = Uuid::new_v4().to_string();
     let user = User {
         id: auth_data.id,
         tenant_id: auth_data.tenant_id,
@@ -331,7 +339,44 @@ pub async fn login_user(
         role: auth_data.role,
     };
 
-    Ok(Json(LoginResponse { token, user }))
+    let subject = TokenSubject {
+        user_id: user.id,
+        tenant_id: user.tenant_id,
+        roles: vec![user.role.clone()],
+    };
+
+    let issued = state
+        .token_signer
+        .issue_tokens(subject)
+        .await
+        .map_err(|err| {
+            error!(user_id = %user.id, error = ?err, "Failed to issue tokens");
+            AuthError::internal_error("Unable to issue authentication tokens.")
+        })?;
+
+    let IssuedTokens {
+        access_token,
+        refresh_token,
+        access_expires_at,
+        refresh_expires_at,
+        access_expires_in,
+        refresh_expires_in,
+        token_type,
+    } = issued;
+
+    let response = LoginResponse {
+        token: access_token.clone(),
+        access_token,
+        refresh_token,
+        expires_in: access_expires_in,
+        refresh_expires_in,
+        token_type,
+        access_token_expires_at: access_expires_at.to_rfc3339_opts(SecondsFormat::Secs, true),
+        refresh_token_expires_at: refresh_expires_at.to_rfc3339_opts(SecondsFormat::Secs, true),
+        user,
+    };
+
+    Ok(Json(response))
 }
 
 pub(crate) fn extract_tenant_id(headers: &HeaderMap) -> Result<Uuid, (StatusCode, String)> {

@@ -1,7 +1,8 @@
+﻿use anyhow::Context;
 use axum::{
     body::Body,
     http::{
-        header::{ACCEPT, CONTENT_TYPE},
+        header::{self, ACCEPT, CONTENT_TYPE},
         HeaderName, HeaderValue, Method, Request, StatusCode,
     },
     middleware::{self, Next},
@@ -9,6 +10,7 @@ use axum::{
     routing::{get, post},
     Router,
 };
+use common_auth::{JwtConfig, JwtVerifier};
 use rdkafka::producer::FutureProducer;
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Row};
@@ -19,8 +21,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
 use tokio::sync::RwLock;
-use tokio::time::interval;
+use tokio::time::{interval, MissedTickBehavior};
 use tower_http::cors::{AllowOrigin, CorsLayer};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 mod events;
@@ -42,6 +45,7 @@ pub struct AppState {
     pub kafka_producer: FutureProducer,
     pub rate_counters: Arc<Mutex<HashMap<String, RateInfo>>>,
     pub key_cache: Arc<RwLock<HashMap<String, Uuid>>>,
+    pub jwt_verifier: Arc<JwtVerifier>,
 }
 
 async fn health() -> &'static str {
@@ -89,6 +93,9 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
+    let jwt_verifier = build_jwt_verifier_from_env().await?;
+    spawn_jwks_refresh(jwt_verifier.clone());
+
     // Initialize Kafka producer
     let producer: FutureProducer = rdkafka::ClientConfig::new()
         .set(
@@ -101,6 +108,7 @@ async fn main() -> anyhow::Result<()> {
         kafka_producer: producer,
         rate_counters: Arc::new(Mutex::new(HashMap::new())),
         key_cache,
+        jwt_verifier,
     };
 
     // Build routes with authentication + rate-limiting middleware
@@ -169,49 +177,102 @@ async fn auth_middleware(
     mut request: Request<Body>,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    // Extract API key or internal tenant header
     let headers = request.headers();
-    let api_key = headers.get("X-API-Key").and_then(|h| h.to_str().ok());
-    let tenant_hdr = headers.get("X-Tenant-ID").and_then(|h| h.to_str().ok());
+    let bearer = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|raw| raw.strip_prefix("Bearer ").map(str::trim));
 
-    let (tenant_id, limiter_key) = if let Some(key) = api_key {
+    let limiter_key: String;
+    let tenant_id;
+    let mut claims_opt = None;
+
+    if let Some(token) = bearer {
+        let claims = state.jwt_verifier.verify(token).map_err(|err| {
+            warn!(error = %err, "JWT verification failed");
+            StatusCode::UNAUTHORIZED
+        })?;
+        if let Some(header_tid) = headers
+            .get("X-Tenant-ID")
+            .and_then(|value| value.to_str().ok())
+        {
+            let header_uuid = Uuid::parse_str(header_tid).map_err(|_| StatusCode::BAD_REQUEST)?;
+            if header_uuid != claims.tenant_id {
+                return Err(StatusCode::FORBIDDEN);
+            }
+        }
+        limiter_key = format!("jwt:{}:{}", claims.tenant_id, claims.subject);
+        tenant_id = claims.tenant_id;
+        claims_opt = Some(claims);
+    } else if let Some(key) = headers.get("X-API-Key").and_then(|h| h.to_str().ok()) {
         let hashed_key = hash_api_key(key);
         let cache = state.key_cache.read().await;
         let tenant = cache
             .get(&hashed_key)
             .copied()
             .ok_or(StatusCode::UNAUTHORIZED)?;
-        (tenant, hashed_key)
-    } else if let Some(tid_str) = tenant_hdr {
-        let tenant = Uuid::parse_str(tid_str).map_err(|_| StatusCode::BAD_REQUEST)?;
-        (tenant, tenant.to_string())
+        if let Some(header_tid) = headers
+            .get("X-Tenant-ID")
+            .and_then(|value| value.to_str().ok())
+        {
+            let header_uuid = Uuid::parse_str(header_tid).map_err(|_| StatusCode::BAD_REQUEST)?;
+            if header_uuid != tenant {
+                return Err(StatusCode::FORBIDDEN);
+            }
+        }
+        limiter_key = format!("api:{}", hashed_key);
+        tenant_id = tenant;
+    } else if let Some(tid_str) = headers.get("X-Tenant-ID").and_then(|h| h.to_str().ok()) {
+        let parsed = Uuid::parse_str(tid_str).map_err(|_| StatusCode::BAD_REQUEST)?;
+        limiter_key = format!("tenant-header:{}", parsed);
+        tenant_id = parsed;
     } else {
-        return Err(StatusCode::UNAUTHORIZED); // No auth provided
-    };
+        return Err(StatusCode::UNAUTHORIZED);
+    }
 
-    // Simple rate limiting: max 60 requests per minute per key/tenant
     {
         let mut counters = state.rate_counters.lock().unwrap();
         let entry = counters.entry(limiter_key.clone()).or_insert(RateInfo {
             last_reset: Instant::now(),
             count: 0,
         });
-        // Reset count if window elapsed
         if entry.last_reset.elapsed() >= Duration::from_secs(60) {
             entry.last_reset = Instant::now();
             entry.count = 0;
         }
         entry.count += 1;
-        if entry.count > 60 {
-            tracing::warn!("Rate limit exceeded for key/tenant: {}", limiter_key);
+        let limit = env::var("GATEWAY_RATE_LIMIT_RPM")
+            .ok()
+            .and_then(|value| value.parse::<u32>().ok())
+            .unwrap_or(60);
+        if entry.count > limit {
             return Err(StatusCode::TOO_MANY_REQUESTS);
         }
     }
 
-    // Attach tenant_id to request extensions for handlers to use
     request.extensions_mut().insert(tenant_id);
-    // Continue to handler
+    if let Some(claims) = claims_opt {
+        request.extensions_mut().insert(claims);
+    }
+
     Ok(next.run(request).await)
+}
+
+async fn load_active_keys(pool: &PgPool) -> anyhow::Result<HashMap<String, Uuid>> {
+    let records = sqlx::query(
+        "SELECT api_key_hash, tenant_id FROM integration_keys WHERE revoked_at IS NULL",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(records
+        .into_iter()
+        .map(|row| {
+            let hash: String = row.get("api_key_hash");
+            let tenant_id: Uuid = row.get("tenant_id");
+            (hash, tenant_id)
+        })
+        .collect())
 }
 
 fn hash_api_key(key: &str) -> String {
@@ -220,19 +281,63 @@ fn hash_api_key(key: &str) -> String {
     hex::encode(hasher.finalize())
 }
 
-async fn load_active_keys(pool: &PgPool) -> anyhow::Result<HashMap<String, Uuid>> {
-    let rows = sqlx::query(
-        "SELECT api_key_hash, tenant_id FROM integration_keys WHERE revoked_at IS NULL",
-    )
-    .fetch_all(pool)
-    .await?;
+async fn build_jwt_verifier_from_env() -> anyhow::Result<Arc<JwtVerifier>> {
+    let issuer = env::var("JWT_ISSUER").context("JWT_ISSUER must be set")?;
+    let audience = env::var("JWT_AUDIENCE").context("JWT_AUDIENCE must be set")?;
 
-    let mut map = HashMap::with_capacity(rows.len());
-    for row in rows {
-        let hash: String = row.get("api_key_hash");
-        let tenant_id: Uuid = row.get("tenant_id");
-        map.insert(hash, tenant_id);
+    let mut config = JwtConfig::new(issuer, audience);
+    if let Ok(value) = env::var("JWT_LEEWAY_SECONDS") {
+        if let Ok(leeway) = value.parse::<u32>() {
+            config = config.with_leeway(leeway);
+        }
     }
 
-    Ok(map)
+    let mut builder = JwtVerifier::builder(config);
+
+    if let Ok(url) = env::var("JWT_JWKS_URL") {
+        info!(jwks_url = %url, "Configuring JWKS fetcher");
+        builder = builder.with_jwks_url(url);
+    }
+
+    if let Ok(pem) = env::var("JWT_DEV_PUBLIC_KEY_PEM") {
+        warn!("Using JWT_DEV_PUBLIC_KEY_PEM for verification; do not enable in production");
+        builder = builder
+            .with_rsa_pem("local-dev", pem.as_bytes())
+            .map_err(anyhow::Error::from)?;
+    }
+
+    let verifier = builder.build().await.map_err(anyhow::Error::from)?;
+    info!("JWT verifier initialised");
+    Ok(Arc::new(verifier))
+}
+
+fn spawn_jwks_refresh(verifier: Arc<JwtVerifier>) {
+    let Some(fetcher) = verifier.jwks_fetcher() else {
+        return;
+    };
+
+    let refresh_secs = env::var("JWKS_REFRESH_SECONDS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(300);
+    let refresh_secs = refresh_secs.max(60);
+    let interval_duration = Duration::from_secs(refresh_secs);
+    let url = fetcher.url().to_owned();
+    let handle = verifier.clone();
+
+    tokio::spawn(async move {
+        let mut ticker = interval(interval_duration);
+        ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        loop {
+            ticker.tick().await;
+            match handle.refresh_jwks().await {
+                Ok(count) => {
+                    debug!(count, jwks_url = %url, "Refreshed JWKS keys");
+                }
+                Err(err) => {
+                    warn!(error = %err, jwks_url = %url, "Failed to refresh JWKS keys");
+                }
+            }
+        }
+    });
 }
