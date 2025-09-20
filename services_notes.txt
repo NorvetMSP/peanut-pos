@@ -1,17 +1,3 @@
-You???re in the repo root, but the Cargo workspace is under services/. Use one of these:
-
-Option A: Use the workspace manifest path from root
-
-
-**Local build to docker only
-cargo run --manifest-path services/Cargo.toml -p product-service
-cargo run --manifest-path services/Cargo.toml -p analytics-service
-cargo run --manifest-path services/Cargo.toml -p integration-gateway
-cargo run --manifest-path services/Cargo.toml -p order-service
-cargo run --manifest-path services/Cargo.toml -p auth-service
-cargo run --manifest-path services/Cargo.toml -p payment-service
-cargo run --manifest-path services/Cargo.toml -p loyalty-service
-cargo run --manifest-path services/Cargo.toml -p customer-service
 
 
 Full Docker Build including app
@@ -35,6 +21,20 @@ docker compose exec kafka kafka-topics.sh --create --topic payment.completed --b
 docker compose exec kafka kafka-topics.sh --create --topic payment.failed --bootstrap-server kafka:9092 --replication-factor 1 --partitions 1
 docker compose exec kafka kafka-topics.sh --create --topic order.completed --bootstrap-server kafka:9092 --replication-factor 1 --partitions 1
 
+You???re in the repo root, but the Cargo workspace is under services/. Use one of these:
+
+Option B: Use the workspace manifest path from root
+
+
+**Local build to docker only
+cargo run --manifest-path services/Cargo.toml -p product-service
+cargo run --manifest-path services/Cargo.toml -p analytics-service
+cargo run --manifest-path services/Cargo.toml -p integration-gateway
+cargo run --manifest-path services/Cargo.toml -p order-service
+cargo run --manifest-path services/Cargo.toml -p auth-service
+cargo run --manifest-path services/Cargo.toml -p payment-service
+cargo run --manifest-path services/Cargo.toml -p loyalty-service
+cargo run --manifest-path services/Cargo.toml -p customer-service
 
 
 
@@ -93,14 +93,13 @@ C:\Projects\novapos\frontends\admin-portal> npm run dev
 
 **********************************postgres in docker*********************************************************
 PS C:\Projects\novapos> docker run --name novapos-pg -e POSTGRES_PASSWORD=postgres -p 5432:5432 -d postgres:16
->> 
-ad3dd0a17f762ccc68b1e8d41544cd71584f0383305e4ffb7c12a308469f50b1
+
 PS C:\Projects\novapos> docker exec -it novapos-pg psql -U postgres -c "CREATE DATABASE novapos;"
-CREATE DATABASE
-PS C:\Projects\novapos> 
+ 
 
 If you want to stay connected, open psql against the default postgres database and kill the stragglers manually:
 psql postgres://novapos:novapos@localhost:5432/postgres
+
 then inside psql run:
 SELECT pg_terminate_backend(pid)
 FROM pg_stat_activity

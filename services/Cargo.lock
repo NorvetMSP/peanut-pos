@@ -1572,6 +1572,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "chrono",
  "hyper 1.7.0",
  "rdkafka",
  "serde",
