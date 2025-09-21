@@ -199,6 +199,9 @@ Example: $env:CUSTOMER_MASTER_KEY = "wJr6c+g4vF5n3fH0wIr1Vj0pND+1tQgxOcnANLmJHzk
 Seed tenant data keys (from repo root):
 cargo run --manifest-path services/Cargo.toml -p customer-service --bin seed_tenant_keys -- --tenant <TENANT_UUID>
 Add --rotate to force a new version when one already exists.
+Apply customer-service migrations (ensure DATABASE_URL points to target env):
+sqlx migrate run --source services/customer-service/migrations --ignore-missing
+
 Backfill customer PII columns (defaults batch=100):
 cargo run --manifest-path services/Cargo.toml -p customer-service --bin backfill_customer_pii -- --tenant <TENANT_UUID>
 Add --dry-run to report counts without updating rows.

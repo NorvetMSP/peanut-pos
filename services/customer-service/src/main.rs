@@ -12,7 +12,8 @@ use chrono::{DateTime, Utc};
 use common_auth::{AuthContext, JwtConfig, JwtVerifier};
 use common_crypto::{decrypt_field, deterministic_hash, encrypt_field, CryptoError, MasterKey};
 use serde::{Deserialize, Serialize};
-use sqlx::{FromRow, PgPool};
+use serde_json::{json, Value};
+use sqlx::{Executor, FromRow, PgPool};
 use std::{
     collections::HashMap,
     env,
@@ -28,6 +29,8 @@ use uuid::Uuid;
 
 const CUSTOMER_WRITE_ROLES: &[&str] = &["super_admin", "admin", "manager", "cashier"];
 const CUSTOMER_VIEW_ROLES: &[&str] = &["super_admin", "admin", "manager", "cashier"];
+const GDPR_MANAGE_ROLES: &[&str] = &["super_admin", "admin"];
+const GDPR_DELETED_NAME: &str = "[deleted]";
 
 #[derive(Clone)]
 struct AppState {
@@ -59,6 +62,18 @@ struct Customer {
     email: Option<String>,
     phone: Option<String>,
     created_at: DateTime<Utc>,
+}
+
+#[derive(Serialize)]
+struct GdprExportResponse {
+    export_id: Uuid,
+    customer: Customer,
+}
+
+#[derive(Serialize)]
+struct GdprDeleteResponse {
+    tombstone_id: Uuid,
+    status: String,
 }
 
 #[derive(FromRow)]
@@ -173,6 +188,8 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/customers", post(create_customer).get(search_customers))
         .route("/customers/:id", get(get_customer))
+        .route("/customers/:id/gdpr/export", post(gdpr_export_customer))
+        .route("/customers/:id/gdpr/delete", post(gdpr_delete_customer))
         .route("/healthz", get(|| async { "ok" }))
         .with_state(state)
         .layer(cors);
@@ -407,6 +424,151 @@ async fn get_customer(
     Ok(Json(customer))
 }
 
+async fn gdpr_export_customer(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    headers: HeaderMap,
+    Path(customer_id): Path<Uuid>,
+) -> ApiResult<Json<GdprExportResponse>> {
+    ensure_role(&auth, GDPR_MANAGE_ROLES)?;
+    let tenant_id = tenant_id_from_request(&headers, &auth)?;
+
+    let mut key_cache = TenantKeyCache::new(&state, tenant_id);
+
+    let row = sqlx::query_as::<_, CustomerRow>(
+        "SELECT
+            id,
+            tenant_id,
+            name,
+            email,
+            phone,
+            email_encrypted,
+            phone_encrypted,
+            pii_key_version,
+            created_at
+        FROM customers
+        WHERE tenant_id = $1 AND id = $2",
+    )
+    .bind(tenant_id)
+    .bind(customer_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(internal_err)?
+    .ok_or((StatusCode::NOT_FOUND, "Customer not found".into()))?;
+
+    let customer = hydrate_customer_row(row, &mut key_cache).await?;
+    let metadata = json!({
+        "request_type": "export",
+        "had_email": customer.email.is_some(),
+        "had_phone": customer.phone.is_some(),
+        "requested_at": Utc::now(),
+    });
+
+    let export_id = insert_gdpr_tombstone(
+        &state.db,
+        tenant_id,
+        Some(customer_id),
+        "export",
+        "completed",
+        Some(auth.claims.subject),
+        metadata,
+    )
+    .await
+    .map_err(internal_err)?;
+
+    info!(tenant_id = %tenant_id, customer_id = %customer_id, export_id = %export_id, "GDPR export completed");
+    Ok(Json(GdprExportResponse {
+        export_id,
+        customer,
+    }))
+}
+
+async fn gdpr_delete_customer(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    headers: HeaderMap,
+    Path(customer_id): Path<Uuid>,
+) -> ApiResult<Json<GdprDeleteResponse>> {
+    ensure_role(&auth, GDPR_MANAGE_ROLES)?;
+    let tenant_id = tenant_id_from_request(&headers, &auth)?;
+
+    let row = sqlx::query_as::<_, CustomerRow>(
+        "SELECT
+            id,
+            tenant_id,
+            name,
+            email,
+            phone,
+            email_encrypted,
+            phone_encrypted,
+            pii_key_version,
+            created_at
+        FROM customers
+        WHERE tenant_id = $1 AND id = $2",
+    )
+    .bind(tenant_id)
+    .bind(customer_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(internal_err)?
+    .ok_or((StatusCode::NOT_FOUND, "Customer not found".into()))?;
+
+    let had_email = row.email.is_some() || row.email_encrypted.is_some();
+    let had_phone = row.phone.is_some() || row.phone_encrypted.is_some();
+
+    let mut tx = state.db.begin().await.map_err(internal_err)?;
+    let result = sqlx::query(
+        "UPDATE customers
+         SET name = $1,
+             email = NULL,
+             phone = NULL,
+             email_encrypted = NULL,
+             phone_encrypted = NULL,
+             email_hash = NULL,
+             phone_hash = NULL,
+             pii_key_version = NULL,
+             pii_encrypted_at = NULL
+         WHERE tenant_id = $2 AND id = $3",
+    )
+    .bind(GDPR_DELETED_NAME)
+    .bind(tenant_id)
+    .bind(customer_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(internal_err)?;
+
+    if result.rows_affected() == 0 {
+        tx.rollback().await.map_err(internal_err)?;
+        return Err((StatusCode::NOT_FOUND, "Customer not found".into()));
+    }
+
+    let metadata = json!({
+        "request_type": "delete",
+        "had_email": had_email,
+        "had_phone": had_phone,
+        "requested_at": Utc::now(),
+    });
+
+    let tombstone_id = insert_gdpr_tombstone(
+        &mut *tx,
+        tenant_id,
+        Some(customer_id),
+        "delete",
+        "completed",
+        Some(auth.claims.subject),
+        metadata,
+    )
+    .await
+    .map_err(internal_err)?;
+
+    tx.commit().await.map_err(internal_err)?;
+    info!(tenant_id = %tenant_id, customer_id = %customer_id, tombstone_id = %tombstone_id, "GDPR delete completed");
+    Ok(Json(GdprDeleteResponse {
+        tombstone_id,
+        status: "deleted".into(),
+    }))
+}
+
 async fn hydrate_customer_rows(
     rows: Vec<CustomerRow>,
     key_cache: &mut TenantKeyCache<'_>,
@@ -538,6 +700,40 @@ async fn load_tenant_dek(
     })
 }
 
+async fn insert_gdpr_tombstone<'a, E>(
+    executor: E,
+    tenant_id: Uuid,
+    customer_id: Option<Uuid>,
+    request_type: &str,
+    status: &str,
+    requested_by: Option<Uuid>,
+    metadata: Value,
+) -> Result<Uuid, sqlx::Error>
+where
+    E: Executor<'a, Database = sqlx::Postgres>,
+{
+    let id = Uuid::new_v4();
+    let processed_at = if status == "completed" {
+        Some(Utc::now())
+    } else {
+        None
+    };
+    sqlx::query(
+        "INSERT INTO gdpr_tombstones (id, tenant_id, customer_id, request_type, status, requested_by, metadata, processed_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"
+    )
+    .bind(id)
+    .bind(tenant_id)
+    .bind(customer_id)
+    .bind(request_type)
+    .bind(status)
+    .bind(requested_by)
+    .bind(metadata)
+    .bind(processed_at)
+    .execute(executor)
+    .await?;
+    Ok(id)
+}
 fn sanitize_optional(value: Option<String>) -> Option<String> {
     value
         .map(|v| v.trim().to_string())

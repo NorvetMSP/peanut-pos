@@ -625,6 +625,7 @@ dependencies = [
  "common-auth",
  "common-crypto",
  "serde",
+ "serde_json",
  "sqlx",
  "tokio",
  "tower-http 0.5.2",
