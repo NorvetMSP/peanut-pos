@@ -4,6 +4,8 @@ use axum::{
     http::{HeaderMap, StatusCode},
     Json,
 };
+use common_auth::AuthContext;
+
 use serde::Serialize;
 use sqlx::Row;
 use uuid::Uuid;
@@ -26,11 +28,15 @@ pub struct ForecastResult {
     next_day_sales: f64,
 }
 
+const ANALYTICS_VIEW_ROLES: &[&str] = &["super_admin", "admin", "manager"];
+
 pub async fn get_summary(
     State(state): State<AppState>,
+    auth: AuthContext,
     headers: HeaderMap,
 ) -> Result<Json<Summary>, (StatusCode, String)> {
-    let tenant_id = extract_tenant_id(&headers)?;
+    crate::ensure_role(&auth, ANALYTICS_VIEW_ROLES)?;
+    let tenant_id = crate::tenant_id_from_request(&headers, &auth)?;
 
     let rec = sqlx::query(
         "SELECT order_count, total_sales FROM daily_sales \
@@ -48,22 +54,18 @@ pub async fn get_summary(
 
     let (order_count, total_sales) = match rec {
         Some(row) => {
-            let count: i64 = row
-                .try_get("order_count")
-                .map_err(|e| {
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("DB row decode failed: {}", e),
-                    )
-                })?;
-            let total: Option<f64> = row
-                .try_get("total_sales")
-                .map_err(|e| {
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("DB row decode failed: {}", e),
-                    )
-                })?;
+            let count: i64 = row.try_get("order_count").map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("DB row decode failed: {}", e),
+                )
+            })?;
+            let total: Option<f64> = row.try_get("total_sales").map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("DB row decode failed: {}", e),
+                )
+            })?;
             (count as u64, total.unwrap_or(0.0))
         }
         None => (0, 0.0),
@@ -94,9 +96,11 @@ pub async fn get_summary(
 
 pub async fn get_forecast(
     State(state): State<AppState>,
+    auth: AuthContext,
     headers: HeaderMap,
 ) -> Result<Json<ForecastResult>, (StatusCode, String)> {
-    let tenant_id = extract_tenant_id(&headers)?;
+    crate::ensure_role(&auth, ANALYTICS_VIEW_ROLES)?;
+    let tenant_id = crate::tenant_id_from_request(&headers, &auth)?;
 
     let rows = sqlx::query_scalar::<_, Option<f64>>(
         "SELECT total_sales FROM daily_sales \
@@ -130,9 +134,11 @@ pub async fn get_forecast(
 
 pub async fn get_anomalies(
     State(state): State<AppState>,
+    auth: AuthContext,
     headers: HeaderMap,
 ) -> Result<Json<Vec<String>>, (StatusCode, String)> {
-    let tenant_id = extract_tenant_id(&headers)?;
+    crate::ensure_role(&auth, ANALYTICS_VIEW_ROLES)?;
+    let tenant_id = crate::tenant_id_from_request(&headers, &auth)?;
 
     let avg_refund = sqlx::query_scalar::<_, Option<f64>>(
         "SELECT AVG(refund_amount) FROM daily_sales \
@@ -174,15 +180,4 @@ pub async fn get_anomalies(
     }
 
     Ok(Json(anomalies))
-}
-
-fn extract_tenant_id(headers: &HeaderMap) -> Result<Uuid, (StatusCode, String)> {
-    headers
-        .get("X-Tenant-ID")
-        .and_then(|h| h.to_str().ok())
-        .and_then(|s| Uuid::parse_str(s).ok())
-        .ok_or((
-            StatusCode::BAD_REQUEST,
-            "Missing or invalid X-Tenant-ID".into(),
-        ))
 }

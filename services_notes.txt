@@ -194,3 +194,11 @@ Tenant & Key Management Updates (Sept 2025)
 - Generate/rotate integration keys via POST /tenants/{tenant_id}/integration-keys (or Admin UI > Settings); broadcast new key to external systems and revoke unused ones.
 - Admin portal linting now uses eslint.config.js (flat config). Run npm run lint once to ensure the new config is picked up.
 
+Set CUSTOMER_MASTER_KEY before running customer-service (base64-encoded 32-byte key).
+Example: $env:CUSTOMER_MASTER_KEY = "wJr6c+g4vF5n3fH0wIr1Vj0pND+1tQgxOcnANLmJHzk="
+Seed tenant data keys (from repo root):
+cargo run --manifest-path services/Cargo.toml -p customer-service --bin seed_tenant_keys -- --tenant <TENANT_UUID>
+Add --rotate to force a new version when one already exists.
+Backfill customer PII columns (defaults batch=100):
+cargo run --manifest-path services/Cargo.toml -p customer-service --bin backfill_customer_pii -- --tenant <TENANT_UUID>
+Add --dry-run to report counts without updating rows.

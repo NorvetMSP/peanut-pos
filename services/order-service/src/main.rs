@@ -1,4 +1,6 @@
+use anyhow::Context;
 use axum::{
+    extract::FromRef,
     http::{
         header::{ACCEPT, CONTENT_TYPE},
         HeaderName, HeaderValue, Method,
@@ -6,6 +8,7 @@ use axum::{
     routing::{get, post},
     Router,
 };
+use common_auth::{JwtConfig, JwtVerifier};
 use futures_util::StreamExt;
 use rdkafka::consumer::{Consumer, StreamConsumer};
 use rdkafka::producer::{FutureProducer, FutureRecord};
@@ -17,7 +20,9 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::net::TcpListener;
+use tokio::time::{interval, MissedTickBehavior};
 use tower_http::cors::{AllowOrigin, CorsLayer};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 mod order_handlers;
@@ -28,6 +33,13 @@ pub struct AppState {
     pub db: PgPool,
     pub kafka_producer: FutureProducer,
     pub pending_orders: Option<Arc<Mutex<HashMap<Uuid, (Vec<OrderItem>, Option<Uuid>, bool)>>>>,
+    pub jwt_verifier: Arc<JwtVerifier>,
+}
+
+impl FromRef<AppState> for Arc<JwtVerifier> {
+    fn from_ref(state: &AppState) -> Self {
+        state.jwt_verifier.clone()
+    }
 }
 
 #[derive(serde::Deserialize, Debug)]
@@ -66,10 +78,15 @@ async fn main() -> anyhow::Result<()> {
 
     let pending_orders: Arc<Mutex<HashMap<Uuid, (Vec<OrderItem>, Option<Uuid>, bool)>>> =
         Arc::new(Mutex::new(HashMap::new()));
+
+    let jwt_verifier = build_jwt_verifier_from_env().await?;
+    spawn_jwks_refresh(jwt_verifier.clone());
+
     let state = AppState {
         db: db.clone(),
         kafka_producer: kafka_producer.clone(),
         pending_orders: Some(pending_orders.clone()),
+        jwt_verifier,
     };
 
     let allowed_origins = [
@@ -106,12 +123,13 @@ async fn main() -> anyhow::Result<()> {
             .into_iter()
             .collect::<Vec<_>>(),
         );
+
     let app = Router::new()
         .route("/healthz", get(health))
         .route("/orders", post(create_order).get(list_orders))
         .route("/orders/offline/clear", post(clear_offline_orders))
         .route("/orders/refund", post(refund_order))
-        .with_state(state)
+        .with_state(state.clone())
         .layer(cors);
 
     let db_pool = db.clone();
@@ -140,11 +158,13 @@ async fn main() -> anyhow::Result<()> {
                                 if let Ok(evt) =
                                     serde_json::from_str::<PaymentCompletedEvent>(payload)
                                 {
-                                    let _ = sqlx::query("UPDATE orders SET status = 'COMPLETED' WHERE id = $1 AND tenant_id = $2 AND status <> 'REFUNDED'")
-                                        .bind(evt.order_id)
-                                        .bind(evt.tenant_id)
-                                        .execute(&db_pool)
-                                        .await;
+                                    let _ = sqlx::query(
+                                        "UPDATE orders SET status = 'COMPLETED' WHERE id =  AND tenant_id =  AND status <> 'REFUNDED'",
+                                    )
+                                    .bind(evt.order_id)
+                                    .bind(evt.tenant_id)
+                                    .execute(&db_pool)
+                                    .await;
 
                                     let maybe_data = {
                                         let mut map = pending_orders_consumer.lock().unwrap();
@@ -187,28 +207,36 @@ async fn main() -> anyhow::Result<()> {
                             "payment.failed" => {
                                 if let Ok(evt) = serde_json::from_str::<PaymentFailedEvent>(payload)
                                 {
-                                    match sqlx::query("UPDATE orders SET status = 'NOT_ACCEPTED' WHERE id = $1 AND tenant_id = $2 AND status = 'PENDING'")
-                                        .bind(evt.order_id)
-                                        .bind(evt.tenant_id)
-                                        .execute(&db_pool)
-                                        .await
+                                    match sqlx::query(
+                                        "UPDATE orders SET status = 'NOT_ACCEPTED' WHERE id =  AND tenant_id =  AND status = 'PENDING'",
+                                    )
+                                    .bind(evt.order_id)
+                                    .bind(evt.tenant_id)
+                                    .execute(&db_pool)
+                                    .await
                                     {
                                         Ok(result) => {
                                             if result.rows_affected() == 0 {
-                                                tracing::warn!(order_id = %evt.order_id, tenant_id = %evt.tenant_id, method = evt.method.as_str(), reason = %evt.reason, "Payment failure received but order not updated");
+                                                tracing::warn!(
+                                                    order_id = %evt.order_id,
+                                                    tenant_id = %evt.tenant_id,
+                                                    method = evt.method.as_str(),
+                                                    reason = %evt.reason,
+                                                    "Payment failure received but order not updated"
+                                                );
                                             } else {
-                                                tracing::warn!(order_id = %evt.order_id, tenant_id = %evt.tenant_id, method = evt.method.as_str(), reason = %evt.reason, "Order marked NOT_ACCEPTED due to payment failure");
+                                                tracing::warn!(
+                                                    order_id = %evt.order_id,
+                                                    tenant_id = %evt.tenant_id,
+                                                    method = evt.method.as_str(),
+                                                    reason = %evt.reason,
+                                                    "Order marked NOT_ACCEPTED due to payment failure"
+                                                );
                                             }
                                         }
-                                        Err(err) => tracing::error!(?err, order_id = %evt.order_id, "Failed to update order status after payment failure"),
-                                    }
-
-                                    let removed = {
-                                        let mut map = pending_orders_consumer.lock().unwrap();
-                                        map.remove(&evt.order_id)
-                                    };
-                                    if removed.is_some() {
-                                        tracing::debug!(order_id = %evt.order_id, method = evt.method.as_str(), "Removed pending order entry after payment failure");
+                                        Err(err) => {
+                                            tracing::error!(?err, "Failed to update order for payment failure");
+                                        }
                                     }
                                 } else {
                                     tracing::error!("Failed to parse PaymentFailedEvent");
@@ -218,7 +246,7 @@ async fn main() -> anyhow::Result<()> {
                         }
                     }
                 }
-                Err(err) => tracing::error!("Kafka consume error: {:?}", err),
+                Err(err) => tracing::error!(?err, "Kafka error"),
             }
         }
     });
@@ -234,4 +262,65 @@ async fn main() -> anyhow::Result<()> {
     let listener = TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+async fn build_jwt_verifier_from_env() -> anyhow::Result<Arc<JwtVerifier>> {
+    let issuer = env::var("JWT_ISSUER").context("JWT_ISSUER must be set")?;
+    let audience = env::var("JWT_AUDIENCE").context("JWT_AUDIENCE must be set")?;
+
+    let mut config = JwtConfig::new(issuer, audience);
+    if let Ok(value) = env::var("JWT_LEEWAY_SECONDS") {
+        if let Ok(leeway) = value.parse::<u32>() {
+            config = config.with_leeway(leeway);
+        }
+    }
+
+    let mut builder = JwtVerifier::builder(config);
+
+    if let Ok(url) = env::var("JWT_JWKS_URL") {
+        info!(jwks_url = %url, "Configuring JWKS fetcher");
+        builder = builder.with_jwks_url(url);
+    }
+
+    if let Ok(pem) = env::var("JWT_DEV_PUBLIC_KEY_PEM") {
+        warn!("Using JWT_DEV_PUBLIC_KEY_PEM for verification; do not enable in production");
+        builder = builder
+            .with_rsa_pem("local-dev", pem.as_bytes())
+            .map_err(anyhow::Error::from)?;
+    }
+
+    let verifier = builder.build().await.map_err(anyhow::Error::from)?;
+    info!("JWT verifier initialised");
+    Ok(Arc::new(verifier))
+}
+
+fn spawn_jwks_refresh(verifier: Arc<JwtVerifier>) {
+    let Some(fetcher) = verifier.jwks_fetcher() else {
+        return;
+    };
+
+    let refresh_secs = env::var("JWKS_REFRESH_SECONDS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(300);
+    let refresh_secs = refresh_secs.max(60);
+    let interval_duration = Duration::from_secs(refresh_secs);
+    let url = fetcher.url().to_owned();
+    let handle = verifier.clone();
+
+    tokio::spawn(async move {
+        let mut ticker = interval(interval_duration);
+        ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        loop {
+            ticker.tick().await;
+            match handle.refresh_jwks().await {
+                Ok(count) => {
+                    debug!(count, jwks_url = %url, "Refreshed JWKS keys");
+                }
+                Err(err) => {
+                    warn!(error = %err, jwks_url = %url, "Failed to refresh JWKS keys");
+                }
+            }
+        }
+    });
 }
