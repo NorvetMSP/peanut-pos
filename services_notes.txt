@@ -613,7 +613,7 @@ docker compose up -d --build auth-service
 # (Optional) make sure admin has an MFA secret so the login flow enforces a code
 docker compose exec -T postgres psql -U novapos -d novapos -c "UPDATE users SET mfa_secret='JBSWY3DPEHPK3PXP', mfa_enrolled_at=NOW(), mfa_failed_attempts=0 WHERE email='admin@novapos.local';"
 
-# Generate a current TOTP code for that secret (run right before you post /login)
+# Generate a current TOTP code for that secret (run right before you post /login) ---only last 30 seconds
 python - <<'PY'
 import base64, hashlib, hmac, struct, time
 secret = 'JBSWY3DPEHPK3PXP'
@@ -657,13 +657,24 @@ Integration-Gateway Metrics Smoke
 $env:SECURITY_ALERT_TOPIC = "security.alerts.v1"
 $env:SECURITY_ALERT_WEBHOOK_URL = ""
 $env:SECURITY_ALERT_WEBHOOK_BEARER = ""
+$env:REDIS_URL = "redis://localhost:6379/0"
 
 docker compose up -d redis postgres kafka
 docker compose up -d --build integration-gateway
 
 # Hit the gateway a few times to record rate checks / rejections
-for ($i = 0; $i -lt 5; $i++) {
-  curl -s -o NUL -w "%{http_code}\n" http://localhost:8083/healthz
-}
 
-curl http://localhost:8083/metrics | findstr gateway_rate_limit
+Generate a current TOTP code 
+
+
+$headers = @{ "Content-Type" = "application/json" }
+$goodCode = "255362"
+$body = '{"email":"admin@novapos.local","password":"admin123","mfaCode":"'+$goodCode+'"}'
+$response = Invoke-WebRequest -Uri "http://localhost:8085/login" -Method POST -Headers $headers -Body $body
+($response.Content | ConvertFrom-Json).token
+
+$token = "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiIsImtpZCI6ImxvY2FsLWRldiJ9.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAxMDEiLCJ0aWQiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDEiLCJyb2xlcyI6WyJzdXBlcl9hZG1pbiJdLCJpc3MiOiJodHRwczovL2F1dGgubm92YXBvcy5sb2NhbCIsImF1ZCI6Im5vdmFwb3MtZnJvbnRlbmQsbm92YXBvcy1hZG1pbixub3ZhcG9zLXBvc3RncmVzIiwiZXhwIjoxNzU4NTgxNjAyLCJpYXQiOjE3NTg1ODA3MDIsImp0aSI6ImQxZDI5ZDhlLTNhOGQtNDYzOC1iNTg4LTJhNmJmMDgzODk0NyJ9.D-GSkAye8b_paiWK_bfsDoHHClJ_a_rN3lPsmMSvAvcv7utlPmUx6Pp064LcQQNYV8fQXk48lwrrYtM59FA3oPPySiJbbFniLXewNaWmUrEFA8wtBNNh8qWiOqorDpSzmZ8qoKLzocPqowkKqq7gsshUFfht1M8jpgQefUWw8fskmdmhDq_gNvMfbvPZphDQopRkTDVeXYo4FvIvHfUOMjaPuIdvuyC3WAXJAJ81o0WZ8rV-M5EyC52Hf7bB0mfQk9q1wHWw9xkquEOBmAKTQ5g46l5C89bztbceB5XxrZxOewVyQA5sMmHLUvLNVRvWVx_osZULjfKCpPe9ZZpbXw"
+$headers = @{ "Authorization" = "Bearer $token" }
+Invoke-WebRequest -Uri "http://localhost:8083/metrics" -Headers $headers
+
+Expect counters like gateway_rate_limit_total{outcome="allowed"} and possibly "rejected" if limits were crossed.
