@@ -5,10 +5,13 @@ use axum::{
         header::{ACCEPT, CONTENT_TYPE},
         HeaderName, HeaderValue, Method, StatusCode,
     },
+    response::Response,
     routing::{get, post},
     Json, Router,
 };
 use common_auth::{JwtConfig, JwtVerifier};
+use rdkafka::producer::FutureProducer;
+use reqwest::Client;
 use serde::Serialize;
 use sqlx::PgPool;
 use std::{env, fs, net::SocketAddr, sync::Arc};
@@ -19,10 +22,22 @@ use tokio::{
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tracing::{debug, info, warn};
 
+use config::{load_auth_config, AuthConfig};
+use mfa_handlers::{begin_mfa_enrollment, verify_mfa_enrollment};
+
+mod config;
+mod metrics;
+mod mfa;
+mod mfa_handlers;
+mod notifications;
 mod tenant_handlers;
 mod tokens;
 mod user_handlers;
 
+use metrics::AuthMetrics;
+use notifications::{
+    post_suspicious_webhook, publish_mfa_activity, MfaActivityEvent, SuspiciousLoginPayload,
+};
 use tenant_handlers::{
     create_integration_key, create_tenant, list_integration_keys, list_tenants,
     revoke_integration_key,
@@ -36,6 +51,10 @@ pub struct AppState {
     pub db: PgPool,
     pub jwt_verifier: Arc<JwtVerifier>,
     pub token_signer: Arc<TokenSigner>,
+    pub config: Arc<AuthConfig>,
+    pub kafka_producer: FutureProducer,
+    pub http_client: Client,
+    pub metrics: Arc<AuthMetrics>,
 }
 
 impl FromRef<AppState> for Arc<JwtVerifier> {
@@ -50,8 +69,68 @@ impl FromRef<AppState> for Arc<TokenSigner> {
     }
 }
 
+impl FromRef<AppState> for Arc<AuthConfig> {
+    fn from_ref(state: &AppState) -> Self {
+        state.config.clone()
+    }
+}
+
+impl AppState {
+    pub fn record_login_metric(&self, outcome: &str) {
+        self.metrics.login_attempt(outcome);
+    }
+
+    pub fn record_mfa_metric(&self, event: &str) {
+        self.metrics.mfa_event(event);
+    }
+
+    pub async fn emit_mfa_activity(
+        &self,
+        event: MfaActivityEvent,
+        webhook_message: Option<String>,
+    ) {
+        if let Err(err) = publish_mfa_activity(
+            &self.kafka_producer,
+            &self.config.mfa_activity_topic,
+            &event,
+        )
+        .await
+        {
+            warn!(?err, tenant_id = %event.tenant_id, trace_id = %event.trace_id, "Failed to publish MFA activity");
+        }
+
+        if let Some(message) = webhook_message {
+            if let Some(url) = &self.config.suspicious_webhook_url {
+                if !url.is_empty() {
+                    let bearer = self.config.suspicious_webhook_bearer.as_deref();
+                    let payload = SuspiciousLoginPayload { text: message };
+                    if let Err(err) =
+                        post_suspicious_webhook(&self.http_client, url, bearer, &payload).await
+                    {
+                        warn!(?err, trace_id = %event.trace_id, "Failed to post suspicious login webhook");
+                    }
+                }
+            }
+        }
+    }
+}
+
 async fn health() -> &'static str {
     "ok"
+}
+
+async fn metrics_endpoint(State(state): State<AppState>) -> Response {
+    match state.metrics.render() {
+        Ok(resp) => resp,
+        Err(err) => {
+            warn!(?err, "Failed to render metrics");
+            Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .header(CONTENT_TYPE, HeaderValue::from_static("text/plain"))
+                .body(axum::body::Body::from("metrics unavailable"))
+                .expect("failed to build metrics response")
+        }
+    }
 }
 
 #[tokio::main]
@@ -66,10 +145,43 @@ async fn main() -> anyhow::Result<()> {
 
     let token_signer = build_token_signer_from_env(&db_pool).await?;
 
+    let auth_config = Arc::new(load_auth_config()?);
+    let enforced_roles = auth_config.required_roles_sorted().join(",");
+    let bypass_tenants = auth_config
+        .bypass_tenants_sorted()
+        .into_iter()
+        .map(|id| id.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    info!(
+        require_mfa = auth_config.require_mfa,
+        enforced_roles = %enforced_roles,
+        bypass_tenants = %bypass_tenants,
+        issuer = %auth_config.mfa_issuer,
+        "Loaded auth-service configuration"
+    );
+
+    let kafka_bootstrap = env::var("KAFKA_BOOTSTRAP")
+        .or_else(|_| env::var("KAFKA_BROKERS"))
+        .unwrap_or_else(|_| "localhost:9092".to_string());
+
+    let kafka_producer: FutureProducer = rdkafka::ClientConfig::new()
+        .set("bootstrap.servers", &kafka_bootstrap)
+        .create()
+        .context("Failed to create Kafka producer")?;
+
+    let http_client = Client::builder()
+        .build()
+        .context("Failed to build HTTP client")?;
+
     let state = AppState {
         db: db_pool,
         jwt_verifier,
         token_signer,
+        config: auth_config.clone(),
+        kafka_producer,
+        http_client,
+        metrics: Arc::new(AuthMetrics::new()?),
     };
 
     let cors = CorsLayer::new()
@@ -88,9 +200,12 @@ async fn main() -> anyhow::Result<()> {
 
     let app = Router::new()
         .route("/healthz", get(health))
+        .route("/metrics", get(metrics_endpoint))
         .route("/jwks", get(jwks))
         .route("/.well-known/jwks.json", get(jwks))
         .route("/login", post(login_user))
+        .route("/mfa/enroll", post(begin_mfa_enrollment))
+        .route("/mfa/verify", post(verify_mfa_enrollment))
         .route("/users", post(create_user).get(list_users))
         .route("/roles", get(list_roles))
         .route("/tenants", post(create_tenant).get(list_tenants))

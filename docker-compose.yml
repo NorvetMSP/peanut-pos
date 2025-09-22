@@ -88,6 +88,10 @@ services:
       - JWT_ISSUER=https://auth.novapos.local
       - JWT_AUDIENCE=novapos-frontend,novapos-admin,novapos-postgres
       - JWT_DEV_PRIVATE_KEY_PEM_FILE=/run/secrets/jwt_dev_private_key
+      - KAFKA_BOOTSTRAP=kafka:9092
+      - SECURITY_MFA_ACTIVITY_TOPIC=security.mfa.activity
+      - SECURITY_SUSPICIOUS_WEBHOOK_URL=
+      - SECURITY_SUSPICIOUS_WEBHOOK_BEARER=
     secrets:
       - jwt_dev_private_key
     depends_on: [postgres]
@@ -231,6 +235,9 @@ services:
       - JWT_ISSUER=https://auth.novapos.local
       - JWT_AUDIENCE=novapos-frontend,novapos-admin,novapos-postgres
       - JWT_JWKS_URL=http://auth-service:8085/.well-known/jwks.json
+      - SECURITY_ALERT_TOPIC=security.alerts.v1
+      - SECURITY_ALERT_WEBHOOK_URL=
+      - SECURITY_ALERT_WEBHOOK_BEARER=
     depends_on:
       kafka:
         condition: service_healthy
@@ -276,6 +283,46 @@ services:
     restart: "no"
     networks: [novanet]
 
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka-ui
+    ports:
+      - "8080:8080"
+    environment:
+      # Kafka cluster config
+      KAFKA_CLUSTERS_0_NAME: novapos
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181
+
+      # OAuth2 / JWT authentication is disabled for local use
+      # AUTH_TYPE: OAUTH2
+
+      # SPRING_SECURITY_OAUTH2_CLIENT_PROVIDER_KEYCLOAK_ISSUERURI: https://auth.novapos.local/realms/novapos
+      # SPRING_SECURITY_OAUTH2_CLIENT_REGISTRATION_KEYCLOAK_CLIENTID: kafka-ui
+      # SPRING_SECURITY_OAUTH2_CLIENT_REGISTRATION_KEYCLOAK_CLIENTSECRET: kafka-ui-secret
+      # SPRING_SECURITY_OAUTH2_CLIENT_REGISTRATION_KEYCLOAK_SCOPE: openid,profile,email
+      # SPRING_SECURITY_OAUTH2_CLIENT_PROVIDER_KEYCLOAK_USERNAMEATTRIBUTE: preferred_username
+
+      ### Future Role-Based Access Control
+      #### Once JWT validation works, you can enforce fine-grained RBAC inside Kafka-UI by mapping claims:
+      # RBAC is disabled for local use
+      # RBAC_ENABLED: "true"
+      # RBAC_ROLES_0_NAME: admin
+      # RBAC_ROLES_0_SUBJECTS_0_PROVIDER: oauth
+      # RBAC_ROLES_0_SUBJECTS_0_VALUE: admin@novapos.local
+      # RBAC_ROLES_0_PERMISSIONS_0_RESOURCE: cluster
+      # RBAC_ROLES_0_PERMISSIONS_0_ACTIONS: ALL
+
+      # RBAC_ROLES_1_NAME: viewer
+      # RBAC_ROLES_1_SUBJECTS_0_PROVIDER: oauth
+      # RBAC_ROLES_1_SUBJECTS_0_VALUE: *@novapos.local
+      # RBAC_ROLES_1_PERMISSIONS_0_RESOURCE: topic
+      # RBAC_ROLES_1_PERMISSIONS_0_ACTIONS: VIEW
+
+    depends_on:
+      - kafka
+      - auth-service
+    networks: [novanet]
 
 
 secrets:

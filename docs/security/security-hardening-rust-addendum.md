@@ -22,6 +22,7 @@ This addendum translates the "Security and compliance plan" into actionable step
 - Implement refresh-token store using `auth_refresh_tokens` table and Argon2id hashing for API keys via `common-crypto`.
 - Add MFA enrollment/verification endpoints; persist secrets + counters with new migration (see order below).
 - Publish audit events for sign-in, MFA, tenant/user admin actions.
+- Configure env: `KAFKA_BOOTSTRAP`, `SECURITY_MFA_ACTIVITY_TOPIC`, and optional `SECURITY_SUSPICIOUS_WEBHOOK_URL` / `SECURITY_SUSPICIOUS_WEBHOOK_BEARER` for telemetry sinks.
 
 ### Product Service (`services/product-service`)
 - Inject `common-auth` middleware; remove trust in opaque `Authorization` header.
@@ -42,6 +43,7 @@ This addendum translates the "Security and compliance plan" into actionable step
 - Switch API key auth to `common-auth` extractor that validates hashed keys from auth-service.
 - Replace in-memory rate limiting with Redis-backed limiter (using `redis` crate) and publish usage audits.
 - Verify Coinbase webhooks using shared crypto utils; emit partner activity metrics.
+- Configure env: `SECURITY_ALERT_TOPIC`, optional `SECURITY_ALERT_WEBHOOK_URL`, and `SECURITY_ALERT_WEBHOOK_BEARER` for rate-limit notifications.
 
 ### Inventory, Loyalty, Analytics, Payment Services
 - Install `common-auth` middleware for JWT validation + tenant context.

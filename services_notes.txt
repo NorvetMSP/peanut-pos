@@ -1,236 +1,467 @@
 
 
 Full Docker Build including app
+
 docker compose build
+
 docker compose up -d
+
 docker compose up kafka-topics-init
+
 // tear down..... docker compose down
 
+
+
 //If you need to rebuild just one service after code changes:
+
 docker compose up -d --build auth-service
+
 docker compose up -d --build order-service
+
 docker compose up -d --build loyalty-service
+
 docker compose up -d --build customer-service
+
 docker compose up -d --build product-service
+
 docker compose ps confirms all services  are running.
+
+
+
 
 
 patterns...to create topics
 
+
+
 docker compose exec kafka kafka-topics.sh --create --topic payment.completed --bootstrap-server kafka:9092 --replication-factor 1 --partitions 1
+
 docker compose exec kafka kafka-topics.sh --create --topic payment.failed --bootstrap-server kafka:9092 --replication-factor 1 --partitions 1
+
 docker compose exec kafka kafka-topics.sh --create --topic order.completed --bootstrap-server kafka:9092 --replication-factor 1 --partitions 1
+
+
 
 You???re in the repo root, but the Cargo workspace is under services/. Use one of these:
 
 
+
+
+
 Run docker compose ps so we can confirm which services are stopped/exited.
+
+
 
 Inspect the logs for one of the failing services (e.g. docker compose logs auth-service); that usually shows missing env vars or migration errors.
 
+
+
 If everything is down, docker compose logs without a service name will dump them all.
+
+
+
 
 
 Option B: Use the workspace manifest path from root
 
 
+
+
+
 **Local build to docker only
+
 cargo run --manifest-path services/Cargo.toml -p product-service
+
 cargo run --manifest-path services/Cargo.toml -p analytics-service
+
 cargo run --manifest-path services/Cargo.toml -p integration-gateway
+
 cargo run --manifest-path services/Cargo.toml -p order-service
+
 cargo run --manifest-path services/Cargo.toml -p auth-service
+
 cargo run --manifest-path services/Cargo.toml -p payment-service
+
 cargo run --manifest-path services/Cargo.toml -p loyalty-service
+
 cargo run --manifest-path services/Cargo.toml -p customer-service
 
 
 
+
+
+
+
 List containers on novapos_novanet:
+
 docker network inspect novapos_novanet
-→ check the Containers block to see which services are connected.
+
+â†’ check the Containers block to see which services are connected.
 
 
-Now that you know which containers sit on novapos_novanet, grab their service names/IDs from the Containers block and stream each one’s logs.
+
+
+
+Now that you know which containers sit on novapos_novanet, grab their service names/IDs from the Containers block and stream each oneâ€™s logs.
+
+
 
 Tail a single container (replace with the ID or name you copied, e.g. novapos-order-service-1):
+
 docker logs -f --tail 200 novapos-order-service-1
 
-If you prefer the compose aliases (you’re in C:\Projects\novapos):
+
+
+If you prefer the compose aliases (youâ€™re in C:\Projects\novapos):
+
  
 
+
+
 Need everything at once?
+
 docker compose logs -f
 
+
+
 docker compose logs -f order-service
+
 docker compose logs -f integration-gateway
+
 docker compose logs -f payment-service
+
+
+
+
 
 
 
 See the services (health endpoints)
 
+
+
 product: curl http://localhost:8081/healthz
+
 analytics: curl http://localhost:8082/healthz
+
 gateway: curl http://localhost:8083/healthz
+
 order: curl http://localhost:8084/healthz
+
 auth: curl http://localhost:8085/healthz
+
 payment: curl http://localhost:8086/healthz
+
 loyalty: curl http://localhost:8088/healthz
+
 customer: curl http://localhost:8089/healthz
+
 PowerShell alt: irm http://localhost:8081/healthz
+
+
+
+
 
 
 
 Quick Start
 
+
+
 Makefile task: run .\Makefile.ps1 Dev-Frontend -App pos-app from the repo root.
+
 Alt (if policy blocks scripts): powershell -ExecutionPolicy Bypass -File .\Makefile.ps1 Dev-Frontend -App pos-app
+
 Open: http://localhost:5173
+
 Stop: press Ctrl+C in the terminal running the dev server.
+
 Manual Start
 
+
+
 Go to app: cd frontends/pos-app
+
 Install deps: npm install
+
 Run Vite: npm run dev
 
+
+
 C:\Projects\novapos\frontends\admin-portal> npm run dev
+
  C:\Projects\novapos\frontends\pos-app> npm run dev
 
 
+
+
+
 **********************************postgres in docker*********************************************************
+
 PS C:\Projects\novapos> docker run --name novapos-pg -e POSTGRES_PASSWORD=postgres -p 5432:5432 -d postgres:16
 
+
+
 PS C:\Projects\novapos> docker exec -it novapos-pg psql -U postgres -c "CREATE DATABASE novapos;"
+
  
 
+
+
 If you want to stay connected, open psql against the default postgres database and kill the stragglers manually:
+
 psql postgres://novapos:novapos@localhost:5432/postgres
 
+
+
 then inside psql run:
+
 SELECT pg_terminate_backend(pid)
+
 FROM pg_stat_activity
+
 WHERE datname = 'novapos'
+
   AND pid <> pg_backend_pid();
+
 That terminates every session using novapos. E
+
+
+
+
 
 
 
 Use this same URL for product-service, order-service, auth-service, and inventory-service in the prototype:
 
+
+
 # For current shell session:
+
 $env:DATABASE_URL = "postgres://novapos:novapos@localhost:5432/novapos"
 
 
+
+
+
 # Make it persistent for future shells and on this 
+
 setx DATABASE_URL "postgres://novapos:novapos@localhost:5432/novapos
 
+
+
 sqlx database drop -y -D 'postgres://novapos:novapos@localhost:5432/novapos'
+
 sqlx database create -D 'postgres://novapos:novapos@localhost:5432/novapos'
+
 powershell -ExecutionPolicy Bypass -File .\migrate-all.ps1
 
+
+
 ***************MANUAL Drop and Recreate DATABASE
+
 PS C:\Projects\novapos> psql -U novapos -d novapos -h localhost -p 5432
+
 Password for user novapos: 
 
+
+
 psql (16.10)
+
 WARNING: Console code page (437) differs from Windows code page (1252)
+
          8-bit characters might not work correctly. See psql reference
+
          page "Notes for Windows users" for details.
+
 Type "help" for help.
 
+
+
 novapos=# DROP DATABASE IF EXISTS novapos;
+
 ERROR:  cannot drop the currently open database
+
 novapos=# \c postgres
+
 You are now connected to database "postgres" as user "novapos".
+
 postgres=# DROP DATABASE IF EXISTS novapos;
+
 DROP DATABASE
+
 postgres=# CREATE DATABASE novapos OWNER novapos;
+
 CREATE DATABASE
 
 
+
+
+
 cd services\product-service
+
 sqlx database create     # safe to re-run
+
 sqlx migrate run --ignore-missing
+
+
 
 cd ..\order-service
+
 sqlx migrate run --ignore-missing
+
+
 
 cd ..\auth-service
+
 sqlx migrate run --ignore-missing
+
+
 
 cd ..\inventory-service
+
 sqlx migrate run --ignore-missing
+
+
 
 cd ..\customer-service
+
 sqlx migrate run --ignore-missing
+
+
 
 cd ..\loyalty-service
+
 sqlx migrate run --ignore-missing
+
+
 
 cd ..\analytics-service
+
 sqlx migrate run --ignore-missing
+
+
 
 cd ..\integration-gateway
+
 sqlx migrate run --ignore-missing
 
+
+
 cd ..\payment-service
+
 sqlx migrate run --ignore-missing
+
+
+
+
+
 
 
 
 
 Yes, if you use the setx command, the environment variable will be set persistently for your user account. It will remain available in all new PowerShell or Command Prompt sessions???even after restarting your computer or server.
 
+
+
 However, note:
 
+
+
 It will not be available in already-open shells; you must open a new shell to see the change.
+
 It is set for your user, not system-wide (unless you use /M for machine-wide).
+
+
 
 *******************************************************************************************
 
+
+
 Default POS credentials (from auth-service migration 3002)
+
 Email: admin@novapos.local
+
 Password: admin123
+
 Role: super_admin (tenant NovaPOS HQ)
 
 
 
+
+
+
+
 #Run from elvate enviroment
+
 choco install openssl.light 
+
+
 
 Step 1. Generate a Dev RSA Key
 
+
+
 Run this once in PowerShell:
 
+
+
 # Generate a 2048-bit RSA private key (requires OpenSSL installed)
+
 openssl genrsa -out jwt-dev.pem 2048
 
+
+
 # Extract public key (optional, useful for verifying tokens)
+
 openssl rsa -in jwt-dev.pem -pubout -out jwt-dev.pub.pem
 
+
+
 # Windows PowerShell ---docker compose gives it to services
+
 $env:JWT_DEV_PRIVATE_KEY_PEM = Get-Content jwt-dev.pem -Raw
 
 
 
+
+
+
+
 Tenant & Key Management Updates (Sept 2025)
+
 ------------------------------------------
+
 - After pulling latest changes run auth-service migrations 3003/3004 (e.g. sqlx migrate run) to create the integration_keys table and role constraint.
+
 - integration-gateway now expects DATABASE_URL (same Postgres DSN as other services) and optionally KEY_REFRESH_SECONDS (default 60). Remove any tenant_config.json usage.
+
 - Generate/rotate integration keys via POST /tenants/{tenant_id}/integration-keys (or Admin UI > Settings); broadcast new key to external systems and revoke unused ones.
+
 - Admin portal linting now uses eslint.config.js (flat config). Run npm run lint once to ensure the new config is picked up.
 
+
+
 Set CUSTOMER_MASTER_KEY before running customer-service (base64-encoded 32-byte key).
+
 Example: $env:CUSTOMER_MASTER_KEY = "wJr6c+g4vF5n3fH0wIr1Vj0pND+1tQgxOcnANLmJHzk="
+
 Seed tenant data keys (from repo root):
+
 cargo run --manifest-path services/Cargo.toml -p customer-service --bin seed_tenant_keys -- --tenant <TENANT_UUID>
+
 Add --rotate to force a new version when one already exists.
+
 Apply customer-service migrations (ensure DATABASE_URL points to target env):
+
 sqlx migrate run --source services/customer-service/migrations --ignore-missing
 
+
+
 Backfill customer PII columns (defaults batch=100):
+
 cargo run --manifest-path services/Cargo.toml -p customer-service --bin backfill_customer_pii -- --tenant <TENANT_UUID>
+
 Add --dry-run to report counts without updating rows.
 
 
@@ -238,61 +469,201 @@ Add --dry-run to report counts without updating rows.
 
 
 
-----------------------------Here’s how to run the operational side of the PII/GDPR work with the stack 
+
+
+
+
+
+
+
+----------------------------Hereâ€™s how to run the operational side of the PII/GDPR work with the stack 
+
  1. Confirm the tables exist
+
  docker compose exec -T postgres psql -U novapos -d novapos -c "\dt auth_signing_keys" ; docker compose exec -T postgres psql -U novapos -d novapos -c "\dt auth_refresh_tokens" ; docker compose exec -T postgres psql -U novapos -d novapos -c "\dt tenant_data_keys" ; docker compose exec -T postgres psql -U novapos -d novapos -c "\dt gdpr_tombstones"
 
+
+
  2. Pick a Tenant to Seed DEKs
+
  docker compose exec -T postgres psql -U novapos -d novapos -c "SELECT id, name FROM tenants;"
 
- 3. Then seed a key for each tenant (dry-run first if you like; no DB change happens when the tenant doesn’t exist)
+
+
+ 3. Then seed a key for each tenant (dry-run first if you like; no DB change happens when the tenant doesnâ€™t exist)
+
 # Set the DB URL for these commands
+
 $env:DATABASE_URL = "postgres://novapos:novapos@localhost:5432/novapos"
+
 $tenant = "3d9adee5-e09f-4c60-9e6c-4e6c998ec986"
+
 $env:CUSTOMER_MASTER_KEY = "oDzFP29jTB7sNhBJCaVRJQvTIhhPCi+WuSSmdPxGNIs="
 
 
 
+
+
+
+
 # seed the tenant key
+
 cargo run --release --manifest-path services/Cargo.toml `
+
   -p customer-service --bin seed_tenant_keys `
+
   -- --tenant $tenant
 
+
+
   Backfill or create a customer then backfill that for the tenant
+
 # dry-run the backfill to check counts...Dry run to see how many customers need work:
+
 cargo run --release --manifest-path services/Cargo.toml `
+
   -p customer-service --bin backfill_customer_pii `
+
   -- --tenant $tenant --dry-run
+
+
 
 #Confirm the UUID:
 
+
+
 docker compose exec -T postgres psql -U novapos -d novapos `
+
   -c "SELECT id, tenant_id FROM customers;"
+
+
 
 4. Exercise the GDPR endpoints
 
+
+
  Call the GDPR export endpoint
+
+
 
  Get and Authorization for that user for a tenant
 
+
+
 $headers = @{ "Content-Type" = "application/json" }
+
 $body = '{"email":"jbean@bfurniture.com","password":"admin123"}' 
 
+
+
 $response = Invoke-WebRequest -Uri "http://localhost:8085/login" -Method POST -Headers $headers -Body $body
+
 # Parse the JSON and display the full token
+
 ($response.Content | ConvertFrom-Json).token
 
+
+
 Verify the tombstone
+
 docker compose exec -T postgres psql -U novapos -d novapos `
+
   -c "SELECT id, tenant_id, request_type, status, metadata FROM gdpr_tombstones ORDER BY requested_at DESC LIMIT 5;"
 
+
+
 5. Call GDPR delete
+
 Invoke-WebRequest -Uri "http://localhost:8089/customers/<customer_id>/gdpr/delete" `
+
   -Method POST `
+
   -Headers @{
+
       "Authorization" = "Bearer <access_token>"
+
       "X-Tenant-ID"   = "<TENANT_UUID>"
+
   }
 
+
+
 6. docker compose exec -T postgres psql -U novapos -d novapos `
+
   -c "SELECT name, email, phone, email_encrypted, phone_encrypted FROM customers WHERE id = '<customer_id>';"
+
+
+
+
+
+
+***********************************************************************************************
+Auth-Service Metrics Smoke
+--------------------------
+# Export once per shell when testing locally
+$env:KAFKA_BOOTSTRAP = "localhost:9092"
+$env:SECURITY_MFA_ACTIVITY_TOPIC = "security.mfa.activity"
+$env:SECURITY_SUSPICIOUS_WEBHOOK_URL = ""
+$env:SECURITY_SUSPICIOUS_WEBHOOK_BEARER = ""
+
+# Start the auth stack (postgres + kafka already seeded by compose)
+docker compose up -d postgres kafka redis
+docker compose up -d --build auth-service
+
+# (Optional) make sure admin has an MFA secret so the login flow enforces a code
+docker compose exec -T postgres psql -U novapos -d novapos -c "UPDATE users SET mfa_secret='JBSWY3DPEHPK3PXP', mfa_enrolled_at=NOW(), mfa_failed_attempts=0 WHERE email='admin@novapos.local';"
+
+# Generate a current TOTP code for that secret (run right before you post /login)
+python - <<'PY'
+import base64, hashlib, hmac, struct, time
+secret = 'JBSWY3DPEHPK3PXP'
+key = base64.b32decode(secret, casefold=True)
+counter = int(time.time()) // 30
+msg = struct.pack('>Q', counter)
+digest = hmac.new(key, msg, hashlib.sha1).digest()
+offset = digest[-1] & 0x0F
+code = (struct.unpack('>I', digest[offset:offset+4])[0] & 0x7FFFFFFF) % 1_000_000
+print(f"{code:06d}")
+PY
+
+# Drive the telemetry (replace <TENANT_ID> with the admin tenant GUID)
+$tenant = "<TENANT_ID>"
+$headers = @{ "Content-Type" = "application/json"; "X-Tenant-ID" = $tenant }
+
+# 1. Invalid credentials -> auth_login_attempts_total{outcome="invalid_credentials"}
+$badBody = '{"email":"admin@novapos.local","password":"wrong"}'
+Invoke-WebRequest -UseBasicParsing -Uri "http://localhost:8085/login" -Method POST -Headers $headers -Body $badBody
+
+# 2. Missing MFA code -> auth_login_attempts_total{outcome="mfa_required"}
+$noMfaBody = '{"email":"admin@novapos.local","password":"admin123"}'
+Invoke-WebRequest -UseBasicParsing -Uri "http://localhost:8085/login" -Method POST -Headers $headers -Body $noMfaBody
+
+# 3. Bad MFA code -> auth_login_attempts_total{outcome="mfa_invalid"}
+$badMfaBody = '{"email":"admin@novapos.local","password":"admin123","mfaCode":"000000"}'
+Invoke-WebRequest -UseBasicParsing -Uri "http://localhost:8085/login" -Method POST -Headers $headers -Body $badMfaBody
+
+# 4. Happy path -> increments auth_login_attempts_total{outcome="success"} and auth_mfa_events_total labels
+$goodCode = Read-Host "Enter current TOTP"
+$goodBody = '{"email":"admin@novapos.local","password":"admin123","mfaCode":"' + $goodCode + '"}'
+Invoke-WebRequest -UseBasicParsing -Uri "http://localhost:8085/login" -Method POST -Headers $headers -Body $goodBody | ConvertFrom-Json
+
+# Inspect counters
+curl http://localhost:8085/metrics | findstr auth_login_attempts_total
+curl http://localhost:8085/metrics | findstr auth_mfa_events_total
+
+Integration-Gateway Metrics Smoke
+---------------------------------
+# Optional webhook vars (leave blank if you just want Prometheus metrics)
+$env:SECURITY_ALERT_TOPIC = "security.alerts.v1"
+$env:SECURITY_ALERT_WEBHOOK_URL = ""
+$env:SECURITY_ALERT_WEBHOOK_BEARER = ""
+
+docker compose up -d redis postgres kafka
+docker compose up -d --build integration-gateway
+
+# Hit the gateway a few times to record rate checks / rejections
+for ($i = 0; $i -lt 5; $i++) {
+  curl -s -o NUL -w "%{http_code}\n" http://localhost:8083/healthz
+}
+
+curl http://localhost:8083/metrics | findstr gateway_rate_limit

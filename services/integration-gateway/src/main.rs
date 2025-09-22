@@ -1,6 +1,7 @@
-﻿use anyhow::Context;
+use anyhow::Context;
 use axum::{
     body::Body,
+    extract::State,
     http::{
         header::{self, ACCEPT, CONTENT_TYPE},
         HeaderName, HeaderValue, Method, Request, StatusCode,
@@ -10,8 +11,10 @@ use axum::{
     routing::{get, post},
     Router,
 };
+use chrono::Utc;
 use common_auth::{JwtConfig, JwtVerifier};
 use rdkafka::producer::FutureProducer;
+use reqwest::Client;
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Row};
 use std::collections::HashMap;
@@ -26,30 +29,152 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
+mod alerts;
+mod config;
 mod events;
 mod integration_handlers;
+mod metrics;
+mod rate_limiter;
+mod usage;
 mod webhook_handlers;
+
+use crate::alerts::{post_alert_webhook, publish_rate_limit_alert, RateLimitAlertEvent};
+use crate::config::GatewayConfig;
+use crate::metrics::GatewayMetrics;
+use crate::rate_limiter::RateLimiter;
+use crate::usage::UsageTracker;
 
 use integration_handlers::{handle_external_order, process_payment};
 use webhook_handlers::handle_coinbase_webhook;
-
-/// Per-tenant rate limiting state
-pub struct RateInfo {
-    last_reset: Instant,
-    count: u32,
-}
 
 /// Shared application state
 #[derive(Clone)]
 pub struct AppState {
     pub kafka_producer: FutureProducer,
-    pub rate_counters: Arc<Mutex<HashMap<String, RateInfo>>>,
-    pub key_cache: Arc<RwLock<HashMap<String, Uuid>>>,
+    pub rate_limiter: RateLimiter,
+    pub key_cache: Arc<RwLock<HashMap<String, CachedKey>>>,
     pub jwt_verifier: Arc<JwtVerifier>,
+    pub metrics: Arc<GatewayMetrics>,
+    pub usage: UsageTracker,
+    pub config: Arc<GatewayConfig>,
+    pub http_client: Client,
+    pub alert_state: Arc<Mutex<HashMap<String, Instant>>>,
+}
+
+#[derive(Clone)]
+pub struct CachedKey {
+    pub tenant_id: Uuid,
+    pub key_suffix: String,
+}
+
+impl AppState {
+    pub fn record_api_key_metric(&self, allowed: bool) {
+        let result = if allowed { "allowed" } else { "rejected" };
+        self.metrics.record_api_key_request(result);
+    }
+
+    pub async fn maybe_alert_rate_limit(
+        &self,
+        identity: &str,
+        tenant_id: Option<Uuid>,
+        key_hash: Option<&str>,
+        key_suffix: Option<&str>,
+        limit: u32,
+        current: i64,
+    ) {
+        let threshold = (limit as f64 * self.config.rate_limit_burst_multiplier).ceil() as i64;
+        if current < threshold {
+            return;
+        }
+
+        let alert_key = key_hash
+            .map(|hash| format!("api:{}", hash))
+            .unwrap_or_else(|| format!("identity:{}", identity));
+
+        {
+            let mut guard = self.alert_state.lock().unwrap();
+            let now = Instant::now();
+            if let Some(last) = guard.get(&alert_key) {
+                if now.duration_since(*last).as_secs() < self.config.rate_limit_alert_cooldown_secs
+                {
+                    return;
+                }
+            }
+            guard.insert(alert_key.clone(), now);
+        }
+
+        let suffix_display = key_suffix.unwrap_or("-");
+        let message = format!(
+            "Rate limit burst detected identity={} tenant={:?} key_suffix={} count={} limit={} window={}s",
+            identity,
+            tenant_id,
+            suffix_display,
+            current,
+            limit,
+            self.config.rate_limit_window_secs,
+        );
+
+        warn!(
+            ?tenant_id,
+            key_hash,
+            key_suffix,
+            identity,
+            current,
+            limit,
+            window = self.config.rate_limit_window_secs,
+            message,
+            "Rate limit burst detected"
+        );
+
+        let event = RateLimitAlertEvent {
+            action: "gateway.rate_limit.alert",
+            tenant_id,
+            key_hash: key_hash.map(|value| value.to_string()),
+            key_suffix: key_suffix.map(|value| value.to_string()),
+            identity: identity.to_string(),
+            limit,
+            count: current,
+            window_seconds: self.config.rate_limit_window_secs,
+            occurred_at: Utc::now(),
+            message: message.clone(),
+        };
+
+        if let Err(err) =
+            publish_rate_limit_alert(&self.kafka_producer, &self.config.alert_topic, &event).await
+        {
+            warn!(?err, "Failed to publish rate limit alert");
+        }
+
+        if let Some(url) = &self.config.security_alert_webhook_url {
+            if let Err(err) = post_alert_webhook(
+                &self.http_client,
+                url,
+                self.config.security_alert_webhook_bearer.as_deref(),
+                &message,
+            )
+            .await
+            {
+                warn!(?err, "Failed to post security alert webhook");
+            }
+        }
+    }
 }
 
 async fn health() -> &'static str {
     "ok"
+}
+
+async fn metrics_endpoint(State(state): State<AppState>) -> Response {
+    match state.metrics.render() {
+        Ok(resp) => resp,
+        Err(err) => {
+            warn!(?err, "Failed to render metrics");
+            Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(Body::from("metrics unavailable"))
+                .expect("failed to build metrics error response")
+        }
+    }
 }
 
 #[tokio::main]
@@ -59,6 +184,8 @@ async fn main() -> anyhow::Result<()> {
     let database_url =
         env::var("DATABASE_URL").expect("DATABASE_URL must be set for integration-gateway");
     let db_pool = PgPool::connect(&database_url).await?;
+
+    let config = Arc::new(GatewayConfig::from_env()?);
 
     let initial_keys = load_active_keys(&db_pool).await?;
     tracing::info!(
@@ -93,6 +220,19 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
+    let rate_limiter = RateLimiter::new(
+        &config.redis_url,
+        config.rate_limit_window_secs,
+        config.redis_prefix.clone(),
+    )
+    .await?;
+
+    let metrics = Arc::new(GatewayMetrics::new()?);
+    let http_client = Client::builder()
+        .build()
+        .context("Failed to build HTTP client")?;
+    let alert_state = Arc::new(Mutex::new(HashMap::new()));
+
     let jwt_verifier = build_jwt_verifier_from_env().await?;
     spawn_jwks_refresh(jwt_verifier.clone());
 
@@ -104,11 +244,19 @@ async fn main() -> anyhow::Result<()> {
         )
         .create()
         .expect("failed to create kafka producer");
+
+    let usage = UsageTracker::new(config.clone(), db_pool.clone(), producer.clone());
+    usage.spawn_background_tasks();
     let state = AppState {
         kafka_producer: producer,
-        rate_counters: Arc::new(Mutex::new(HashMap::new())),
+        rate_limiter,
         key_cache,
         jwt_verifier,
+        metrics: metrics.clone(),
+        usage,
+        config: config.clone(),
+        http_client: http_client.clone(),
+        alert_state: alert_state.clone(),
     };
 
     // Build routes with authentication + rate-limiting middleware
@@ -154,6 +302,7 @@ async fn main() -> anyhow::Result<()> {
         .with_state(protected_state);
     let app = Router::new()
         .route("/healthz", get(health))
+        .route("/metrics", get(metrics_endpoint))
         .merge(protected_api)
         .with_state(state)
         .layer(cors);
@@ -183,11 +332,10 @@ async fn auth_middleware(
         .and_then(|value| value.to_str().ok())
         .and_then(|raw| raw.strip_prefix("Bearer ").map(str::trim));
 
-    let limiter_key: String;
-    let tenant_id;
     let mut claims_opt = None;
+    let mut usage_context: Option<(Uuid, String, String)> = None;
 
-    if let Some(token) = bearer {
+    let (limiter_key, tenant_id, identity_label) = if let Some(token) = bearer {
         let claims = state.jwt_verifier.verify(token).map_err(|err| {
             warn!(error = %err, "JWT verification failed");
             StatusCode::UNAUTHORIZED
@@ -201,53 +349,74 @@ async fn auth_middleware(
                 return Err(StatusCode::FORBIDDEN);
             }
         }
-        limiter_key = format!("jwt:{}:{}", claims.tenant_id, claims.subject);
-        tenant_id = claims.tenant_id;
-        claims_opt = Some(claims);
+        claims_opt = Some(claims.clone());
+        (
+            format!("jwt:{}:{}", claims.tenant_id, claims.subject),
+            claims.tenant_id,
+            "jwt",
+        )
     } else if let Some(key) = headers.get("X-API-Key").and_then(|h| h.to_str().ok()) {
         let hashed_key = hash_api_key(key);
         let cache = state.key_cache.read().await;
-        let tenant = cache
+        let cached = cache
             .get(&hashed_key)
-            .copied()
+            .cloned()
             .ok_or(StatusCode::UNAUTHORIZED)?;
+        drop(cache);
         if let Some(header_tid) = headers
             .get("X-Tenant-ID")
             .and_then(|value| value.to_str().ok())
         {
             let header_uuid = Uuid::parse_str(header_tid).map_err(|_| StatusCode::BAD_REQUEST)?;
-            if header_uuid != tenant {
+            if header_uuid != cached.tenant_id {
                 return Err(StatusCode::FORBIDDEN);
             }
         }
-        limiter_key = format!("api:{}", hashed_key);
-        tenant_id = tenant;
+        usage_context = Some((cached.tenant_id, hashed_key.clone(), cached.key_suffix));
+        (format!("api:{}", hashed_key), cached.tenant_id, "api")
     } else if let Some(tid_str) = headers.get("X-Tenant-ID").and_then(|h| h.to_str().ok()) {
         let parsed = Uuid::parse_str(tid_str).map_err(|_| StatusCode::BAD_REQUEST)?;
-        limiter_key = format!("tenant-header:{}", parsed);
-        tenant_id = parsed;
+        (format!("tenant-header:{}", parsed), parsed, "tenant_header")
     } else {
         return Err(StatusCode::UNAUTHORIZED);
+    };
+
+    let decision = state
+        .rate_limiter
+        .check(&limiter_key, state.config.rate_limit_rpm)
+        .await
+        .map_err(|err| {
+            warn!(?err, "Rate limiter failure");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    state
+        .metrics
+        .record_rate_check(identity_label, decision.allowed);
+
+    if let Some((tenant, key_hash, key_suffix)) = usage_context.as_ref() {
+        state.record_api_key_metric(decision.allowed);
+        state
+            .usage
+            .record_api_key_use(*tenant, key_hash, key_suffix, decision.allowed)
+            .await;
     }
 
-    {
-        let mut counters = state.rate_counters.lock().unwrap();
-        let entry = counters.entry(limiter_key.clone()).or_insert(RateInfo {
-            last_reset: Instant::now(),
-            count: 0,
-        });
-        if entry.last_reset.elapsed() >= Duration::from_secs(60) {
-            entry.last_reset = Instant::now();
-            entry.count = 0;
-        }
-        entry.count += 1;
-        let limit = env::var("GATEWAY_RATE_LIMIT_RPM")
-            .ok()
-            .and_then(|value| value.parse::<u32>().ok())
-            .unwrap_or(60);
-        if entry.count > limit {
-            return Err(StatusCode::TOO_MANY_REQUESTS);
-        }
+    if !decision.allowed {
+        let tenant_opt = usage_context.as_ref().map(|(tenant, _, _)| *tenant);
+        let key_hash_opt = usage_context.as_ref().map(|(_, hash, _)| hash.as_str());
+        let key_suffix_opt = usage_context.as_ref().map(|(_, _, suffix)| suffix.as_str());
+        state
+            .maybe_alert_rate_limit(
+                identity_label,
+                tenant_opt,
+                key_hash_opt,
+                key_suffix_opt,
+                state.config.rate_limit_rpm,
+                decision.current,
+            )
+            .await;
+        return Err(StatusCode::TOO_MANY_REQUESTS);
     }
 
     request.extensions_mut().insert(tenant_id);
@@ -258,9 +427,9 @@ async fn auth_middleware(
     Ok(next.run(request).await)
 }
 
-async fn load_active_keys(pool: &PgPool) -> anyhow::Result<HashMap<String, Uuid>> {
+async fn load_active_keys(pool: &PgPool) -> anyhow::Result<HashMap<String, CachedKey>> {
     let records = sqlx::query(
-        "SELECT api_key_hash, tenant_id FROM integration_keys WHERE revoked_at IS NULL",
+        "SELECT api_key_hash, tenant_id, key_suffix FROM integration_keys WHERE revoked_at IS NULL",
     )
     .fetch_all(pool)
     .await?;
@@ -270,7 +439,14 @@ async fn load_active_keys(pool: &PgPool) -> anyhow::Result<HashMap<String, Uuid>
         .map(|row| {
             let hash: String = row.get("api_key_hash");
             let tenant_id: Uuid = row.get("tenant_id");
-            (hash, tenant_id)
+            let key_suffix: String = row.get("key_suffix");
+            (
+                hash,
+                CachedKey {
+                    tenant_id,
+                    key_suffix,
+                },
+            )
         })
         .collect())
 }
