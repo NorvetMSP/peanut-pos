@@ -25,6 +25,8 @@ const DEFAULT_ROLE = 'cashier';
 
 type RoleOption = { value: string; label: string };
 
+type TenantOption = { value: string; label: string };
+
 const roleLabel = (value: string): string =>
   value
     .split('_')
@@ -66,22 +68,38 @@ const UsersPage: React.FC = () => {
     password: '',
     role: DEFAULT_ROLE,
   });
+  const [tenantOptions, setTenantOptions] = useState<TenantOption[]>([]);
+  const [tenantsLoading, setTenantsLoading] = useState(false);
+  const tenantId = currentUser?.tenant_id ? String(currentUser.tenant_id) : null;
+const isSuperAdmin = currentUser?.role === 'super_admin';
+
+const [selectedTenantId, setSelectedTenantId] = useState<string | null>(null);
+
+  const effectiveTenantId = useMemo(
+    () => (isSuperAdmin ? selectedTenantId ?? tenantId : tenantId),
+    [isSuperAdmin, selectedTenantId, tenantId]
+  );
 
   useEffect(() => {
     if (!isLoggedIn) void navigate('/login', { replace: true });
   }, [isLoggedIn, navigate]);
 
-  const tenantId = currentUser?.tenant_id ? String(currentUser.tenant_id) : null;
+  useEffect(() => {
+    if (!isSuperAdmin) {
+      setSelectedTenantId(tenantId ?? null);
+    }
+  }, [isSuperAdmin, tenantId]);
 
   const buildHeaders = useCallback(
-    (includeJson = false): Record<string, string> => {
+    (includeJson = false, tenantOverride?: string): Record<string, string> => {
       const headers: Record<string, string> = {};
-      if (tenantId) headers['X-Tenant-ID'] = tenantId;
+      const tenantHeader = tenantOverride ?? effectiveTenantId;
+      if (tenantHeader) headers['X-Tenant-ID'] = tenantHeader;
       if (token) headers['Authorization'] = `Bearer ${token}`;
       if (includeJson) headers['Content-Type'] = 'application/json';
       return headers;
     },
-    [tenantId, token]
+    [effectiveTenantId, token]
   );
 
   const fetchRoles = useCallback(async (): Promise<void> => {
@@ -125,9 +143,55 @@ const UsersPage: React.FC = () => {
     }
   }, [buildHeaders]);
 
+  const fetchTenants = useCallback(async (): Promise<void> => {
+    if (!isSuperAdmin) return;
+    setTenantsLoading(true);
+    try {
+      const response = await fetch(`${AUTH_SERVICE_URL}/tenants`, {
+        headers: buildHeaders(false, tenantId ?? undefined),
+      });
+      if (!response.ok) {
+        throw new Error(`Failed to fetch tenants (${response.status})`);
+      }
+      const payload = (await response.json()) as unknown;
+      const options = Array.isArray(payload)
+        ? payload
+            .map(entry => {
+              if (!entry || typeof entry !== 'object') return null;
+              const candidate = entry as Record<string, unknown>;
+              const id = typeof candidate.id === 'string' ? candidate.id : null;
+              const name = typeof candidate.name === 'string' ? candidate.name : null;
+              if (!id || !name) return null;
+              return { value: id, label: name } as TenantOption;
+            })
+            .filter((option): option is TenantOption => option !== null)
+        : [];
+      options.sort((a, b) => a.label.localeCompare(b.label));
+      setTenantOptions(options);
+      setSelectedTenantId(prev => {
+        if (prev) return prev;
+        if (options.length > 0) return options[0].value;
+        return tenantId ?? null;
+      });
+    } catch (err) {
+      console.error('Unable to load tenant catalog', err);
+      setError(prev => prev ?? 'Unable to load tenants. Please try again.');
+    } finally {
+      setTenantsLoading(false);
+    }
+  }, [isSuperAdmin, buildHeaders, tenantId]);
+
   useEffect(() => {
     void fetchRoles();
   }, [fetchRoles]);
+
+  useEffect(() => {
+    if (isSuperAdmin) {
+      void fetchTenants();
+    } else {
+      setTenantOptions([]);
+    }
+  }, [fetchTenants, isSuperAdmin]);
 
   const defaultRoleValue = useMemo(() => {
     if (roleOptions.length === 0) return DEFAULT_ROLE;
@@ -136,13 +200,13 @@ const UsersPage: React.FC = () => {
   }, [roleOptions]);
 
   const ensureTenantContext = useCallback((): boolean => {
-    if (!tenantId) {
-      setError('Tenant context is unavailable. Please log out and back in.');
+    if (!effectiveTenantId) {
+      setError('Tenant context is unavailable. Please select a tenant or log in again.');
       setUsers([]);
       return false;
     }
     return true;
-  }, [tenantId]);
+  }, [effectiveTenantId]);
 
   const fetchUsers = useCallback(async (): Promise<void> => {
     if (!ensureTenantContext()) return;
@@ -254,6 +318,30 @@ const UsersPage: React.FC = () => {
           <section className="rounded-lg bg-white dark:bg-gray-800 p-6 shadow mb-6">
             <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Add New User</h3>
             <form className="mt-4 grid gap-4 md:grid-cols-2" onSubmit={event => { void handleSubmit(event); }}>
+              {isSuperAdmin && (
+                <div className="md:col-span-2 flex flex-col">
+                  <label className="text-sm font-medium text-gray-600 dark:text-gray-300">Tenant</label>
+                  <select
+                    value={selectedTenantId ?? ''}
+                    onChange={event => setSelectedTenantId(event.target.value || null)}
+                    className="mt-1 rounded-md border border-gray-300 px-3 py-2 text-gray-900 focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary"
+                    disabled={tenantsLoading}
+                  >
+                    {tenantsLoading && tenantOptions.length === 0 ? (
+                      <option value="" disabled>Loading tenants...</option>
+                    ) : tenantOptions.length === 0 ? (
+                      <option value="" disabled>No tenants available</option>
+                    ) : (
+                      tenantOptions.map(option => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))
+                    )}
+                  </select>
+                </div>
+              )}
+
               <div className="flex flex-col">
                 <label className="text-sm font-medium text-gray-600 dark:text-gray-300">Full Name</label>
                 <input
@@ -327,7 +415,13 @@ const UsersPage: React.FC = () => {
                   style={{ background: '#19b4b9' }}
                   onMouseOver={event => (event.currentTarget.style.background = '#153a5b')}
                   onMouseOut={event => (event.currentTarget.style.background = '#19b4b9')}
-                  disabled={isSubmitting || rolesLoading || roleOptions.length === 0}
+                  disabled={
+                    isSubmitting ||
+                    rolesLoading ||
+                    roleOptions.length === 0 ||
+                    tenantsLoading ||
+                    !effectiveTenantId
+                  }
                 >
                   {isSubmitting ? 'Creating...' : 'Create User'}
                 </button>

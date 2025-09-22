@@ -1,4 +1,4 @@
-﻿use anyhow::Context;
+use anyhow::Context;
 use axum::{
     extract::{FromRef, State},
     http::{
@@ -11,7 +11,7 @@ use axum::{
 use common_auth::{JwtConfig, JwtVerifier};
 use serde::Serialize;
 use sqlx::PgPool;
-use std::{env, net::SocketAddr, sync::Arc};
+use std::{env, fs, net::SocketAddr, sync::Arc};
 use tokio::{
     net::TcpListener,
     time::{interval, Duration, MissedTickBehavior},
@@ -138,7 +138,7 @@ async fn build_jwt_verifier_from_env() -> anyhow::Result<Arc<JwtVerifier>> {
         builder = builder.with_jwks_url(url);
     }
 
-    if let Ok(pem) = env::var("JWT_DEV_PUBLIC_KEY_PEM") {
+    if let Some(pem) = read_secret_env("JWT_DEV_PUBLIC_KEY_PEM")? {
         warn!("Using JWT_DEV_PUBLIC_KEY_PEM for verification; do not enable in production");
         builder = builder
             .with_rsa_pem("local-dev", pem.as_bytes())
@@ -166,7 +166,7 @@ async fn build_token_signer_from_env(db_pool: &PgPool) -> anyhow::Result<Arc<Tok
 
     info!(access_ttl, refresh_ttl, "Configuring token TTLs");
 
-    let fallback_private = env::var("JWT_DEV_PRIVATE_KEY_PEM").ok();
+    let fallback_private = read_secret_env("JWT_DEV_PRIVATE_KEY_PEM")?;
 
     let config = TokenConfig {
         issuer,
@@ -178,6 +178,16 @@ async fn build_token_signer_from_env(db_pool: &PgPool) -> anyhow::Result<Arc<Tok
     let signer = TokenSigner::new(db_pool.clone(), config, fallback_private.as_deref()).await?;
     info!("Token signer initialised");
     Ok(Arc::new(signer))
+}
+
+fn read_secret_env(key: &str) -> anyhow::Result<Option<String>> {
+    let file_var = format!("{}_FILE", key);
+    if let Ok(path) = env::var(&file_var) {
+        let contents = fs::read_to_string(&path)
+            .with_context(|| format!("Failed to read {} from {}", file_var, path))?;
+        return Ok(Some(contents));
+    }
+    Ok(env::var(key).ok())
 }
 
 fn spawn_jwks_refresh(verifier: Arc<JwtVerifier>) {

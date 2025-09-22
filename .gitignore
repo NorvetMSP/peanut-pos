@@ -9,3 +9,5 @@ target/
 .vscode/
 .idea/
 .DS_Store
+jwt-dev.pem
+jwt-dev.pub.pem

@@ -67,6 +67,9 @@ services:
       - DATABASE_URL=postgres://novapos:novapos@postgres:5432/novapos
       - KAFKA_BOOTSTRAP=kafka:9092
       - RUST_LOG=info
+      - JWT_ISSUER=https://auth.novapos.local
+      - JWT_AUDIENCE=novapos-frontend,novapos-admin,novapos-postgres
+      - JWT_JWKS_URL=http://auth-service:8085/.well-known/jwks.json
     depends_on:
       postgres:
         condition: service_started
@@ -82,9 +85,19 @@ services:
     environment:
       - DATABASE_URL=postgres://novapos:novapos@postgres:5432/novapos
       - RUST_LOG=info
+      - JWT_ISSUER=https://auth.novapos.local
+      - JWT_AUDIENCE=novapos-frontend,novapos-admin,novapos-postgres
+      - JWT_DEV_PRIVATE_KEY_PEM_FILE=/run/secrets/jwt_dev_private_key
+    secrets:
+      - jwt_dev_private_key
     depends_on: [postgres]
     ports: ["8085:8085"]
     networks: [novanet]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8085/.well-known/jwks.json"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   order-service:
     build:
@@ -95,6 +108,9 @@ services:
       - KAFKA_BOOTSTRAP=kafka:9092
       - INTEGRATION_URL=http://integration-gateway:8083
       - RUST_LOG=info
+      - JWT_ISSUER=https://auth.novapos.local
+      - JWT_AUDIENCE=novapos-frontend,novapos-admin,novapos-postgres
+      - JWT_JWKS_URL=http://auth-service:8085/.well-known/jwks.json
     depends_on:
       postgres:
         condition: service_started
@@ -105,19 +121,6 @@ services:
     ports: ["8084:8084"]
     networks: [novanet]
 
-  payment-service:
-    build:
-      context: .
-      dockerfile: services/payment-service/Dockerfile
-    environment:
-      - KAFKA_BOOTSTRAP=kafka:9092
-      - RUST_LOG=info
-    depends_on:
-      kafka:
-        condition: service_healthy
-    ports: ["8086:8086"]
-    networks: [novanet]
-
   inventory-service:
     build:
       context: .
@@ -126,6 +129,9 @@ services:
       - DATABASE_URL=postgres://novapos:novapos@postgres:5432/novapos
       - KAFKA_BOOTSTRAP=kafka:9092
       - RUST_LOG=info
+      - JWT_ISSUER=https://auth.novapos.local
+      - JWT_AUDIENCE=novapos-frontend,novapos-admin,novapos-postgres
+      - JWT_JWKS_URL=http://auth-service:8085/.well-known/jwks.json
     depends_on:
       postgres:
         condition: service_started
@@ -142,6 +148,9 @@ services:
       - DATABASE_URL=postgres://novapos:novapos@postgres:5432/novapos
       - KAFKA_BOOTSTRAP=kafka:9092
       - RUST_LOG=info
+      - JWT_ISSUER=https://auth.novapos.local
+      - JWT_AUDIENCE=novapos-frontend,novapos-admin,novapos-postgres
+      - JWT_JWKS_URL=http://auth-service:8085/.well-known/jwks.json
     depends_on:
       postgres:
         condition: service_started
@@ -158,6 +167,9 @@ services:
       - DATABASE_URL=postgres://novapos:novapos@postgres:5432/novapos
       - KAFKA_BOOTSTRAP=kafka:9092
       - RUST_LOG=info
+      - JWT_ISSUER=https://auth.novapos.local
+      - JWT_AUDIENCE=novapos-frontend,novapos-admin,novapos-postgres
+      - JWT_JWKS_URL=http://auth-service:8085/.well-known/jwks.json
     depends_on:
       postgres:
         condition: service_started
@@ -171,10 +183,31 @@ services:
       context: .
       dockerfile: services/customer-service/Dockerfile
     environment:
+      - CUSTOMER_MASTER_KEY=oDzFP29jTB7sNhBJCaVRJQvTIhhPCi+WuSSmdPxGNIs=
       - DATABASE_URL=postgres://novapos:novapos@postgres:5432/novapos
       - RUST_LOG=info
-    depends_on: [postgres]
+      - JWT_ISSUER=https://auth.novapos.local
+      - JWT_AUDIENCE=novapos-frontend,novapos-admin,novapos-postgres
+      - JWT_JWKS_URL=http://auth-service:8085/.well-known/jwks.json
+    depends_on:
+      auth-service:
+        condition: service_healthy
+      postgres:
+        condition: service_started
     ports: ["8089:8089"]
+    networks: [novanet]
+
+  payment-service:
+    build:
+      context: .
+      dockerfile: services/payment-service/Dockerfile
+    environment:
+      - KAFKA_BOOTSTRAP=kafka:9092
+      - RUST_LOG=info
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports: ["8086:8086"]
     networks: [novanet]
 
   integration-gateway:
@@ -192,6 +225,9 @@ services:
       # - COINBASE_COMMERCE_API_KEY=
       # - COINBASE_WEBHOOK_SECRET=
       - RUST_LOG=info
+      - JWT_ISSUER=https://auth.novapos.local
+      - JWT_AUDIENCE=novapos-frontend,novapos-admin,novapos-postgres
+      - JWT_JWKS_URL=http://auth-service:8085/.well-known/jwks.json
     depends_on:
       kafka:
         condition: service_healthy
@@ -236,3 +272,10 @@ services:
           done
     restart: "no"
     networks: [novanet]
+
+
+
+secrets:
+  jwt_dev_private_key:
+    file: ./jwt-dev.pem
+

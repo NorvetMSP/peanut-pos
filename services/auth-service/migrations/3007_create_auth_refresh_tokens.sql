@@ -1,4 +1,4 @@
-﻿CREATE TABLE auth_refresh_tokens (
+CREATE TABLE auth_refresh_tokens (
     jti UUID PRIMARY KEY,
     user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     tenant_id UUID NOT NULL REFERENCES tenants(id),

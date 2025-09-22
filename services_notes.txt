@@ -23,6 +23,14 @@ docker compose exec kafka kafka-topics.sh --create --topic order.completed --boo
 
 You???re in the repo root, but the Cargo workspace is under services/. Use one of these:
 
+
+Run docker compose ps so we can confirm which services are stopped/exited.
+
+Inspect the logs for one of the failing services (e.g. docker compose logs auth-service); that usually shows missing env vars or migration errors.
+
+If everything is down, docker compose logs without a service name will dump them all.
+
+
 Option B: Use the workspace manifest path from root
 
 
@@ -49,8 +57,7 @@ Tail a single container (replace with the ID or name you copied, e.g. novapos-or
 docker logs -f --tail 200 novapos-order-service-1
 
 If you prefer the compose aliases (you’re in C:\Projects\novapos):
-docker compose logs -f order-service
-docker compose logs -f payment-service …etc.
+ 
 
 Need everything at once?
 docker compose logs -f
@@ -187,6 +194,26 @@ Email: admin@novapos.local
 Password: admin123
 Role: super_admin (tenant NovaPOS HQ)
 
+
+
+#Run from elvate enviroment
+choco install openssl.light 
+
+Step 1. Generate a Dev RSA Key
+
+Run this once in PowerShell:
+
+# Generate a 2048-bit RSA private key (requires OpenSSL installed)
+openssl genrsa -out jwt-dev.pem 2048
+
+# Extract public key (optional, useful for verifying tokens)
+openssl rsa -in jwt-dev.pem -pubout -out jwt-dev.pub.pem
+
+# Windows PowerShell ---docker compose gives it to services
+$env:JWT_DEV_PRIVATE_KEY_PEM = Get-Content jwt-dev.pem -Raw
+
+
+
 Tenant & Key Management Updates (Sept 2025)
 ------------------------------------------
 - After pulling latest changes run auth-service migrations 3003/3004 (e.g. sqlx migrate run) to create the integration_keys table and role constraint.
@@ -205,3 +232,67 @@ sqlx migrate run --source services/customer-service/migrations --ignore-missing
 Backfill customer PII columns (defaults batch=100):
 cargo run --manifest-path services/Cargo.toml -p customer-service --bin backfill_customer_pii -- --tenant <TENANT_UUID>
 Add --dry-run to report counts without updating rows.
+
+
+
+
+
+
+----------------------------Here’s how to run the operational side of the PII/GDPR work with the stack 
+ 1. Confirm the tables exist
+ docker compose exec -T postgres psql -U novapos -d novapos -c "\dt auth_signing_keys" ; docker compose exec -T postgres psql -U novapos -d novapos -c "\dt auth_refresh_tokens" ; docker compose exec -T postgres psql -U novapos -d novapos -c "\dt tenant_data_keys" ; docker compose exec -T postgres psql -U novapos -d novapos -c "\dt gdpr_tombstones"
+
+ 2. Pick a Tenant to Seed DEKs
+ docker compose exec -T postgres psql -U novapos -d novapos -c "SELECT id, name FROM tenants;"
+
+ 3. Then seed a key for each tenant (dry-run first if you like; no DB change happens when the tenant doesn’t exist)
+# Set the DB URL for these commands
+$env:DATABASE_URL = "postgres://novapos:novapos@localhost:5432/novapos"
+$tenant = "3d9adee5-e09f-4c60-9e6c-4e6c998ec986"
+$env:CUSTOMER_MASTER_KEY = "oDzFP29jTB7sNhBJCaVRJQvTIhhPCi+WuSSmdPxGNIs="
+
+
+
+# seed the tenant key
+cargo run --release --manifest-path services/Cargo.toml `
+  -p customer-service --bin seed_tenant_keys `
+  -- --tenant $tenant
+
+  Backfill or create a customer then backfill that for the tenant
+# dry-run the backfill to check counts...Dry run to see how many customers need work:
+cargo run --release --manifest-path services/Cargo.toml `
+  -p customer-service --bin backfill_customer_pii `
+  -- --tenant $tenant --dry-run
+
+#Confirm the UUID:
+
+docker compose exec -T postgres psql -U novapos -d novapos `
+  -c "SELECT id, tenant_id FROM customers;"
+
+4. Exercise the GDPR endpoints
+
+ Call the GDPR export endpoint
+
+ Get and Authorization for that user for a tenant
+
+$headers = @{ "Content-Type" = "application/json" }
+$body = '{"email":"jbean@bfurniture.com","password":"admin123"}' 
+
+$response = Invoke-WebRequest -Uri "http://localhost:8085/login" -Method POST -Headers $headers -Body $body
+# Parse the JSON and display the full token
+($response.Content | ConvertFrom-Json).token
+
+Verify the tombstone
+docker compose exec -T postgres psql -U novapos -d novapos `
+  -c "SELECT id, tenant_id, request_type, status, metadata FROM gdpr_tombstones ORDER BY requested_at DESC LIMIT 5;"
+
+5. Call GDPR delete
+Invoke-WebRequest -Uri "http://localhost:8089/customers/<customer_id>/gdpr/delete" `
+  -Method POST `
+  -Headers @{
+      "Authorization" = "Bearer <access_token>"
+      "X-Tenant-ID"   = "<TENANT_UUID>"
+  }
+
+6. docker compose exec -T postgres psql -U novapos -d novapos `
+  -c "SELECT name, email, phone, email_encrypted, phone_encrypted FROM customers WHERE id = '<customer_id>';"

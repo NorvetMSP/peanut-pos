@@ -1,4 +1,4 @@
-﻿CREATE TABLE auth_signing_keys (
+CREATE TABLE auth_signing_keys (
     kid TEXT PRIMARY KEY,
     public_pem TEXT NOT NULL,
     private_pem TEXT NOT NULL,
