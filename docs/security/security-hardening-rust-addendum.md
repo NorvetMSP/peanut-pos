@@ -98,6 +98,44 @@ Apply through existing sqlx workflow; create migration files in each service’s
    - Enable MFA requirement, suspicious activity alerts, Redis rate limiting in integration-gateway.
    - Add Prometheus `/metrics` endpoints to every service; ship dashboards/alerts.
 
+## Wave 5: Hardening & Monitoring
+
+### Rollout Goals
+- Enforce strong customer and admin authentication, capture anomalies, and surface signals to responders.
+- Harden the integration-gateway perimeter with rate limiting, traceable key usage, and tuned alert thresholds.
+- Standardize runtime telemetry so SRE can dashboard, alert, and create runbooks off a consistent metrics/logs footprint.
+- Close the loop with post-rollout verification and disaster recovery exercises.
+
+### Auth Service
+- Flip the 
+equire_mfa feature flag once the mobile/web clients confirm MFA enrollment UX; gate privileged routes (tenant admin, key rotation) behind MFA checks.
+- Emit security.mfa.activity Kafka events for enrollment changes, MFA failures, bypass attempts, and suspicious geolocation/device combinations.
+- Add rate-limited suspicious login webhooks to the security Slack channel; include tenant, user, ip, device fingerprint, and correlating audit 	race_id.
+- Backfill dashboards that track failed login spikes, MFA enrollment coverage, and top tenants by bypass usage.
+
+### Integration Gateway
+- Enable the Redis-backed limiter in production with ceilings from GATEWAY_RATE_LIMIT_RPM; expose limiter counters via /metrics (gateway_rate_limit_hits_total, gateway_rate_limit_rejections_total).
+- Persist API key usage deltas into pi_key_usage every five minutes and publish hourly summaries to udit.events.v1 with tenant and key prefix tags.
+- Alert when a key bursts above three times its seven-day P95 or when signature verification failures exceed ten per minute; route alerts to PagerDuty (P1) and the security Slack channel (P2).
+
+### Fleet-Wide Monitoring
+- Confirm every service exports http_requests_total, http_request_duration_seconds, and uth_jwt_validation_failures_total; document label conventions in docs/security/README.md.
+- Register audit-service with Prometheus (udit_events_processed_total, udit_chain_gap_total) and add Grafana panels for lag, chain integrity, and Postgres disk usage.
+- Stream structured JSON logs to the central log pipeline; include 	race_id, 	enant_id, user_id, and ctor_role fields for cross-service correlation.
+- Define SLO monitors covering: 99.5 percent of auth token validations under 200ms, 99 percent of gateway requests avoiding rate limiting, and zero audit chain gaps longer than 60 seconds; wire alert thresholds to on-call rotations.
+
+### Alerting & Runbooks
+- Publish playbooks in docs/security/README.md covering MFA lockouts, key compromise response, audit chain gaps, and rate-limit tuning.
+- Hook Prometheus alerts into PagerDuty with runbook links and tag the SRE and Security rotations.
+- Schedule quarterly disaster recovery tests that rotate signing keys under load, simulate Redis outages, and confirm audit-service catch-up plus alert delivery.
+- Add security dashboards that surface MFA adoption, audit retention, and incident response MTTR for compliance evidence.
+
+### Verification Checklist
+- All services show /metrics scrape success in Prometheus and dashboard panels populate within five minutes.
+- Synthetic login and webhook tests fire and produce the expected Kafka events plus alert notifications.
+- Security and SRE leads sign off on updated runbooks and close the Jira tasks linked to Wave 5.
+- Update the post-mortem template so it captures MFA and rate-limit mitigations.
+
 ## Testing & Tooling Notes
 - Add `cargo xtask lint-security` to run clippy + targeted security tests for new crates.
 - Provide cucumber/integration tests that spin up JWKS, Redis, Kafka test containers using `testcontainers` crate.

@@ -204,6 +204,9 @@ services:
     environment:
       - KAFKA_BOOTSTRAP=kafka:9092
       - RUST_LOG=info
+      - JWT_ISSUER=https://auth.novapos.local
+      - JWT_AUDIENCE=novapos-frontend,novapos-admin,novapos-postgres
+      - JWT_JWKS_URL=http://auth-service:8085/.well-known/jwks.json
     depends_on:
       kafka:
         condition: service_healthy
