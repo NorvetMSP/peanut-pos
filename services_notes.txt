@@ -1,4 +1,4 @@
-HashiCorp Vault (local dev)
+﻿HashiCorp Vault (local dev)
 --------------------------
 - docker compose up -d vault
 - export VAULT_ADDR="http://127.0.0.1:8200" (PowerShell: $env:VAULT_ADDR="http://127.0.0.1:8200")
@@ -22,6 +22,7 @@ docker compose up -d
 docker compose up kafka-topics-init
 
 // tear down..... docker compose down
+// docker compose restart
 
 
 

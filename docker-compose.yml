@@ -1,4 +1,4 @@
-networks:
+﻿networks:
   novanet:
 
 volumes:
@@ -112,6 +112,7 @@ services:
       - VAULT_TOKEN=${VAULT_TOKEN:-root}
     secrets:
       - jwt_dev_private_key
+      - jwt_dev_public_key
     depends_on: [postgres, vault]
     ports: ["8085:8085"]
     networks: [novanet]
@@ -378,3 +379,4 @@ secrets:
     file: ./jwt-dev.pem
   jwt_dev_public_key:
     file: ./jwt-dev.pub.pem
+

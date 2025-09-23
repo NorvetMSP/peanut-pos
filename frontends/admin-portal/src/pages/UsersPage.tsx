@@ -470,6 +470,12 @@ const [selectedTenantId, setSelectedTenantId] = useState<string | null>(null);
               </table>
             </div>
           </section>
+
+          <div style={{ textAlign: 'right', marginTop: '2rem' }}>
+            <button className="admin-section-btn" onClick={() => void navigate('/home')} type="button">
+              Back to Admin Home
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -477,4 +483,3 @@ const [selectedTenantId, setSelectedTenantId] = useState<string | null>(null);
 };
 
 export default UsersPage;
-
