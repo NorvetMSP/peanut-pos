@@ -1,11 +1,12 @@
-import React, { useEffect, useState } from 'react';
+﻿import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../AuthContext';
 
 const LoginPage: React.FC = () => {
-  const { login, loginError, isAuthenticating, isLoggedIn } = useAuth();
+  const { login, loginError, isAuthenticating, isLoggedIn, mfaRequired, mfaEnrollmentRequired } = useAuth();
   const navigate = useNavigate();
   const [credentials, setCredentials] = useState({ email: '', password: '' });
+  const [mfaCode, setMfaCode] = useState('');
   const [localError, setLocalError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -14,11 +15,22 @@ const LoginPage: React.FC = () => {
     }
   }, [isLoggedIn, navigate]);
 
+  useEffect(() => {
+    if (!mfaRequired) {
+      setMfaCode('');
+    }
+  }, [mfaRequired]);
+
   const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setLocalError(null);
-    const success = await login(credentials.email, credentials.password);
+    const success = await login(
+      credentials.email,
+      credentials.password,
+      mfaRequired ? mfaCode : undefined,
+    );
     if (success) {
+      setMfaCode('');
       void navigate('/home', { replace: true });
     } else if (!loginError) {
       setLocalError('Login failed. Please try again.');
@@ -26,7 +38,11 @@ const LoginPage: React.FC = () => {
   };
 
   const errorMessage = loginError ?? localError;
-  const isSubmitDisabled = isAuthenticating;
+  const isSubmitDisabled =
+    isAuthenticating ||
+    credentials.email.trim().length === 0 ||
+    credentials.password.trim().length === 0 ||
+    (mfaRequired && mfaCode.trim().length === 0);
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-gray-100 dark:bg-gray-900">
@@ -61,6 +77,28 @@ const LoginPage: React.FC = () => {
               disabled={isSubmitDisabled}
             />
           </div>
+          {mfaRequired && (
+            <div>
+              <label className="block text-gray-700 dark:text-gray-200 mb-1" htmlFor="mfaCode">MFA Code</label>
+              <input
+                id="mfaCode"
+                type="text"
+                inputMode="numeric"
+                pattern="\\d*"
+                maxLength={6}
+                value={mfaCode}
+                onChange={e => setMfaCode(e.target.value)}
+                className="w-full px-3 py-2 border border-gray-300 rounded-md text-gray-900 focus:outline-none focus:ring-2 focus:ring-primary focus:border-primary"
+                placeholder="Enter 6-digit code"
+                autoComplete="one-time-code"
+                disabled={isAuthenticating}
+              />
+              <p className="text-xs text-gray-500 mt-1">Enter the 6-digit code from your authenticator app.</p>
+            </div>
+          )}
+          {mfaEnrollmentRequired && (
+            <p className="text-xs text-blue-600 text-center">MFA enrollment is required for this account. Follow the security runbook to enroll before continuing.</p>
+          )}
           {errorMessage && <p className="text-red-500 text-center text-sm">{errorMessage}</p>}
           <button
             type="submit"

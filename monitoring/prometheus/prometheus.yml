@@ -1,0 +1,14 @@
+﻿global:
+  scrape_interval: 15s
+  evaluation_interval: 30s
+
+scrape_configs:
+  - job_name: 'auth-service'
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['auth-service:8085']
+
+  - job_name: 'integration-gateway'
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['integration-gateway:8083']

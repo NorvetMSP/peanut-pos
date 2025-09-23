@@ -102,6 +102,18 @@ Apply through existing sqlx workflow; create migration files in each service’s
 
 ## Wave 5: Hardening & Monitoring
 
+### Current Snapshot
+- **Auth Telemetry & MFA** (local complete) - Metrics counters are live, MFA flows are instrumented, and Kafka/webhook events fire end-to-end; staging/production still need the mirrored secrets plus dashboard and runbook updates.
+- **Integration Gateway Hardening** (local complete) - Runtime counters, Redis-backed limiter, Kafka usage flush, and alert hooks are wired with Vault-based config loading on container start; still need to roll migrations/secrets through every environment and pipe rate-limit alerts into monitoring.
+- **Shared Observability & Docs** (local complete) - Local smoke steps, Vault workflow, and the post-smoke rollout checklist are published; still need Prometheus/Grafana stood up, `/metrics` coverage in Grafana/PagerDuty, and production-ready runbooks.
+- **Remaining Wave-5 Items** (pending) - Audit-service rollout, fleet-wide JWKS adoption, and disaster-test drills stay queued until secrets and infra replicate beyond dev.
+
+### Immediate Next Steps
+- Promote the secrets from `secret/novapos/auth` and `secret/novapos/integration-gateway` into the production secret manager, and mirror those keys in staging/production manifests (Helm values, ECS task definitions, etc.); follow `docs/security/secret-promotion-guide.md`.
+- Wire `auth-service` and `integration-gateway` `/metrics` into Grafana dashboards and PagerDuty alert rules, watching `auth_login_attempts_total`, `auth_mfa_events_total`, `gateway_rate_limit_checks_total`, and `gateway_rate_limit_rejections_total`; use the Grafana/PagerDuty checklist in `docs/security/README.md` and bootstrap the monitoring stack via `docs/security/prometheus-grafana-bootstrap.md` if Prometheus/Grafana are not yet running.
+- Update the on-call runbooks with the Vault bootstrap procedure and the MFA telemetry smoke script so responders can rerun the checks during incidents; the baseline content now lives in `docs/security/README.md`.
+- Line up the follow-on sprint for audit-service rollout, fleet JWKS adoption, and disaster drills once the secrets and observability work land.
+
 ### Rollout Goals
 - Enforce strong customer and admin authentication, capture anomalies, and surface signals to responders.
 - Harden the integration-gateway perimeter with rate limiting, traceable key usage, and tuned alert thresholds.
@@ -127,8 +139,8 @@ equire_mfa feature flag once the mobile/web clients confirm MFA enrollment UX; g
 - Define SLO monitors covering: 99.5 percent of auth token validations under 200ms, 99 percent of gateway requests avoiding rate limiting, and zero audit chain gaps longer than 60 seconds; wire alert thresholds to on-call rotations.
 
 ### Alerting & Runbooks
-- Publish playbooks in docs/security/README.md covering MFA lockouts, key compromise response, audit chain gaps, and rate-limit tuning.
-- Hook Prometheus alerts into PagerDuty with runbook links and tag the SRE and Security rotations.
+- Publish and maintain playbooks in `docs/security/README.md` covering MFA lockouts, key compromise response, audit chain gaps, rate-limit tuning, and the Vault bootstrap plus MFA telemetry smoke scripts.
+- Hook Prometheus alerts into PagerDuty and Grafana with the new `/metrics` endpoints for auth-service and integration-gateway, tracking `auth_login_attempts_total`, `auth_mfa_events_total`, `gateway_rate_limit_checks_total`, and `gateway_rate_limit_rejections_total`.
 - Schedule quarterly disaster recovery tests that rotate signing keys under load, simulate Redis outages, and confirm audit-service catch-up plus alert delivery.
 - Add security dashboards that surface MFA adoption, audit retention, and incident response MTTR for compliance evidence.
 
@@ -147,3 +159,5 @@ equire_mfa feature flag once the mobile/web clients confirm MFA enrollment UX; g
 - Security engineering: crate APIs, audit-service, crypto design.
 - Service teams: integrate middleware, run migrations, own feature toggles.
 - SRE/Platform: Kafka topics, Redis, monitoring, secrets management.
+
+

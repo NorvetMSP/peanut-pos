@@ -1,4 +1,4 @@
-import React, { createContext, useCallback, useContext, useState } from 'react';
+﻿import React, { createContext, useCallback, useContext, useState } from 'react';
 import { Navigate, useLocation } from 'react-router-dom';
 
 type AuthUser = {
@@ -20,10 +20,13 @@ interface AuthContextValue {
   isLoggedIn: boolean;
   currentUser: AuthUser | null;
   token: string | null;
-  login: (username: string, password: string) => Promise<boolean>;
+  login: (username: string, password: string, mfaCode?: string) => Promise<boolean>;
   logout: () => void;
   loginError: string | null;
   isAuthenticating: boolean;
+  mfaRequired: boolean;
+  mfaEnrollmentRequired: boolean;
+  clearLoginError: () => void;
 }
 
 const SESSION_STORAGE_KEY = 'admin-portal-session';
@@ -104,6 +107,11 @@ interface LoginResponse {
   user: AuthUser;
 }
 
+interface LoginErrorPayload {
+  code?: string;
+  message?: string;
+}
+
 const isLoginResponse = (value: unknown): value is LoginResponse => {
   if (typeof value !== 'object' || value === null) return false;
   const candidate = value as Record<string, unknown>;
@@ -114,56 +122,123 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [session, setSession] = useState<StoredSession | null>(() => readStoredSession());
   const [loginError, setLoginError] = useState<string | null>(null);
   const [isAuthenticating, setIsAuthenticating] = useState(false);
+  const [mfaRequired, setMfaRequired] = useState(false);
+  const [mfaEnrollmentRequired, setMfaEnrollmentRequired] = useState(false);
+
+  const resetMfaState = useCallback(() => {
+    setMfaRequired(false);
+    setMfaEnrollmentRequired(false);
+  }, []);
+
+  const clearLoginError = useCallback(() => {
+    setLoginError(null);
+    resetMfaState();
+  }, [resetMfaState]);
 
   const applySession = useCallback((value: StoredSession | null) => {
     setSession(value);
     persistSession(value);
   }, []);
 
-  const login = useCallback<AuthContextValue['login']>(async (username, password) => {
-    setIsAuthenticating(true);
-    setLoginError(null);
-
-    try {
-      const response = await fetch(LOGIN_ENDPOINT, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: username, password }),
-      });
-
-      if (!response.ok) {
-        setLoginError('Invalid credentials, please try again.');
-        return false;
-      }
-
-      const data = (await response.json()) as unknown;
-      if (!isLoginResponse(data)) {
-        setLoginError('Invalid response from authentication service.');
-        return false;
-      }
-
-      const newSession: StoredSession = {
-        token: data.token,
-        user: data.user,
-        timestamp: Date.now(),
-      };
-
-      applySession(newSession);
+  const login = useCallback<AuthContextValue['login']>(
+    async (username: string, password: string, mfaCode?: string) => {
+      setIsAuthenticating(true);
       setLoginError(null);
-      return true;
-    } catch (err) {
-      console.error('Login failed', err);
-      setLoginError('Unable to login. Please try again.');
-      return false;
-    } finally {
-      setIsAuthenticating(false);
-    }
-  }, [applySession]);
+
+      try {
+        const payload: Record<string, unknown> = {
+          email: username,
+          password,
+        };
+
+        if (typeof mfaCode === 'string' && mfaCode.trim().length > 0) {
+          payload.mfaCode = mfaCode.trim();
+        }
+
+        const response = await fetch(LOGIN_ENDPOINT, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+
+        const contentType = response.headers.get('content-type') ?? '';
+
+        if (!response.ok) {
+          let message = 'Invalid credentials, please try again.';
+          let errorPayload: LoginErrorPayload | null = null;
+
+          if (contentType.includes('application/json')) {
+            try {
+              errorPayload = (await response.json()) as LoginErrorPayload;
+            } catch (err) {
+              console.warn('Unable to parse authentication error payload', err);
+            }
+          }
+
+          const errorCode = errorPayload?.code;
+
+          switch (errorCode) {
+            case 'MFA_REQUIRED':
+              setMfaRequired(true);
+              message = errorPayload?.message ?? 'Enter the 6-digit code from your authenticator app.';
+              break;
+            case 'MFA_CODE_INVALID':
+              setMfaRequired(true);
+              message = errorPayload?.message ?? 'Invalid MFA code. Please try again.';
+              break;
+            case 'MFA_NOT_ENROLLED':
+              setMfaEnrollmentRequired(true);
+              message = errorPayload?.message ?? 'MFA enrollment is required before this account can sign in.';
+              break;
+            default:
+              resetMfaState();
+              break;
+          }
+
+          setLoginError(message);
+          return false;
+        }
+
+        if (!contentType.includes('application/json')) {
+          setLoginError('Invalid response from authentication service.');
+          resetMfaState();
+          return false;
+        }
+
+        const data = (await response.json()) as unknown;
+        if (!isLoginResponse(data)) {
+          setLoginError('Invalid response from authentication service.');
+          resetMfaState();
+          return false;
+        }
+
+        const newSession: StoredSession = {
+          token: data.token,
+          user: data.user,
+          timestamp: Date.now(),
+        };
+
+        applySession(newSession);
+        setLoginError(null);
+        resetMfaState();
+        return true;
+      } catch (err) {
+        console.error('Login failed', err);
+        setLoginError('Unable to login. Please try again.');
+        resetMfaState();
+        return false;
+      } finally {
+        setIsAuthenticating(false);
+      }
+    },
+    [applySession, resetMfaState],
+  );
 
   const logout = useCallback(() => {
     applySession(null);
     setLoginError(null);
-  }, [applySession]);
+    resetMfaState();
+  }, [applySession, resetMfaState]);
 
   const contextValue: AuthContextValue = {
     isLoggedIn: Boolean(session),
@@ -173,6 +248,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     logout,
     loginError,
     isAuthenticating,
+    mfaRequired,
+    mfaEnrollmentRequired,
+    clearLoginError,
   };
 
   return <AuthContext.Provider value={contextValue}>{children}</AuthContext.Provider>;
@@ -193,3 +271,4 @@ export const RequireAuth: React.FC<{ children: React.ReactNode }> = ({ children 
   }
   return <>{children}</>;
 };
+

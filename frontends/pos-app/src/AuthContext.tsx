@@ -1,4 +1,4 @@
-import React, {
+﻿import React, {
   createContext,
   useCallback,
   useContext,
@@ -25,7 +25,7 @@ interface AuthContextValue {
   isLoggedIn: boolean;
   currentUser: AuthUser | null;
   token: string | null;
-  login: (username: string, password: string) => Promise<boolean>;
+  login: (username: string, password: string, mfaCode?: string) => Promise<boolean>;
   logout: () => void;
   loginError: string | null;
   isAuthenticating: boolean;
@@ -33,6 +33,8 @@ interface AuthContextValue {
   lockedUntil: string | null;
   managerContactUri: string;
   clearLoginError: () => void;
+  mfaRequired: boolean;
+  mfaEnrollmentRequired: boolean;
 }
 
 const parseDuration = (raw: unknown, fallback: number): number => {
@@ -126,6 +128,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [isAuthenticating, setIsAuthenticating] = useState(false);
   const [requiresManager, setRequiresManager] = useState(false);
   const [lockedUntil, setLockedUntil] = useState<string | null>(null);
+  const [mfaRequired, setMfaRequired] = useState(false);
+  const [mfaEnrollmentRequired, setMfaEnrollmentRequired] = useState(false);
   const sessionRef = useRef<StoredSession | null>(session);
 
   useEffect(() => {
@@ -141,6 +145,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setLoginError(null);
     setRequiresManager(false);
     setLockedUntil(null);
+  }, []);
+
+  const resetMfaState = useCallback(() => {
+    setMfaRequired(false);
+    setMfaEnrollmentRequired(false);
   }, []);
 
   useEffect(() => {
@@ -181,7 +190,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     };
   }, [applySession, session]);
 
-  const login = useCallback<AuthContextValue['login']>(async (username, password) => {
+  const login = useCallback<AuthContextValue['login']>(async (username: string, password: string, mfaCode?: string) => {
     setIsAuthenticating(true);
     clearLoginError();
 
@@ -189,25 +198,36 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const storedSession = readStoredSession();
       if (storedSession) {
         applySession(storedSession);
+        resetMfaState();
         setIsAuthenticating(false);
         return true;
       }
+      resetMfaState();
       setLoginError('Login requires connection');
       setIsAuthenticating(false);
       return false;
     }
 
     try {
+      const payload: Record<string, unknown> = {
+        email: username,
+        password,
+      };
+      if (typeof mfaCode === 'string' && mfaCode.trim().length > 0) {
+        payload.mfaCode = mfaCode.trim();
+      }
+
       const response = await fetch(LOGIN_ENDPOINT, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: username, password }),
+        body: JSON.stringify(payload),
       });
 
       if (!response.ok) {
         let friendlyMessage = 'Unable to login. Please try again.';
         let managerRequired = false;
         let lockTarget: string | null = null;
+        let errorCode: string | undefined;
 
         const contentType = response.headers.get('content-type') ?? '';
         if (contentType.includes('application/json')) {
@@ -222,16 +242,43 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
               managerRequired = true;
               lockTarget = typeof data.locked_until === 'string' ? data.locked_until : null;
             }
+            errorCode = data.code;
           } catch (err) {
             console.warn('Unable to parse authentication error payload', err);
+            if (response.status === 401) {
+              friendlyMessage = 'Invalid credentials, please try again.';
+            }
           }
         } else if (response.status === 401) {
           friendlyMessage = 'Invalid credentials, please try again.';
         }
 
+        switch (errorCode) {
+          case 'MFA_REQUIRED':
+            setMfaRequired(true);
+            friendlyMessage = friendlyMessage === 'Unable to login. Please try again.'
+              ? 'Enter the 6-digit code from your authenticator app.'
+              : friendlyMessage;
+            break;
+          case 'MFA_CODE_INVALID':
+            setMfaRequired(true);
+            friendlyMessage = 'Invalid MFA code. Please try again.';
+            break;
+          case 'MFA_NOT_ENROLLED':
+            setMfaEnrollmentRequired(true);
+            friendlyMessage = 'MFA enrollment is required before this account can sign in.';
+            break;
+          default:
+            resetMfaState();
+            break;
+        }
+
         setLoginError(friendlyMessage);
         setRequiresManager(managerRequired);
         setLockedUntil(lockTarget);
+        if (!['MFA_REQUIRED', 'MFA_CODE_INVALID', 'MFA_NOT_ENROLLED'].includes(errorCode ?? '')) {
+          resetMfaState();
+        }
         return false;
       }
 
@@ -240,6 +287,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         setLoginError('Invalid response from authentication service.');
         setRequiresManager(false);
         setLockedUntil(null);
+        resetMfaState();
         return false;
       }
 
@@ -253,24 +301,27 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setLoginError(null);
       setRequiresManager(false);
       setLockedUntil(null);
+      resetMfaState();
       return true;
     } catch (err) {
       console.error('Login failed', err);
       setLoginError('Unable to login. Please try again.');
       setRequiresManager(false);
       setLockedUntil(null);
+      resetMfaState();
       return false;
     } finally {
       setIsAuthenticating(false);
     }
-  }, [applySession, clearLoginError]);
+  }, [applySession, clearLoginError, resetMfaState]);
 
   const logout = useCallback(() => {
     applySession(null);
     setLoginError(null);
     setRequiresManager(false);
     setLockedUntil(null);
-  }, [applySession]);
+    resetMfaState();
+  }, [applySession, resetMfaState]);
 
   const contextValue = useMemo<AuthContextValue>(
     () => ({
@@ -285,8 +336,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       lockedUntil,
       managerContactUri: MANAGER_CONTACT_URI,
       clearLoginError,
+      mfaRequired,
+      mfaEnrollmentRequired,
     }),
-    [session, login, logout, loginError, isAuthenticating, requiresManager, lockedUntil, clearLoginError],
+    [session, login, logout, loginError, isAuthenticating, requiresManager, lockedUntil, clearLoginError, mfaRequired, mfaEnrollmentRequired],
   );
 
   return <AuthContext.Provider value={contextValue}>{children}</AuthContext.Provider>;
@@ -306,3 +359,10 @@ export const RequireAuth: React.FC<{ children: React.ReactNode }> = ({ children 
   }
   return children;
 };
+
+
+
+
+
+
+

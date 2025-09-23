@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+﻿import React, { useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../AuthContext';
 
@@ -12,9 +12,12 @@ const LoginPage: React.FC = () => {
     managerContactUri,
     clearLoginError,
     lockedUntil,
+    mfaRequired,
+    mfaEnrollmentRequired,
   } = useAuth();
   const navigate = useNavigate();
   const [credentials, setCredentials] = useState({ username: '', password: '' });
+  const [mfaCode, setMfaCode] = useState('');
 
   useEffect(() => {
     if (isLoggedIn) {
@@ -22,10 +25,16 @@ const LoginPage: React.FC = () => {
     }
   }, [isLoggedIn, navigate]);
 
+  useEffect(() => {
+    if (!mfaRequired) {
+      setMfaCode('');
+    }
+  }, [mfaRequired]);
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     const { username, password } = credentials;
-    await login(username, password);
+    await login(username, password, mfaRequired ? mfaCode : undefined);
   };
 
   const handleContactManager = useCallback(() => {
@@ -44,7 +53,11 @@ const LoginPage: React.FC = () => {
     }
   };
 
-  const isSubmitDisabled = isAuthenticating || !credentials.username || !credentials.password;
+  const isSubmitDisabled =
+    isAuthenticating ||
+    !credentials.username ||
+    !credentials.password ||
+    (mfaRequired && mfaCode.trim().length === 0);
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-gray-100 dark:bg-gray-900">
@@ -81,6 +94,32 @@ const LoginPage: React.FC = () => {
               autoComplete="current-password"
             />
           </div>
+          {mfaRequired && (
+            <div>
+              <label className="block text-gray-700 dark:text-gray-200 mb-1" htmlFor="mfaCode">
+                MFA Code
+              </label>
+              <input
+                id="mfaCode"
+                type="text"
+                inputMode="numeric"
+                pattern="\\d*"
+                maxLength={6}
+                value={mfaCode}
+                onChange={event => {
+                  setMfaCode(event.target.value);
+                  clearLoginError();
+                }}
+                className="w-full px-3 py-2 border border-gray-300 rounded-md text-gray-900 focus:outline-none focus:ring-2 focus:ring-primary focus:border-primary"
+                placeholder="Enter 6-digit code"
+                autoComplete="one-time-code"
+              />
+              <p className="text-xs text-gray-500 mt-1">Enter the 6-digit code from your authenticator app.</p>
+            </div>
+          )}
+          {mfaEnrollmentRequired && (
+            <p className="text-xs text-blue-600 text-center">MFA enrollment is required before using the POS. Ask your manager to enroll this account.</p>
+          )}
           {loginError && (
             <div className="text-center space-y-2">
               <p className="text-sm text-red-500">{loginError}</p>
