@@ -1,4 +1,4 @@
-﻿import React, { createContext, useCallback, useContext, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
 import { Navigate, useLocation } from 'react-router-dom';
 
 type AuthUser = {
@@ -29,9 +29,6 @@ interface AuthContextValue {
   clearLoginError: () => void;
 }
 
-const SESSION_STORAGE_KEY = 'admin-portal-session';
-const SESSION_MAX_AGE_MS = 8 * 60 * 60 * 1000;
-
 const resolveBaseUrl = (raw: string | undefined, fallback: string): string => {
   const candidate = typeof raw === 'string' && raw.trim().length > 0 ? raw : fallback;
   return candidate.replace(/\/$/, '');
@@ -41,65 +38,13 @@ type EnvRecord = Record<string, string | undefined>;
 const { VITE_AUTH_SERVICE_URL } = (import.meta.env ?? {}) as EnvRecord;
 const AUTH_SERVICE_URL = resolveBaseUrl(VITE_AUTH_SERVICE_URL, 'http://localhost:8085');
 const LOGIN_ENDPOINT = `${AUTH_SERVICE_URL}/login`;
+const SESSION_ENDPOINT = `${AUTH_SERVICE_URL}/session`;
+const LOGOUT_ENDPOINT = `${AUTH_SERVICE_URL}/logout`;
 
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
 
-const isBrowser = typeof window !== 'undefined';
-const getStorage = (): Storage | null => (isBrowser ? window.localStorage : null);
-
 const isAuthUser = (value: unknown): value is AuthUser => {
   return typeof value === 'object' && value !== null;
-};
-
-const isStoredSessionRecord = (value: unknown): value is StoredSession => {
-  if (typeof value !== 'object' || value === null) return false;
-  const candidate = value as Record<string, unknown>;
-  return (
-    typeof candidate.token === 'string' &&
-    typeof candidate.timestamp === 'number' &&
-    isAuthUser(candidate.user)
-  );
-};
-
-const isSessionFresh = (session: StoredSession | null): session is StoredSession => {
-  if (!session) return false;
-  if (!session.token || typeof session.timestamp !== 'number') return false;
-  const age = Date.now() - session.timestamp;
-  return age < SESSION_MAX_AGE_MS;
-};
-
-const parseStoredSession = (raw: string): StoredSession | null => {
-  try {
-    const parsed = JSON.parse(raw) as unknown;
-    if (isStoredSessionRecord(parsed) && isSessionFresh(parsed)) {
-      return parsed;
-    }
-  } catch (err) {
-    console.warn('Unable to parse stored session', err);
-  }
-  return null;
-};
-
-const readStoredSession = (): StoredSession | null => {
-  const storage = getStorage();
-  if (!storage) return null;
-  const raw = storage.getItem(SESSION_STORAGE_KEY);
-  if (!raw) return null;
-  const parsed = parseStoredSession(raw);
-  if (!parsed) {
-    storage.removeItem(SESSION_STORAGE_KEY);
-  }
-  return parsed;
-};
-
-const persistSession = (session: StoredSession | null) => {
-  const storage = getStorage();
-  if (!storage) return;
-  if (!session) {
-    storage.removeItem(SESSION_STORAGE_KEY);
-    return;
-  }
-  storage.setItem(SESSION_STORAGE_KEY, JSON.stringify(session));
 };
 
 interface LoginResponse {
@@ -119,7 +64,7 @@ const isLoginResponse = (value: unknown): value is LoginResponse => {
 };
 
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [session, setSession] = useState<StoredSession | null>(() => readStoredSession());
+  const [session, setSession] = useState<StoredSession | null>(null);
   const [loginError, setLoginError] = useState<string | null>(null);
   const [isAuthenticating, setIsAuthenticating] = useState(false);
   const [mfaRequired, setMfaRequired] = useState(false);
@@ -137,8 +82,66 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const applySession = useCallback((value: StoredSession | null) => {
     setSession(value);
-    persistSession(value);
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const hydrateSession = async () => {
+      try {
+        const response = await fetch(SESSION_ENDPOINT, {
+          method: 'GET',
+          credentials: 'include',
+        });
+
+        if (!response.ok) {
+          if (!cancelled) {
+            applySession(null);
+            resetMfaState();
+          }
+          return;
+        }
+
+        const contentType = response.headers.get('content-type') ?? '';
+        if (!contentType.includes('application/json')) {
+          if (!cancelled) {
+            applySession(null);
+            resetMfaState();
+          }
+          return;
+        }
+
+        const data = (await response.json()) as unknown;
+        if (!isLoginResponse(data)) {
+          if (!cancelled) {
+            applySession(null);
+            resetMfaState();
+          }
+          return;
+        }
+
+        if (!cancelled) {
+          applySession({
+            token: data.token,
+            user: data.user,
+            timestamp: Date.now(),
+          });
+          setLoginError(null);
+          resetMfaState();
+        }
+      } catch (err) {
+        if (!cancelled) {
+          console.warn('Unable to refresh session', err);
+        }
+      }
+    };
+
+    hydrateSession();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [applySession, resetMfaState, setLoginError]);
 
   const login = useCallback<AuthContextValue['login']>(
     async (username: string, password: string, mfaCode?: string) => {
@@ -158,6 +161,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         const response = await fetch(LOGIN_ENDPOINT, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
           body: JSON.stringify(payload),
         });
 
@@ -238,7 +242,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     applySession(null);
     setLoginError(null);
     resetMfaState();
-  }, [applySession, resetMfaState]);
+    void fetch(LOGOUT_ENDPOINT, {
+      method: 'POST',
+      credentials: 'include',
+    }).catch((err) => {
+      console.warn('Failed to notify auth-service of logout', err);
+    });
+  }, [applySession, resetMfaState, setLoginError]);
 
   const contextValue: AuthContextValue = {
     isLoggedIn: Boolean(session),
@@ -271,4 +281,5 @@ export const RequireAuth: React.FC<{ children: React.ReactNode }> = ({ children 
   }
   return <>{children}</>;
 };
+
 

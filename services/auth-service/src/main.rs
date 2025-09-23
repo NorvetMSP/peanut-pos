@@ -43,7 +43,9 @@ use tenant_handlers::{
     revoke_integration_key,
 };
 use tokens::{JwkKey, TokenConfig, TokenSigner};
-use user_handlers::{create_user, list_roles, list_users, login_user};
+use user_handlers::{
+    create_user, list_roles, list_users, login_user, logout_user, refresh_session,
+};
 
 /// Shared application state
 #[derive(Clone)]
@@ -196,7 +198,8 @@ async fn main() -> anyhow::Result<()> {
             CONTENT_TYPE,
             HeaderName::from_static("authorization"),
             HeaderName::from_static("x-tenant-id"),
-        ]);
+        ])
+        .allow_credentials(true);
 
     let app = Router::new()
         .route("/healthz", get(health))
@@ -204,6 +207,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/jwks", get(jwks))
         .route("/.well-known/jwks.json", get(jwks))
         .route("/login", post(login_user))
+        .route("/session", get(refresh_session))
+        .route("/logout", post(logout_user))
         .route("/mfa/enroll", post(begin_mfa_enrollment))
         .route("/mfa/verify", post(verify_mfa_enrollment))
         .route("/users", post(create_user).get(list_users))

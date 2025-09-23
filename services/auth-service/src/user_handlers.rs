@@ -3,8 +3,12 @@ use argon2::{
     Argon2,
 };
 use axum::{
+    body::Body,
     extract::State,
-    http::{HeaderMap, StatusCode},
+    http::{
+        header::{COOKIE, SET_COOKIE},
+        HeaderMap, HeaderValue, StatusCode,
+    },
     response::{IntoResponse, Response},
     Json,
 };
@@ -16,6 +20,7 @@ use sqlx::FromRow;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
+use crate::config::AuthConfig;
 use crate::mfa::{normalize_mfa_code, verify_totp_code};
 use crate::notifications::MfaActivityEvent;
 use crate::tokens::{IssuedTokens, TokenSubject};
@@ -98,6 +103,14 @@ impl AuthError {
         )
     }
 
+    pub(crate) fn session_expired() -> Self {
+        Self::new(
+            StatusCode::UNAUTHORIZED,
+            "SESSION_EXPIRED",
+            "Your session has expired. Please sign in again.",
+        )
+    }
+
     pub(crate) fn internal_error(message: impl Into<String>) -> Self {
         Self::new(StatusCode::INTERNAL_SERVER_ERROR, "SERVER_ERROR", message)
     }
@@ -160,6 +173,68 @@ struct LoginMetadata {
     ip: Option<String>,
     user_agent: Option<String>,
     device_fingerprint: Option<String>,
+}
+
+fn build_refresh_cookie(config: &AuthConfig, token: &str, max_age_seconds: i64) -> String {
+    let mut parts = Vec::new();
+    parts.push(format!("{}={}", config.refresh_cookie_name, token));
+    parts.push("Path=/".to_string());
+    parts.push("HttpOnly".to_string());
+
+    let max_age = max_age_seconds.max(0);
+    parts.push(format!("Max-Age={}", max_age));
+
+    if max_age > 0 {
+        let expires = (Utc::now() + Duration::seconds(max_age)).to_rfc2822();
+        parts.push(format!("Expires={}", expires));
+    }
+
+    if let Some(domain) = &config.refresh_cookie_domain {
+        if !domain.is_empty() {
+            parts.push(format!("Domain={}", domain));
+        }
+    }
+
+    parts.push(format!(
+        "SameSite={}",
+        config.refresh_cookie_same_site.as_str()
+    ));
+    if config.refresh_cookie_secure {
+        parts.push("Secure".to_string());
+    }
+
+    parts.join("; ")
+}
+
+fn clear_refresh_cookie(config: &AuthConfig) -> String {
+    let mut parts = Vec::new();
+    parts.push(format!("{}=", config.refresh_cookie_name));
+    parts.push("Path=/".to_string());
+    parts.push("Max-Age=0".to_string());
+    parts.push("Expires=Thu, 01 Jan 1970 00:00:00 GMT".to_string());
+    parts.push("HttpOnly".to_string());
+    parts.push(format!(
+        "SameSite={}",
+        config.refresh_cookie_same_site.as_str()
+    ));
+    if let Some(domain) = &config.refresh_cookie_domain {
+        if !domain.is_empty() {
+            parts.push(format!("Domain={}", domain));
+        }
+    }
+    if config.refresh_cookie_secure {
+        parts.push("Secure".to_string());
+    }
+    parts.join("; ")
+}
+
+fn extract_refresh_cookie(headers: &HeaderMap, config: &AuthConfig) -> Option<String> {
+    let raw = headers.get(COOKIE)?.to_str().ok()?;
+    let prefix = format!("{}=", config.refresh_cookie_name);
+    raw.split(';')
+        .map(|segment| segment.trim())
+        .find_map(|segment| segment.strip_prefix(&prefix))
+        .map(|value| value.to_string())
 }
 
 impl LoginMetadata {
@@ -350,7 +425,8 @@ pub struct LoginResponse {
     /// Retained for backward compatibility with existing clients.
     pub token: String,
     pub access_token: String,
-    pub refresh_token: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refresh_token: Option<String>,
     pub expires_in: i64,
     pub refresh_expires_in: i64,
     pub token_type: &'static str,
@@ -363,7 +439,7 @@ pub async fn login_user(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(login): Json<LoginRequest>,
-) -> Result<Json<LoginResponse>, AuthError> {
+) -> Result<Response, AuthError> {
     let LoginRequest {
         email,
         password,
@@ -759,10 +835,13 @@ pub async fn login_user(
         token_type,
     } = issued;
 
+    let refresh_cookie =
+        build_refresh_cookie(state.config.as_ref(), &refresh_token, refresh_expires_in);
+
     let response = LoginResponse {
         token: access_token.clone(),
         access_token,
-        refresh_token,
+        refresh_token: None,
         expires_in: access_expires_in,
         refresh_expires_in,
         token_type,
@@ -773,7 +852,129 @@ pub async fn login_user(
 
     state.record_login_metric("success");
 
-    Ok(Json(response))
+    let mut reply = Json(response).into_response();
+    match HeaderValue::from_str(&refresh_cookie) {
+        Ok(value) => {
+            reply.headers_mut().append(SET_COOKIE, value);
+        }
+        Err(err) => {
+            error!(error = ?err, "Failed to encode refresh cookie");
+            return Err(AuthError::internal_error(
+                "Unable to encode refresh cookie.",
+            ));
+        }
+    }
+
+    Ok(reply)
+}
+
+pub async fn refresh_session(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, AuthError> {
+    let Some(raw_cookie) = extract_refresh_cookie(&headers, state.config.as_ref()) else {
+        return Err(AuthError::session_expired());
+    };
+
+    let consumed = state
+        .token_signer
+        .consume_refresh_token(&raw_cookie)
+        .await
+        .map_err(|err| {
+            error!(error = ?err, "Failed to consume refresh token");
+            AuthError::internal_error("Unable to refresh session.")
+        })?;
+
+    let account = match consumed {
+        Some(account) => account,
+        None => return Err(AuthError::session_expired()),
+    };
+
+    let user = User {
+        id: account.user_id,
+        tenant_id: account.tenant_id,
+        name: account.name,
+        email: account.email,
+        role: account.role.clone(),
+    };
+
+    let subject = TokenSubject {
+        user_id: user.id,
+        tenant_id: user.tenant_id,
+        roles: vec![user.role.clone()],
+    };
+
+    let issued = state
+        .token_signer
+        .issue_tokens(subject)
+        .await
+        .map_err(|err| {
+            error!(user_id = %user.id, error = %err, "Failed to issue tokens during session refresh");
+            AuthError::internal_error("Unable to refresh session.")
+        })?;
+
+    let IssuedTokens {
+        access_token,
+        refresh_token,
+        access_expires_at,
+        refresh_expires_at,
+        access_expires_in,
+        refresh_expires_in,
+        token_type,
+    } = issued;
+
+    let refresh_cookie =
+        build_refresh_cookie(state.config.as_ref(), &refresh_token, refresh_expires_in);
+
+    let response = LoginResponse {
+        token: access_token.clone(),
+        access_token,
+        refresh_token: None,
+        expires_in: access_expires_in,
+        refresh_expires_in,
+        token_type,
+        access_token_expires_at: access_expires_at.to_rfc3339_opts(SecondsFormat::Secs, true),
+        refresh_token_expires_at: refresh_expires_at.to_rfc3339_opts(SecondsFormat::Secs, true),
+        user,
+    };
+
+    let mut reply = Json(response).into_response();
+    match HeaderValue::from_str(&refresh_cookie) {
+        Ok(value) => {
+            reply.headers_mut().append(SET_COOKIE, value);
+        }
+        Err(err) => {
+            error!(error = ?err, "Failed to encode refresh cookie");
+            return Err(AuthError::internal_error(
+                "Unable to encode refresh cookie.",
+            ));
+        }
+    }
+
+    Ok(reply)
+}
+
+pub async fn logout_user(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some(raw_cookie) = extract_refresh_cookie(&headers, state.config.as_ref()) {
+        if let Err(err) = state.token_signer.consume_refresh_token(&raw_cookie).await {
+            warn!(error = %err, "Failed to revoke refresh token during logout");
+        }
+    }
+
+    let clear_cookie = clear_refresh_cookie(state.config.as_ref());
+    let mut response = Response::new(Body::empty());
+    *response.status_mut() = StatusCode::NO_CONTENT;
+
+    match HeaderValue::from_str(&clear_cookie) {
+        Ok(value) => {
+            response.headers_mut().insert(SET_COOKIE, value);
+        }
+        Err(err) => {
+            error!(error = ?err, "Failed to encode refresh cookie during logout");
+        }
+    }
+
+    response
 }
 
 pub(crate) fn extract_tenant_id(headers: &HeaderMap) -> Result<Uuid, (StatusCode, String)> {

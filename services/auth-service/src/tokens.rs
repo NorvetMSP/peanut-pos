@@ -9,7 +9,7 @@ use rsa::traits::PublicKeyParts;
 use rsa::RsaPrivateKey;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use sqlx::{PgPool, Row};
+use sqlx::{FromRow, PgPool, Row};
 use uuid::Uuid;
 
 pub struct TokenConfig {
@@ -46,6 +46,27 @@ pub struct TokenSubject {
     pub user_id: Uuid,
     pub tenant_id: Uuid,
     pub roles: Vec<String>,
+}
+
+#[derive(FromRow)]
+struct RefreshTokenRow {
+    jti: Uuid,
+    user_id: Uuid,
+    tenant_id: Uuid,
+    expires_at: DateTime<Utc>,
+    name: String,
+    email: String,
+    role: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct RefreshTokenAccount {
+    pub jti: Uuid,
+    pub user_id: Uuid,
+    pub tenant_id: Uuid,
+    pub name: String,
+    pub email: String,
+    pub role: String,
 }
 
 pub struct IssuedTokens {
@@ -265,6 +286,60 @@ impl TokenSigner {
         .await
         .map(|_| ())
         .map_err(|err| anyhow!("Failed to persist refresh token: {err}"))
+    }
+
+    pub async fn consume_refresh_token(&self, token: &str) -> Result<Option<RefreshTokenAccount>> {
+        if token.trim().is_empty() {
+            return Ok(None);
+        }
+
+        let hash = Self::hash_refresh_token(token);
+        let mut tx = self.pool.begin().await?;
+
+        let row = sqlx::query_as::<_, RefreshTokenRow>(
+            "SELECT r.jti, r.user_id, r.tenant_id, r.expires_at, u.name, u.email, u.role \
+             FROM auth_refresh_tokens r \
+             JOIN users u ON u.id = r.user_id \
+             WHERE r.token_hash = $1 AND r.revoked_at IS NULL \
+             FOR UPDATE",
+        )
+        .bind(hash.as_slice())
+        .fetch_optional(&mut tx)
+        .await?;
+
+        let account = if let Some(row) = row {
+            let now = Utc::now();
+
+            if row.expires_at <= now {
+                sqlx::query(
+                    "UPDATE auth_refresh_tokens SET revoked_at = NOW() WHERE jti = $1 AND revoked_at IS NULL"
+                )
+                .bind(row.jti)
+                .execute(&mut tx)
+                .await?;
+                None
+            } else {
+                sqlx::query(
+                    "UPDATE auth_refresh_tokens SET revoked_at = NOW() WHERE jti = $1 AND revoked_at IS NULL"
+                )
+                .bind(row.jti)
+                .execute(&mut tx)
+                .await?;
+                Some(RefreshTokenAccount {
+                    jti: row.jti,
+                    user_id: row.user_id,
+                    tenant_id: row.tenant_id,
+                    name: row.name,
+                    email: row.email,
+                    role: row.role,
+                })
+            }
+        } else {
+            None
+        };
+
+        tx.commit().await?;
+        Ok(account)
     }
 }
 

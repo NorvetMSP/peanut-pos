@@ -1,4 +1,4 @@
-﻿networks:
+networks:
   novanet:
 
 volumes:
@@ -279,6 +279,7 @@ services:
       - '9090:9090'
     volumes:
       - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/prometheus/alerts:/etc/prometheus/alerts:ro
     restart: 'no'
     networks: [novanet]
 

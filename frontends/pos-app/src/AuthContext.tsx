@@ -52,12 +52,10 @@ const SESSION_INACTIVITY_LIMIT_MS = parseDuration(
   import.meta.env.VITE_SESSION_TIMEOUT_MS,
   5 * 60 * 1000,
 );
-const SESSION_MAX_AGE_MS = parseDuration(
-  import.meta.env.VITE_SESSION_MAX_AGE_MS,
-  SESSION_INACTIVITY_LIMIT_MS,
-);
 const AUTH_SERVICE_URL = (import.meta.env.VITE_AUTH_SERVICE_URL ?? 'http://localhost:3000').replace(/\/$/, '');
 const LOGIN_ENDPOINT = `${AUTH_SERVICE_URL}/login`;
+const SESSION_ENDPOINT = `${AUTH_SERVICE_URL}/session`;
+const LOGOUT_ENDPOINT = `${AUTH_SERVICE_URL}/logout`;
 const MANAGER_CONTACT_URI =
   import.meta.env.VITE_MANAGER_CONTACT_URI ??
   'mailto:manager@novapos.local?subject=NovaPOS%20Login%20Assistance';
@@ -72,43 +70,6 @@ const ACTIVITY_EVENTS: Array<keyof DocumentEventMap> = [
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
 
 const isBrowser = typeof window !== 'undefined';
-const SESSION_STORAGE_KEY = 'session';
-const getStorage = () => (isBrowser ? window.localStorage : null);
-
-const isSessionFresh = (session: StoredSession | null): session is StoredSession => {
-  if (!session) return false;
-  if (!session.token || typeof session.timestamp !== 'number') return false;
-  const age = Date.now() - session.timestamp;
-  return age < SESSION_MAX_AGE_MS;
-};
-
-const readStoredSession = (): StoredSession | null => {
-  const storage = getStorage();
-  if (!storage) return null;
-  const raw = storage.getItem(SESSION_STORAGE_KEY);
-  if (!raw) return null;
-  try {
-    const parsed: StoredSession = JSON.parse(raw);
-    if (isSessionFresh(parsed)) {
-      return parsed;
-    }
-  } catch (err) {
-    console.warn('Unable to parse stored session', err);
-  }
-  storage.removeItem(SESSION_STORAGE_KEY);
-  return null;
-};
-
-const persistSession = (session: StoredSession | null) => {
-  const storage = getStorage();
-  if (!storage) return;
-  if (!session) {
-    storage.removeItem(SESSION_STORAGE_KEY);
-    return;
-  }
-  storage.setItem(SESSION_STORAGE_KEY, JSON.stringify(session));
-};
-
 const isOnline = () => (typeof navigator !== 'undefined' ? navigator.onLine : true);
 
 interface LoginErrorPayload {
@@ -122,8 +83,14 @@ interface LoginResponse {
   user: AuthUser;
 }
 
+const isLoginResponse = (value: unknown): value is LoginResponse => {
+  if (typeof value !== 'object' || value === null) return false;
+  const candidate = value as Record<string, unknown>;
+  return typeof candidate.token === 'string' && typeof candidate.user === 'object' && candidate.user !== null;
+};
+
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [session, setSession] = useState<StoredSession | null>(() => readStoredSession());
+  const [session, setSession] = useState<StoredSession | null>(null);
   const [loginError, setLoginError] = useState<string | null>(null);
   const [isAuthenticating, setIsAuthenticating] = useState(false);
   const [requiresManager, setRequiresManager] = useState(false);
@@ -138,7 +105,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const applySession = useCallback((value: StoredSession | null) => {
     setSession(value);
-    persistSession(value);
   }, []);
 
   const clearLoginError = useCallback(() => {
@@ -153,6 +119,76 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, []);
 
   useEffect(() => {
+    let cancelled = false;
+
+    const hydrateSession = async () => {
+      try {
+        const response = await fetch(SESSION_ENDPOINT, {
+          method: 'GET',
+          credentials: 'include',
+        });
+
+        if (!response.ok) {
+          if (!cancelled) {
+            applySession(null);
+            setLoginError(null);
+            setRequiresManager(false);
+            setLockedUntil(null);
+            resetMfaState();
+          }
+          return;
+        }
+
+        const contentType = response.headers.get('content-type') ?? '';
+        if (!contentType.includes('application/json')) {
+          if (!cancelled) {
+            applySession(null);
+            setLoginError(null);
+            setRequiresManager(false);
+            setLockedUntil(null);
+            resetMfaState();
+          }
+          return;
+        }
+
+        const data = (await response.json()) as unknown;
+        if (!isLoginResponse(data)) {
+          if (!cancelled) {
+            applySession(null);
+            setLoginError(null);
+            setRequiresManager(false);
+            setLockedUntil(null);
+            resetMfaState();
+          }
+          return;
+        }
+
+        if (!cancelled) {
+          applySession({
+            token: data.token,
+            user: data.user,
+            timestamp: Date.now(),
+          });
+          setLoginError(null);
+          setRequiresManager(false);
+          setLockedUntil(null);
+          resetMfaState();
+        }
+      } catch (err) {
+        if (!cancelled) {
+          console.warn('Unable to refresh session', err);
+        }
+      }
+    };
+
+    hydrateSession();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [applySession, resetMfaState, setLoginError, setRequiresManager, setLockedUntil]);
+
+  useEffect(() => {
     if (!isBrowser || !session) return;
 
     let timeoutId: ReturnType<typeof window.setTimeout> | undefined;
@@ -161,7 +197,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       if (!sessionRef.current) return;
       const updated: StoredSession = { ...sessionRef.current, timestamp: Date.now() };
       sessionRef.current = updated;
-      persistSession(updated);
     };
 
     const handleActivity = () => {
@@ -195,16 +230,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     clearLoginError();
 
     if (!isOnline()) {
-      const storedSession = readStoredSession();
-      if (storedSession) {
-        applySession(storedSession);
-        resetMfaState();
-        setIsAuthenticating(false);
-        return true;
-      }
-      resetMfaState();
-      setLoginError('Login requires connection');
       setIsAuthenticating(false);
+      setRequiresManager(false);
+      setLockedUntil(null);
+      resetMfaState();
+      setLoginError('Login requires a network connection. Please reconnect and try again.');
       return false;
     }
 
@@ -220,6 +250,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const response = await fetch(LOGIN_ENDPOINT, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify(payload),
       });
 
@@ -282,14 +313,15 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         return false;
       }
 
-      const data: LoginResponse = await response.json();
-      if (!data?.token || !data?.user) {
+      const responseBody = (await response.json()) as unknown;
+      if (!isLoginResponse(responseBody)) {
         setLoginError('Invalid response from authentication service.');
         setRequiresManager(false);
         setLockedUntil(null);
         resetMfaState();
         return false;
       }
+      const data = responseBody;
 
       const newSession: StoredSession = {
         token: data.token,
@@ -321,7 +353,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setRequiresManager(false);
     setLockedUntil(null);
     resetMfaState();
-  }, [applySession, resetMfaState]);
+    void fetch(LOGOUT_ENDPOINT, {
+      method: 'POST',
+      credentials: 'include',
+    }).catch((err) => {
+      console.warn('Failed to notify auth-service of logout', err);
+    });
+  }, [applySession, resetMfaState, setLoginError, setRequiresManager, setLockedUntil]);
 
   const contextValue = useMemo<AuthContextValue>(
     () => ({

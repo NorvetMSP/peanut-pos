@@ -1,0 +1,43 @@
+groups:
+  - name: wave5-security-auth
+    rules:
+      - alert: AuthInvalidCredentialsSpike
+        expr: sum by (tenant_id) (rate(auth_login_attempts_total{outcome="invalid_credentials"}[5m])) > 50
+        for: 5m
+        labels:
+          severity: warning
+          service: auth-service
+          pagerduty_service: security
+        annotations:
+          summary: "Auth invalid credentials spike for {{ $labels.tenant_id }}"
+          description: |
+            The 5m rate of auth_login_attempts_total{outcome="invalid_credentials"} is above 50 for tenant {{ $labels.tenant_id }}.
+            Investigate potential credential stuffing using the Grafana Wave 5 Security Overview dashboard.
+      - alert: AuthMfaInvalidSpike
+        expr: sum by (tenant_id) (rate(auth_mfa_events_total{outcome="mfa_invalid"}[5m])) > 10
+        for: 5m
+        labels:
+          severity: warning
+          service: auth-service
+          pagerduty_service: security
+        annotations:
+          summary: "Auth MFA invalid spike for {{ $labels.tenant_id }}"
+          description: |
+            The 5m rate of auth_mfa_events_total{outcome="mfa_invalid"} is above 10 for tenant {{ $labels.tenant_id }}.
+            Check recent MFA telemetry and confirm users are entering current TOTPs.
+  - name: wave5-security-gateway
+    rules:
+      - alert: GatewayRateLimitRejectionsSpike
+        expr: sum by (tenant_id) (rate(gateway_rate_limit_rejections_total[1m])) > 5
+        for: 1m
+        labels:
+          severity: critical
+          service: integration-gateway
+          pagerduty_service: security
+        annotations:
+          summary: "Gateway rate-limit rejections spike for {{ $labels.tenant_id }}"
+          description: |
+            The 1m rate of gateway_rate_limit_rejections_total is above 5 for tenant {{ $labels.tenant_id }}.
+            Review Redis limiter health and the Gateway Rate Limit panel in Grafana.
+
+

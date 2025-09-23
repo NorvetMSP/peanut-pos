@@ -101,18 +101,21 @@ Use this script after every deployment or when investigating auth anomalies.
 ## Grafana and PagerDuty Wiring Checklist
 > Prerequisite: complete the monitoring bootstrap in `prometheus-grafana-bootstrap.md` so Prometheus and Grafana are available.
 1. Add the following Prometheus scrape targets if they are not already present: auth-service `/metrics`, integration-gateway `/metrics`.
-2. Dashboard panels (PromQL examples):
-   ```promql
-   sum by (outcome) (rate(auth_login_attempts_total[5m]))
-   sum by (outcome, route) (rate(auth_mfa_events_total[5m]))
-   sum by (outcome) (rate(gateway_rate_limit_checks_total[5m]))
-   sum(rate(gateway_rate_limit_rejections_total[5m]))
+2. Import the Wave 5 dashboard from `monitoring/grafana/provisioning/dashboards/wave5.json` and confirm the four panels (login attempts, MFA events, rate-limit checks, rate-limit rejections) render data after running the smoke scripts above.
+3. Load the Prometheus alert rules in `monitoring/prometheus/alerts/security-wave5.rules.yml`. The compose bootstrap mounts them automatically; copy the file alongside `prometheus.yml` in remote environments so the rules stay in sync.
+4. Configure Alertmanager so alerts carrying `pagerduty_service=security` notify the security rotation. Example:
+   ```yaml
+   route:
+     routes:
+       - matchers:
+           - pagerduty_service = security
+         receiver: pagerduty-security
+   receivers:
+     - name: pagerduty-security
+       pagerduty_configs:
+         - routing_key: <YOUR_PD_INTEGRATION_KEY>
    ```
-3. PagerDuty alert thresholds:
-   - `auth_login_attempts_total{outcome="invalid_credentials"}` spike: trigger when the 5m rate exceeds 50 per tenant.
-   - `auth_mfa_events_total{outcome="mfa_invalid"}` spike: trigger when the 5m rate exceeds 10 per tenant.
-   - `gateway_rate_limit_rejections_total`: trigger when the 1m rate exceeds 5 for any tenant.
-4. Link this document in the alert runbooks section of PagerDuty so on-call engineers can jump straight to the diagnostics.
+5. Link this document in the alert runbooks section of PagerDuty so on-call engineers can jump straight to the diagnostics.
 
 ## Change Management
 - When secrets or thresholds change, update both this README and the [Security Hardening Addendum](security-hardening-rust-addendum.md).

@@ -1,4 +1,4 @@
-ï»¿# NOVAPOS Security Hardening Addendum (Rust Implementation)
+# NOVAPOS Security Hardening Addendum (Rust Implementation)
 
 ## Purpose
 This addendum translates the "Security and compliance plan" into actionable steps for the Rust monorepo. It introduces reusable crates, assigns each service the integration work it must do, and sequences database/infrastructure migrations so engineers can stage changes safely.
@@ -6,7 +6,7 @@ This addendum translates the "Security and compliance plan" into actionable step
 ## New Workspace Crates
 | Crate | Location (proposed) | Purpose | Key Responsibilities | Consumer Services |
 | --- | --- | --- | --- | --- |
-| `common-auth` | `services/common/auth` | Centralizes JWT verification + tenant & role context handling. | Provide Axum/Tower middleware for RS256 JWT validation, `X-Tenant-ID â†” claim` checks, refresh-token verification helpers, extractor utilities for `UserContext`. | All HTTP-facing services (product, order, inventory, loyalty, customer, integration-gateway, analytics, payment) |
+| `common-auth` | `services/common/auth` | Centralizes JWT verification + tenant & role context handling. | Provide Axum/Tower middleware for RS256 JWT validation, `X-Tenant-ID ? claim` checks, refresh-token verification helpers, extractor utilities for `UserContext`. | All HTTP-facing services (product, order, inventory, loyalty, customer, integration-gateway, analytics, payment) |
 | `common-rbac` | `services/common/rbac` | Fine-grained role/permission gates usable in handlers. | Define `require_role` / `require_permission` guard functions, policy macros, and test helpers. | Same set as above; especially product, order, inventory, integration-gateway |
 | `common-audit` | `services/common/audit` | Shared Kafka producer + structured event schema. | Provide `AuditEvent` structs, JSON encoding, batching helper around `rdkafka`, optional Postgres fallback writer. | All services emitting audit events; `audit-service` consumer |
 | `common-crypto` | `services/common/crypto` | Envelope encryption routines for PII and API key hashing. | AES-256-GCM encrypt/decrypt using tenant DEKs, deterministic hashing helpers, Argon2id API key hashing utilities. | customer-service, auth-service, integration-gateway, any PII-handling service |
@@ -55,24 +55,24 @@ This addendum translates the "Security and compliance plan" into actionable step
 - Persist tokens securely (httpOnly cookies or secure storage) and send `Authorization: Bearer` headers.
 
 ## Database & Infrastructure Migrations
-Apply through existing sqlx workflow; create migration files in each serviceâ€™s `migrations/` directory.
+Apply through existing sqlx workflow; create migration files in each service’s `migrations/` directory.
 
 1. **Auth Service**
-   1. `3006_create_auth_signing_keys_rs256.sql` â€“ schema matches plan (kid, PEMs, active flag).
-   2. `3007_create_auth_refresh_tokens.sql` â€“ includes indexes on `(user_id, revoked_at)`.
-   3. `3008_create_mfa_tables.sql` â€“ store TOTP secrets, recovery codes, telemetry.
+   1. `3006_create_auth_signing_keys_rs256.sql` – schema matches plan (kid, PEMs, active flag).
+   2. `3007_create_auth_refresh_tokens.sql` – includes indexes on `(user_id, revoked_at)`.
+   3. `3008_create_mfa_tables.sql` – store TOTP secrets, recovery codes, telemetry.
 
 2. **Shared (New `services/audit-service`)**
-   - `1001_create_audit_logs.sql` â€“ append-only table with hash chaining fields (`prev_hash`, `entry_hash`).
+   - `1001_create_audit_logs.sql` – append-only table with hash chaining fields (`prev_hash`, `entry_hash`).
 
 3. **Customer Service**
-   1. `5002_add_tenant_keys.sql` â€“ create `tenant_data_keys` table.
-   2. `5003_add_customer_encrypted_columns.sql` â€“ add encrypted columns & deterministic hash indexes.
-   3. `5004_create_gdpr_tombstones.sql` â€“ track deletions & export state.
+   1. `5002_add_tenant_keys.sql` – create `tenant_data_keys` table.
+   2. `5003_add_customer_encrypted_columns.sql` – add encrypted columns & deterministic hash indexes.
+   3. `5004_create_gdpr_tombstones.sql` – track deletions & export state.
    4. Backfill script (`scripts/backfill_customer_pii.rs`) to encrypt historical rows.
 
 4. **Integration Gateway**
-   - `2001_add_api_key_usage_table.sql` â€“ store request counters, last seen, derived metrics (optional if Redis is primary source).
+   - `2001_add_api_key_usage_table.sql` – store request counters, last seen, derived metrics (optional if Redis is primary source).
 
 5. **Kafka Topics**
    - Provision `audit.events.v1`, `security.mfa.activity`, `gdpr.requests.v1` via existing `kafka-topics-init` job.
@@ -86,7 +86,7 @@ Apply through existing sqlx workflow; create migration files in each serviceâ€™s
 
 2. **Service Adoption Wave 1**
    - Integration Gateway + Product Service move to `common-auth`; enable RBAC and audit emissions.
-   - Launch `audit-service` and confirm Kafka â†’ Postgres flow.
+   - Launch `audit-service` and confirm Kafka ? Postgres flow.
 
 3. **Service Adoption Wave 2**
    - Order, Inventory, Loyalty, Customer, Analytics, Payment services adopt middleware & RBAC.
@@ -108,11 +108,20 @@ Apply through existing sqlx workflow; create migration files in each serviceâ€™s
 - **Shared Observability & Docs** (local complete) - Local smoke steps, Vault workflow, and the post-smoke rollout checklist are published; still need Prometheus/Grafana stood up, `/metrics` coverage in Grafana/PagerDuty, and production-ready runbooks.
 - **Remaining Wave-5 Items** (pending) - Audit-service rollout, fleet-wide JWKS adoption, and disaster-test drills stay queued until secrets and infra replicate beyond dev.
 
+### Recent Updates
+- Grafana dashboard + PagerDuty alert rules checked in under `monitoring/grafana/provisioning/dashboards/wave5.json` and `monitoring/prometheus/alerts/security-wave5.rules.yml`; follow `docs/security/README.md` for import and routing steps.
+- On-call runbooks now include Vault bootstrap and MFA telemetry smoke guidance in `docs/security/README.md`.
+
 ### Immediate Next Steps
-- Promote the secrets from `secret/novapos/auth` and `secret/novapos/integration-gateway` into the production secret manager, and mirror those keys in staging/production manifests (Helm values, ECS task definitions, etc.); follow `docs/security/secret-promotion-guide.md`.
-- Wire `auth-service` and `integration-gateway` `/metrics` into Grafana dashboards and PagerDuty alert rules, watching `auth_login_attempts_total`, `auth_mfa_events_total`, `gateway_rate_limit_checks_total`, and `gateway_rate_limit_rejections_total`; use the Grafana/PagerDuty checklist in `docs/security/README.md` and bootstrap the monitoring stack via `docs/security/prometheus-grafana-bootstrap.md` if Prometheus/Grafana are not yet running.
-- Update the on-call runbooks with the Vault bootstrap procedure and the MFA telemetry smoke script so responders can rerun the checks during incidents; the baseline content now lives in `docs/security/README.md`.
-- Line up the follow-on sprint for audit-service rollout, fleet JWKS adoption, and disaster drills once the secrets and observability work land.
+- Create Jira work items for the remaining Wave 5 deliverables (audit-service rollout, fleet JWKS adoption, disaster drills, limiter cutover) and sequence them with platform/SRE owners.
+- Promote the refreshed secrets out of Vault into staging/production managers per `docs/security/secret-promotion-guide.md` as part of the rollout checklist.
+
+### Wave 5 Follow-On Queue
+See `docs/security/wave5-follow-on-tickets.md` for detailed ticket breakdowns.
+- **Audit-Service Rollout** - deploy the consumer, backfill topics, and add Prometheus/Grafana coverage.
+- **Fleet JWKS Adoption** - switch every service to the shared `common-auth` verifier and retire legacy token handling.
+- **Disaster Recovery Drills** - rehearse signing-key rotation, Redis failover, and audit backlog catch-up under load.
+- **Gateway Limiter Production Cutover** - enable the Redis-backed limits with tuned RPM ceilings and confirm alerting.
 
 ### Rollout Goals
 - Enforce strong customer and admin authentication, capture anomalies, and surface signals to responders.

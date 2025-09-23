@@ -3,6 +3,23 @@ use std::collections::HashSet;
 use std::env;
 use uuid::Uuid;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CookieSameSite {
+    Lax,
+    Strict,
+    None,
+}
+
+impl CookieSameSite {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            CookieSameSite::Lax => "Lax",
+            CookieSameSite::Strict => "Strict",
+            CookieSameSite::None => "None",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AuthConfig {
     pub require_mfa: bool,
@@ -12,6 +29,10 @@ pub struct AuthConfig {
     pub mfa_activity_topic: String,
     pub suspicious_webhook_url: Option<String>,
     pub suspicious_webhook_bearer: Option<String>,
+    pub refresh_cookie_name: String,
+    pub refresh_cookie_domain: Option<String>,
+    pub refresh_cookie_secure: bool,
+    pub refresh_cookie_same_site: CookieSameSite,
 }
 
 impl AuthConfig {
@@ -67,8 +88,25 @@ pub fn load_auth_config() -> Result<AuthConfig> {
     let mfa_activity_topic = env::var("SECURITY_MFA_ACTIVITY_TOPIC")
         .unwrap_or_else(|_| "security.mfa.activity".to_string());
 
-    let suspicious_webhook_url = env::var("SECURITY_SUSPICIOUS_WEBHOOK_URL").ok();
-    let suspicious_webhook_bearer = env::var("SECURITY_SUSPICIOUS_WEBHOOK_BEARER").ok();
+    let suspicious_webhook_url = env::var("SECURITY_SUSPICIOUS_WEBHOOK_URL")
+        .ok()
+        .and_then(|value| normalize_optional(&value));
+    let suspicious_webhook_bearer = env::var("SECURITY_SUSPICIOUS_WEBHOOK_BEARER")
+        .ok()
+        .and_then(|value| normalize_optional(&value));
+
+    let refresh_cookie_name =
+        env::var("AUTH_REFRESH_COOKIE_NAME").unwrap_or_else(|_| "novapos_refresh".to_string());
+    let refresh_cookie_domain = env::var("AUTH_REFRESH_COOKIE_DOMAIN")
+        .ok()
+        .and_then(|value| normalize_optional(&value));
+    let refresh_cookie_secure = bool_from_env("AUTH_REFRESH_COOKIE_SECURE").unwrap_or(false);
+    let refresh_cookie_same_site = env::var("AUTH_REFRESH_COOKIE_SAMESITE")
+        .ok()
+        .map(|value| parse_same_site(&value))
+        .transpose()
+        .context("Failed to parse AUTH_REFRESH_COOKIE_SAMESITE")?
+        .unwrap_or(CookieSameSite::Lax);
 
     Ok(AuthConfig {
         require_mfa,
@@ -78,6 +116,10 @@ pub fn load_auth_config() -> Result<AuthConfig> {
         mfa_activity_topic,
         suspicious_webhook_url,
         suspicious_webhook_bearer,
+        refresh_cookie_name,
+        refresh_cookie_domain,
+        refresh_cookie_secure,
+        refresh_cookie_same_site,
     })
 }
 
@@ -124,6 +166,26 @@ fn parse_tenant_list(value: &str) -> Result<HashSet<Uuid>> {
         tenants.insert(tenant);
     }
     Ok(tenants)
+}
+
+fn normalize_optional(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn parse_same_site(value: &str) -> Result<CookieSameSite> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "lax" => Ok(CookieSameSite::Lax),
+        "strict" => Ok(CookieSameSite::Strict),
+        "none" => Ok(CookieSameSite::None),
+        other => Err(anyhow!(
+            "Unsupported cookie same-site policy '{other}'. Use Lax, Strict, or None."
+        )),
+    }
 }
 
 #[cfg(test)]
