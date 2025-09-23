@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+common-auth = { path = "../common/auth" }
+tower-http = { version = "0.5", features = ["cors"] }
 axum = "0.7"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
@@ -13,3 +15,4 @@ tracing-subscriber = { version = "0.3", features = ["fmt","env-filter"] }
 anyhow = "1"
 thiserror = "1"
 hyper = "1"
+uuid = { version = "1", features = ["v4", "serde"] }

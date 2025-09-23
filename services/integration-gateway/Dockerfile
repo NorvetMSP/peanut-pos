@@ -21,9 +21,12 @@ RUN cargo build --release --manifest-path services/Cargo.toml --target-dir /repo
 
 # Runtime
 FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y ca-certificates libssl3 && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y ca-certificates libssl3 curl jq && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=builder /repo/target/release/integration-gateway /app/integration-gateway
+COPY services/integration-gateway/docker-entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
+ENTRYPOINT ["/app/entrypoint.sh"]
 ENV RUST_LOG=info
 EXPOSE 8083
 CMD ["/app/integration-gateway"]

@@ -1,0 +1,13 @@
+[package]
+name = "common-crypto"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+aes-gcm = { version = "0.10", features = ["aes"] }
+rand = "0.8"
+base64 = "0.21"
+thiserror = "1"
+hmac = "0.12"
+sha2 = "0.10"
+zeroize = "1.7"

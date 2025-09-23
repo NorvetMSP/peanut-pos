@@ -5,6 +5,7 @@ use axum::{
     Json,
 };
 use chrono::{DateTime, Utc};
+use common_auth::AuthContext;
 use rdkafka::producer::FutureRecord;
 use serde::ser::{SerializeStruct, Serializer};
 use serde::{Deserialize, Serialize};
@@ -50,22 +51,99 @@ pub struct AuditActor {
     pub email: Option<String>,
 }
 
-fn extract_actor(headers: &HeaderMap) -> AuditActor {
-    let id = headers
+const PRODUCT_WRITE_ROLES: &[&str] = &["super_admin", "admin", "manager"];
+
+fn ensure_role(auth: &AuthContext, allowed: &[&str]) -> Result<(), (StatusCode, String)> {
+    let has_role = auth
+        .claims
+        .roles
+        .iter()
+        .any(|role| allowed.iter().any(|required| role == required));
+    if has_role {
+        Ok(())
+    } else {
+        Err((
+            StatusCode::FORBIDDEN,
+            format!("Insufficient role. Required one of: {}", allowed.join(", ")),
+        ))
+    }
+}
+
+fn tenant_id_from_request(
+    headers: &HeaderMap,
+    auth: &AuthContext,
+) -> Result<Uuid, (StatusCode, String)> {
+    let header_value = headers
+        .get("X-Tenant-ID")
+        .ok_or((
+            StatusCode::BAD_REQUEST,
+            "Missing X-Tenant-ID header".to_string(),
+        ))?
+        .to_str()
+        .map_err(|_| {
+            (
+                StatusCode::BAD_REQUEST,
+                "Invalid X-Tenant-ID header".to_string(),
+            )
+        })?
+        .trim();
+    let tenant_id = Uuid::parse_str(header_value).map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            "Invalid X-Tenant-ID header".to_string(),
+        )
+    })?;
+    if tenant_id != auth.claims.tenant_id {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Authenticated tenant does not match X-Tenant-ID header".to_string(),
+        ));
+    }
+    Ok(tenant_id)
+}
+
+fn extract_actor(headers: &HeaderMap, auth: &AuthContext) -> AuditActor {
+    let mut actor = AuditActor {
+        id: Some(auth.claims.subject),
+        name: auth
+            .claims
+            .raw
+            .get("name")
+            .and_then(|value| value.as_str())
+            .map(|value| value.to_string()),
+        email: auth
+            .claims
+            .raw
+            .get("email")
+            .and_then(|value| value.as_str())
+            .map(|value| value.to_string()),
+    };
+
+    if let Some(value) = headers
         .get("X-User-ID")
         .and_then(|value| value.to_str().ok())
-        .and_then(|value| Uuid::parse_str(value.trim()).ok());
-    let name = headers
+        .and_then(|value| Uuid::parse_str(value.trim()).ok())
+    {
+        actor.id = Some(value);
+    }
+    if let Some(value) = headers
         .get("X-User-Name")
         .and_then(|value| value.to_str().ok())
         .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
-    let email = headers
+        .filter(|value| !value.is_empty())
+    {
+        actor.name = Some(value);
+    }
+    if let Some(value) = headers
         .get("X-User-Email")
         .and_then(|value| value.to_str().ok())
         .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
-    AuditActor { id, name, email }
+        .filter(|value| !value.is_empty())
+    {
+        actor.email = Some(value);
+    }
+
+    actor
 }
 
 async fn record_product_audit(
@@ -117,20 +195,14 @@ impl Serialize for Product {
 }
 pub async fn update_product(
     State(state): State<AppState>,
+    auth: AuthContext,
     headers: HeaderMap,
     Path(product_id): axum::extract::Path<Uuid>,
     Json(upd): Json<UpdateProduct>,
 ) -> Result<Json<Product>, (StatusCode, String)> {
-    // Extract tenant context
-    let tenant_id = if let Some(hdr) = headers.get("X-Tenant-ID") {
-        match hdr.to_str().ok().and_then(|s| Uuid::parse_str(s).ok()) {
-            Some(id) => id,
-            None => return Err((StatusCode::BAD_REQUEST, "Invalid X-Tenant-ID header".into())),
-        }
-    } else {
-        return Err((StatusCode::BAD_REQUEST, "Missing X-Tenant-ID header".into()));
-    };
-    let actor = extract_actor(&headers);
+    ensure_role(&auth, PRODUCT_WRITE_ROLES)?;
+    let tenant_id = tenant_id_from_request(&headers, &auth)?;
+    let actor = extract_actor(&headers, &auth);
     let existing = query_as::<_, Product>(
         "SELECT id, tenant_id, name, price::FLOAT8 as price, description, image, active FROM products WHERE id = $1 AND tenant_id = $2",
     )
@@ -187,30 +259,15 @@ pub struct Product {
 
 pub async fn create_product(
     State(state): State<AppState>,
+    auth: AuthContext,
     headers: HeaderMap,
     Json(new_product): Json<NewProduct>,
 ) -> Result<Json<Product>, (StatusCode, String)> {
-    // Extract tenant ID
-    let tenant_id = if let Some(hdr) = headers.get("X-Tenant-ID") {
-        match hdr.to_str().ok().and_then(|s| Uuid::parse_str(s).ok()) {
-            Some(id) => id,
-            None => {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    "Invalid X-Tenant-ID header".to_string(),
-                ))
-            }
-        }
-    } else {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "Missing X-Tenant-ID header".to_string(),
-        ));
-    };
-    let actor = extract_actor(&headers);
-    // Generate new product ID
+    ensure_role(&auth, PRODUCT_WRITE_ROLES)?;
+    let tenant_id = tenant_id_from_request(&headers, &auth)?;
+    let actor = extract_actor(&headers, &auth);
+
     let product_id = Uuid::new_v4();
-    // Extract payload fields and normalize description
     let NewProduct {
         name,
         price,
@@ -219,7 +276,7 @@ pub async fn create_product(
     } = new_product;
     let desc = description.unwrap_or_default();
     let image = normalize_image_input(image).unwrap_or_else(default_product_image);
-    // Insert product into database
+
     let product = query_as::<_, Product>(
         "INSERT INTO products (id, tenant_id, name, price, description, active, image) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id, tenant_id, name, price::FLOAT8 as price, description, image, active"
     )
@@ -228,7 +285,7 @@ pub async fn create_product(
     .bind(name)
     .bind(price)
     .bind(desc)
-    .bind(true) // new products default to active
+    .bind(true)
     .bind(image)
     .fetch_one(&state.db)
     .await
@@ -263,26 +320,11 @@ pub async fn create_product(
 
 pub async fn list_products(
     State(state): State<AppState>,
+    auth: AuthContext,
     headers: HeaderMap,
 ) -> Result<Json<Vec<Product>>, (StatusCode, String)> {
-    // Extract tenant ID
-    let tenant_id = if let Some(hdr) = headers.get("X-Tenant-ID") {
-        match hdr.to_str().ok().and_then(|s| Uuid::parse_str(s).ok()) {
-            Some(id) => id,
-            None => {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    "Invalid X-Tenant-ID header".to_string(),
-                ))
-            }
-        }
-    } else {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "Missing X-Tenant-ID header".to_string(),
-        ));
-    };
-    // Query products for tenant
+    let tenant_id = tenant_id_from_request(&headers, &auth)?;
+
     let products = query_as::<_, Product>(
         "SELECT id, tenant_id, name, price::FLOAT8 as price, description, image, active FROM products WHERE tenant_id = $1",
     )
@@ -295,23 +337,20 @@ pub async fn list_products(
             format!("Database error: {}", e),
         )
     })?;
+
     Ok(Json(products))
 }
 
 pub async fn delete_product(
     State(state): State<AppState>,
+    auth: AuthContext,
     headers: HeaderMap,
     Path(product_id): axum::extract::Path<Uuid>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let tenant_id = if let Some(hdr) = headers.get("X-Tenant-ID") {
-        match hdr.to_str().ok().and_then(|s| Uuid::parse_str(s).ok()) {
-            Some(id) => id,
-            None => return Err((StatusCode::BAD_REQUEST, "Invalid X-Tenant-ID header".into())),
-        }
-    } else {
-        return Err((StatusCode::BAD_REQUEST, "Missing X-Tenant-ID header".into()));
-    };
-    let actor = extract_actor(&headers);
+    ensure_role(&auth, PRODUCT_WRITE_ROLES)?;
+    let tenant_id = tenant_id_from_request(&headers, &auth)?;
+    let actor = extract_actor(&headers, &auth);
+
     let existing = query_as::<_, Product>(
         "SELECT id, tenant_id, name, price::FLOAT8 as price, description, image, active FROM products WHERE id = $1 AND tenant_id = $2",
     )
@@ -397,32 +436,21 @@ pub struct ProductAuditEntry {
 
 pub async fn list_product_audit(
     State(state): State<AppState>,
+    auth: AuthContext,
     headers: HeaderMap,
     Path(product_id): axum::extract::Path<Uuid>,
     Query(params): Query<ProductAuditQuery>,
 ) -> Result<Json<Vec<ProductAuditEntry>>, (StatusCode, String)> {
-    let tenant_id = if let Some(hdr) = headers.get("X-Tenant-ID") {
-        match hdr.to_str().ok().and_then(|s| Uuid::parse_str(s).ok()) {
-            Some(id) => id,
-            None => {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    "Invalid X-Tenant-ID header".to_string(),
-                ))
-            }
-        }
-    } else {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "Missing X-Tenant-ID header".to_string(),
-        ));
-    };
+    ensure_role(&auth, PRODUCT_WRITE_ROLES)?;
+    let tenant_id = tenant_id_from_request(&headers, &auth)?;
+
     let mut limit = params.limit.unwrap_or(10);
     if limit < 1 {
         limit = 1;
     } else if limit > 50 {
         limit = 50;
     }
+
     let entries = sqlx::query_as::<_, ProductAuditEntry>(
         "SELECT id, action, changes, actor_id, actor_name, actor_email, created_at
          FROM product_audit_log
@@ -441,5 +469,6 @@ pub async fn list_product_audit(
             format!("Database error: {}", e),
         )
     })?;
+
     Ok(Json(entries))
 }

@@ -1,5 +1,7 @@
 [workspace]
 members = [
+  "common/auth",
+  "common/crypto",
   "auth-service",
   "order-service",
   "product-service",

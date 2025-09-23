@@ -1,27 +1,41 @@
+﻿use anyhow::Context;
 use axum::{
+    extract::FromRef,
     http::{
         header::{ACCEPT, CONTENT_TYPE},
         HeaderName, HeaderValue, Method,
     },
-    routing::{delete, get, post, put},
+    routing::{get, post, put},
     Router,
 };
+use common_auth::{JwtConfig, JwtVerifier};
 use rdkafka::producer::FutureProducer;
 use sqlx::PgPool;
-use std::env;
-use std::net::SocketAddr;
-use tokio::net::TcpListener;
+use std::{env, net::SocketAddr, sync::Arc};
+use tokio::{
+    net::TcpListener,
+    time::{interval, Duration, MissedTickBehavior},
+};
 use tower_http::cors::{AllowOrigin, CorsLayer};
+use tracing::{debug, info, warn};
 
 mod product_handlers;
 use product_handlers::{
     create_product, delete_product, list_product_audit, list_products, update_product,
 };
+
 /// Shared application state
 #[derive(Clone)]
 pub struct AppState {
     pub(crate) db: PgPool,
     pub(crate) kafka_producer: FutureProducer,
+    pub(crate) jwt_verifier: Arc<JwtVerifier>,
+}
+
+impl FromRef<AppState> for Arc<JwtVerifier> {
+    fn from_ref(state: &AppState) -> Self {
+        state.jwt_verifier.clone()
+    }
 }
 
 async fn health() -> &'static str {
@@ -46,8 +60,16 @@ async fn main() -> anyhow::Result<()> {
         )
         .create()
         .expect("failed to create kafka producer");
+
+    let jwt_verifier = build_jwt_verifier_from_env().await?;
+    spawn_jwks_refresh(jwt_verifier.clone());
+
     // Build application state
-    let state = AppState { db, kafka_producer };
+    let state = AppState {
+        db,
+        kafka_producer,
+        jwt_verifier,
+    };
 
     let allowed_origins = [
         "http://localhost:3000",
@@ -107,4 +129,65 @@ async fn main() -> anyhow::Result<()> {
     let listener = TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+async fn build_jwt_verifier_from_env() -> anyhow::Result<Arc<JwtVerifier>> {
+    let issuer = env::var("JWT_ISSUER").context("JWT_ISSUER must be set")?;
+    let audience = env::var("JWT_AUDIENCE").context("JWT_AUDIENCE must be set")?;
+
+    let mut config = JwtConfig::new(issuer, audience);
+    if let Ok(value) = env::var("JWT_LEEWAY_SECONDS") {
+        if let Ok(leeway) = value.parse::<u32>() {
+            config = config.with_leeway(leeway);
+        }
+    }
+
+    let mut builder = JwtVerifier::builder(config);
+
+    if let Ok(url) = env::var("JWT_JWKS_URL") {
+        info!(jwks_url = %url, "Configuring JWKS fetcher");
+        builder = builder.with_jwks_url(url);
+    }
+
+    if let Ok(pem) = env::var("JWT_DEV_PUBLIC_KEY_PEM") {
+        warn!("Using JWT_DEV_PUBLIC_KEY_PEM for verification; do not enable in production");
+        builder = builder
+            .with_rsa_pem("local-dev", pem.as_bytes())
+            .map_err(anyhow::Error::from)?;
+    }
+
+    let verifier = builder.build().await.map_err(anyhow::Error::from)?;
+    info!("JWT verifier initialised");
+    Ok(Arc::new(verifier))
+}
+
+fn spawn_jwks_refresh(verifier: Arc<JwtVerifier>) {
+    let Some(fetcher) = verifier.jwks_fetcher() else {
+        return;
+    };
+
+    let refresh_secs = env::var("JWKS_REFRESH_SECONDS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(300);
+    let refresh_secs = refresh_secs.max(60);
+    let interval_duration = Duration::from_secs(refresh_secs);
+    let url = fetcher.url().to_owned();
+    let handle = verifier.clone();
+
+    tokio::spawn(async move {
+        let mut ticker = interval(interval_duration);
+        ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        loop {
+            ticker.tick().await;
+            match handle.refresh_jwks().await {
+                Ok(count) => {
+                    debug!(count, jwks_url = %url, "Refreshed JWKS keys");
+                }
+                Err(err) => {
+                    warn!(error = %err, jwks_url = %url, "Failed to refresh JWKS keys");
+                }
+            }
+        }
+    });
 }

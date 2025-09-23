@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+common-auth = { path = "../common/auth" }
 axum = "0.7"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
@@ -20,5 +21,9 @@ bytes = "1"
 hmac = "0.12"
 sha2 = "0.10"
 hex = "0.4"
-sqlx = { version = "0.6", features = ["runtime-tokio-native-tls", "postgres", "macros", "uuid"] }
+sqlx = { version = "0.6", features = ["runtime-tokio-native-tls", "postgres", "macros", "uuid", "chrono"] }
 tower-http = { version = "0.5", features = ["cors"] }
+redis = { version = "0.24", features = ["tokio-comp", "connection-manager"] }
+prometheus = "0.13"
+chrono = { version = "0.4", features = ["serde"] }
+

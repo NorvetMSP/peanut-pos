@@ -4,12 +4,64 @@ use axum::{
     http::{HeaderMap, StatusCode},
     Json,
 };
+use common_auth::AuthContext;
 use serde::Serialize;
 use sqlx::query_as;
 use uuid::Uuid;
 
 const LIST_INVENTORY_SQL: &str =
     "SELECT product_id, tenant_id, quantity, threshold FROM inventory WHERE tenant_id = $1";
+
+const INVENTORY_VIEW_ROLES: &[&str] = &["super_admin", "admin", "manager", "cashier"];
+
+fn tenant_id_from_request(
+    headers: &HeaderMap,
+    auth: &AuthContext,
+) -> Result<Uuid, (StatusCode, String)> {
+    let header_value = headers
+        .get("X-Tenant-ID")
+        .ok_or((
+            StatusCode::BAD_REQUEST,
+            "Missing X-Tenant-ID header".to_string(),
+        ))?
+        .to_str()
+        .map_err(|_| {
+            (
+                StatusCode::BAD_REQUEST,
+                "Invalid X-Tenant-ID header".to_string(),
+            )
+        })?
+        .trim();
+    let tenant_id = Uuid::parse_str(header_value).map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            "Invalid X-Tenant-ID header".to_string(),
+        )
+    })?;
+    if tenant_id != auth.claims.tenant_id {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Authenticated tenant does not match X-Tenant-ID header".to_string(),
+        ));
+    }
+    Ok(tenant_id)
+}
+
+fn ensure_role(auth: &AuthContext, allowed: &[&str]) -> Result<(), (StatusCode, String)> {
+    let has_role = auth
+        .claims
+        .roles
+        .iter()
+        .any(|role| allowed.iter().any(|required| role == required));
+    if has_role {
+        Ok(())
+    } else {
+        Err((
+            StatusCode::FORBIDDEN,
+            format!("Insufficient role. Required one of: {}", allowed.join(", ")),
+        ))
+    }
+}
 
 #[derive(Debug, sqlx::FromRow, Serialize)]
 pub struct InventoryRecord {
@@ -21,27 +73,12 @@ pub struct InventoryRecord {
 
 pub async fn list_inventory(
     State(state): State<AppState>,
+    auth: AuthContext,
     headers: HeaderMap,
 ) -> Result<Json<Vec<InventoryRecord>>, (StatusCode, String)> {
-    // Extract tenant ID from header
-    let tenant_id = if let Some(hdr) = headers.get("X-Tenant-ID") {
-        match hdr.to_str().ok().and_then(|s| Uuid::parse_str(s).ok()) {
-            Some(id) => id,
-            None => {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    "Invalid X-Tenant-ID header".to_string(),
-                ))
-            }
-        }
-    } else {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "Missing X-Tenant-ID header".to_string(),
-        ));
-    };
+    ensure_role(&auth, INVENTORY_VIEW_ROLES)?;
+    let tenant_id = tenant_id_from_request(&headers, &auth)?;
 
-    // Query inventory records for this tenant
     let records = query_as::<_, InventoryRecord>(LIST_INVENTORY_SQL)
         .bind(tenant_id)
         .fetch_all(&state.db)

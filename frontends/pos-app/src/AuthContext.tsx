@@ -1,4 +1,4 @@
-import React, {
+﻿import React, {
   createContext,
   useCallback,
   useContext,
@@ -25,7 +25,7 @@ interface AuthContextValue {
   isLoggedIn: boolean;
   currentUser: AuthUser | null;
   token: string | null;
-  login: (username: string, password: string) => Promise<boolean>;
+  login: (username: string, password: string, mfaCode?: string) => Promise<boolean>;
   logout: () => void;
   loginError: string | null;
   isAuthenticating: boolean;
@@ -33,6 +33,8 @@ interface AuthContextValue {
   lockedUntil: string | null;
   managerContactUri: string;
   clearLoginError: () => void;
+  mfaRequired: boolean;
+  mfaEnrollmentRequired: boolean;
 }
 
 const parseDuration = (raw: unknown, fallback: number): number => {
@@ -50,12 +52,10 @@ const SESSION_INACTIVITY_LIMIT_MS = parseDuration(
   import.meta.env.VITE_SESSION_TIMEOUT_MS,
   5 * 60 * 1000,
 );
-const SESSION_MAX_AGE_MS = parseDuration(
-  import.meta.env.VITE_SESSION_MAX_AGE_MS,
-  SESSION_INACTIVITY_LIMIT_MS,
-);
 const AUTH_SERVICE_URL = (import.meta.env.VITE_AUTH_SERVICE_URL ?? 'http://localhost:3000').replace(/\/$/, '');
 const LOGIN_ENDPOINT = `${AUTH_SERVICE_URL}/login`;
+const SESSION_ENDPOINT = `${AUTH_SERVICE_URL}/session`;
+const LOGOUT_ENDPOINT = `${AUTH_SERVICE_URL}/logout`;
 const MANAGER_CONTACT_URI =
   import.meta.env.VITE_MANAGER_CONTACT_URI ??
   'mailto:manager@novapos.local?subject=NovaPOS%20Login%20Assistance';
@@ -70,43 +70,6 @@ const ACTIVITY_EVENTS: Array<keyof DocumentEventMap> = [
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
 
 const isBrowser = typeof window !== 'undefined';
-const SESSION_STORAGE_KEY = 'session';
-const getStorage = () => (isBrowser ? window.localStorage : null);
-
-const isSessionFresh = (session: StoredSession | null): session is StoredSession => {
-  if (!session) return false;
-  if (!session.token || typeof session.timestamp !== 'number') return false;
-  const age = Date.now() - session.timestamp;
-  return age < SESSION_MAX_AGE_MS;
-};
-
-const readStoredSession = (): StoredSession | null => {
-  const storage = getStorage();
-  if (!storage) return null;
-  const raw = storage.getItem(SESSION_STORAGE_KEY);
-  if (!raw) return null;
-  try {
-    const parsed: StoredSession = JSON.parse(raw);
-    if (isSessionFresh(parsed)) {
-      return parsed;
-    }
-  } catch (err) {
-    console.warn('Unable to parse stored session', err);
-  }
-  storage.removeItem(SESSION_STORAGE_KEY);
-  return null;
-};
-
-const persistSession = (session: StoredSession | null) => {
-  const storage = getStorage();
-  if (!storage) return;
-  if (!session) {
-    storage.removeItem(SESSION_STORAGE_KEY);
-    return;
-  }
-  storage.setItem(SESSION_STORAGE_KEY, JSON.stringify(session));
-};
-
 const isOnline = () => (typeof navigator !== 'undefined' ? navigator.onLine : true);
 
 interface LoginErrorPayload {
@@ -120,12 +83,20 @@ interface LoginResponse {
   user: AuthUser;
 }
 
+const isLoginResponse = (value: unknown): value is LoginResponse => {
+  if (typeof value !== 'object' || value === null) return false;
+  const candidate = value as Record<string, unknown>;
+  return typeof candidate.token === 'string' && typeof candidate.user === 'object' && candidate.user !== null;
+};
+
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [session, setSession] = useState<StoredSession | null>(() => readStoredSession());
+  const [session, setSession] = useState<StoredSession | null>(null);
   const [loginError, setLoginError] = useState<string | null>(null);
   const [isAuthenticating, setIsAuthenticating] = useState(false);
   const [requiresManager, setRequiresManager] = useState(false);
   const [lockedUntil, setLockedUntil] = useState<string | null>(null);
+  const [mfaRequired, setMfaRequired] = useState(false);
+  const [mfaEnrollmentRequired, setMfaEnrollmentRequired] = useState(false);
   const sessionRef = useRef<StoredSession | null>(session);
 
   useEffect(() => {
@@ -134,7 +105,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const applySession = useCallback((value: StoredSession | null) => {
     setSession(value);
-    persistSession(value);
   }, []);
 
   const clearLoginError = useCallback(() => {
@@ -142,6 +112,81 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setRequiresManager(false);
     setLockedUntil(null);
   }, []);
+
+  const resetMfaState = useCallback(() => {
+    setMfaRequired(false);
+    setMfaEnrollmentRequired(false);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const hydrateSession = async () => {
+      try {
+        const response = await fetch(SESSION_ENDPOINT, {
+          method: 'GET',
+          credentials: 'include',
+        });
+
+        if (!response.ok) {
+          if (!cancelled) {
+            applySession(null);
+            setLoginError(null);
+            setRequiresManager(false);
+            setLockedUntil(null);
+            resetMfaState();
+          }
+          return;
+        }
+
+        const contentType = response.headers.get('content-type') ?? '';
+        if (!contentType.includes('application/json')) {
+          if (!cancelled) {
+            applySession(null);
+            setLoginError(null);
+            setRequiresManager(false);
+            setLockedUntil(null);
+            resetMfaState();
+          }
+          return;
+        }
+
+        const data = (await response.json()) as unknown;
+        if (!isLoginResponse(data)) {
+          if (!cancelled) {
+            applySession(null);
+            setLoginError(null);
+            setRequiresManager(false);
+            setLockedUntil(null);
+            resetMfaState();
+          }
+          return;
+        }
+
+        if (!cancelled) {
+          applySession({
+            token: data.token,
+            user: data.user,
+            timestamp: Date.now(),
+          });
+          setLoginError(null);
+          setRequiresManager(false);
+          setLockedUntil(null);
+          resetMfaState();
+        }
+      } catch (err) {
+        if (!cancelled) {
+          console.warn('Unable to refresh session', err);
+        }
+      }
+    };
+
+    hydrateSession();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [applySession, resetMfaState, setLoginError, setRequiresManager, setLockedUntil]);
 
   useEffect(() => {
     if (!isBrowser || !session) return;
@@ -152,7 +197,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       if (!sessionRef.current) return;
       const updated: StoredSession = { ...sessionRef.current, timestamp: Date.now() };
       sessionRef.current = updated;
-      persistSession(updated);
     };
 
     const handleActivity = () => {
@@ -181,33 +225,40 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     };
   }, [applySession, session]);
 
-  const login = useCallback<AuthContextValue['login']>(async (username, password) => {
+  const login = useCallback<AuthContextValue['login']>(async (username: string, password: string, mfaCode?: string) => {
     setIsAuthenticating(true);
     clearLoginError();
 
     if (!isOnline()) {
-      const storedSession = readStoredSession();
-      if (storedSession) {
-        applySession(storedSession);
-        setIsAuthenticating(false);
-        return true;
-      }
-      setLoginError('Login requires connection');
       setIsAuthenticating(false);
+      setRequiresManager(false);
+      setLockedUntil(null);
+      resetMfaState();
+      setLoginError('Login requires a network connection. Please reconnect and try again.');
       return false;
     }
 
     try {
+      const payload: Record<string, unknown> = {
+        email: username,
+        password,
+      };
+      if (typeof mfaCode === 'string' && mfaCode.trim().length > 0) {
+        payload.mfaCode = mfaCode.trim();
+      }
+
       const response = await fetch(LOGIN_ENDPOINT, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: username, password }),
+        credentials: 'include',
+        body: JSON.stringify(payload),
       });
 
       if (!response.ok) {
         let friendlyMessage = 'Unable to login. Please try again.';
         let managerRequired = false;
         let lockTarget: string | null = null;
+        let errorCode: string | undefined;
 
         const contentType = response.headers.get('content-type') ?? '';
         if (contentType.includes('application/json')) {
@@ -222,26 +273,55 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
               managerRequired = true;
               lockTarget = typeof data.locked_until === 'string' ? data.locked_until : null;
             }
+            errorCode = data.code;
           } catch (err) {
             console.warn('Unable to parse authentication error payload', err);
+            if (response.status === 401) {
+              friendlyMessage = 'Invalid credentials, please try again.';
+            }
           }
         } else if (response.status === 401) {
           friendlyMessage = 'Invalid credentials, please try again.';
         }
 
+        switch (errorCode) {
+          case 'MFA_REQUIRED':
+            setMfaRequired(true);
+            friendlyMessage = friendlyMessage === 'Unable to login. Please try again.'
+              ? 'Enter the 6-digit code from your authenticator app.'
+              : friendlyMessage;
+            break;
+          case 'MFA_CODE_INVALID':
+            setMfaRequired(true);
+            friendlyMessage = 'Invalid MFA code. Please try again.';
+            break;
+          case 'MFA_NOT_ENROLLED':
+            setMfaEnrollmentRequired(true);
+            friendlyMessage = 'MFA enrollment is required before this account can sign in.';
+            break;
+          default:
+            resetMfaState();
+            break;
+        }
+
         setLoginError(friendlyMessage);
         setRequiresManager(managerRequired);
         setLockedUntil(lockTarget);
+        if (!['MFA_REQUIRED', 'MFA_CODE_INVALID', 'MFA_NOT_ENROLLED'].includes(errorCode ?? '')) {
+          resetMfaState();
+        }
         return false;
       }
 
-      const data: LoginResponse = await response.json();
-      if (!data?.token || !data?.user) {
+      const responseBody = (await response.json()) as unknown;
+      if (!isLoginResponse(responseBody)) {
         setLoginError('Invalid response from authentication service.');
         setRequiresManager(false);
         setLockedUntil(null);
+        resetMfaState();
         return false;
       }
+      const data = responseBody;
 
       const newSession: StoredSession = {
         token: data.token,
@@ -253,24 +333,33 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setLoginError(null);
       setRequiresManager(false);
       setLockedUntil(null);
+      resetMfaState();
       return true;
     } catch (err) {
       console.error('Login failed', err);
       setLoginError('Unable to login. Please try again.');
       setRequiresManager(false);
       setLockedUntil(null);
+      resetMfaState();
       return false;
     } finally {
       setIsAuthenticating(false);
     }
-  }, [applySession, clearLoginError]);
+  }, [applySession, clearLoginError, resetMfaState]);
 
   const logout = useCallback(() => {
     applySession(null);
     setLoginError(null);
     setRequiresManager(false);
     setLockedUntil(null);
-  }, [applySession]);
+    resetMfaState();
+    void fetch(LOGOUT_ENDPOINT, {
+      method: 'POST',
+      credentials: 'include',
+    }).catch((err) => {
+      console.warn('Failed to notify auth-service of logout', err);
+    });
+  }, [applySession, resetMfaState, setLoginError, setRequiresManager, setLockedUntil]);
 
   const contextValue = useMemo<AuthContextValue>(
     () => ({
@@ -285,8 +374,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       lockedUntil,
       managerContactUri: MANAGER_CONTACT_URI,
       clearLoginError,
+      mfaRequired,
+      mfaEnrollmentRequired,
     }),
-    [session, login, logout, loginError, isAuthenticating, requiresManager, lockedUntil, clearLoginError],
+    [session, login, logout, loginError, isAuthenticating, requiresManager, lockedUntil, clearLoginError, mfaRequired, mfaEnrollmentRequired],
   );
 
   return <AuthContext.Provider value={contextValue}>{children}</AuthContext.Provider>;
@@ -306,3 +397,10 @@ export const RequireAuth: React.FC<{ children: React.ReactNode }> = ({ children 
   }
   return children;
 };
+
+
+
+
+
+
+

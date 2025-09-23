@@ -26,6 +26,20 @@ services:
       - "6379:6379"
     networks: [novanet]
 
+  vault:
+    image: hashicorp/vault:1.16.1
+    container_name: vault
+    ports:
+      - "8200:8200"
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: root
+      VAULT_DEV_LISTEN_ADDRESS: "0.0.0.0:8200"
+    cap_add:
+      - IPC_LOCK
+    volumes:
+      - ./vault-data:/vault/file
+    networks: [novanet]
+
   zookeeper:
     image: bitnami/zookeeper:3.8
     environment:
@@ -67,6 +81,9 @@ services:
       - DATABASE_URL=postgres://novapos:novapos@postgres:5432/novapos
       - KAFKA_BOOTSTRAP=kafka:9092
       - RUST_LOG=info
+      - JWT_ISSUER=https://auth.novapos.local
+      - JWT_AUDIENCE=novapos-frontend,novapos-admin,novapos-postgres
+      - JWT_JWKS_URL=http://auth-service:8085/.well-known/jwks.json
     depends_on:
       postgres:
         condition: service_started
@@ -82,9 +99,28 @@ services:
     environment:
       - DATABASE_URL=postgres://novapos:novapos@postgres:5432/novapos
       - RUST_LOG=info
-    depends_on: [postgres]
+      - JWT_ISSUER=https://auth.novapos.local
+      - JWT_AUDIENCE=novapos-frontend,novapos-admin,novapos-postgres
+      - JWT_DEV_PRIVATE_KEY_PEM_FILE=/run/secrets/jwt_dev_private_key
+      - JWT_DEV_PUBLIC_KEY_PEM_FILE=/run/secrets/jwt_dev_public_key
+      - KAFKA_BOOTSTRAP=${KAFKA_BOOTSTRAP:-kafka:9092}
+      - SECURITY_MFA_ACTIVITY_TOPIC=${SECURITY_MFA_ACTIVITY_TOPIC:-security.mfa.activity}
+      - SECURITY_SUSPICIOUS_WEBHOOK_URL=${SECURITY_SUSPICIOUS_WEBHOOK_URL:-}
+      - SECURITY_SUSPICIOUS_WEBHOOK_BEARER=${SECURITY_SUSPICIOUS_WEBHOOK_BEARER:-}
+      - VAULT_ENABLED=${VAULT_ENABLED:-1}
+      - VAULT_ADDR=${VAULT_ADDR:-http://vault:8200}
+      - VAULT_TOKEN=${VAULT_TOKEN:-root}
+    secrets:
+      - jwt_dev_private_key
+      - jwt_dev_public_key
+    depends_on: [postgres, vault]
     ports: ["8085:8085"]
     networks: [novanet]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8085/.well-known/jwks.json"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   order-service:
     build:
@@ -95,6 +131,9 @@ services:
       - KAFKA_BOOTSTRAP=kafka:9092
       - INTEGRATION_URL=http://integration-gateway:8083
       - RUST_LOG=info
+      - JWT_ISSUER=https://auth.novapos.local
+      - JWT_AUDIENCE=novapos-frontend,novapos-admin,novapos-postgres
+      - JWT_JWKS_URL=http://auth-service:8085/.well-known/jwks.json
     depends_on:
       postgres:
         condition: service_started
@@ -105,19 +144,6 @@ services:
     ports: ["8084:8084"]
     networks: [novanet]
 
-  payment-service:
-    build:
-      context: .
-      dockerfile: services/payment-service/Dockerfile
-    environment:
-      - KAFKA_BOOTSTRAP=kafka:9092
-      - RUST_LOG=info
-    depends_on:
-      kafka:
-        condition: service_healthy
-    ports: ["8086:8086"]
-    networks: [novanet]
-
   inventory-service:
     build:
       context: .
@@ -126,6 +152,9 @@ services:
       - DATABASE_URL=postgres://novapos:novapos@postgres:5432/novapos
       - KAFKA_BOOTSTRAP=kafka:9092
       - RUST_LOG=info
+      - JWT_ISSUER=https://auth.novapos.local
+      - JWT_AUDIENCE=novapos-frontend,novapos-admin,novapos-postgres
+      - JWT_JWKS_URL=http://auth-service:8085/.well-known/jwks.json
     depends_on:
       postgres:
         condition: service_started
@@ -142,6 +171,9 @@ services:
       - DATABASE_URL=postgres://novapos:novapos@postgres:5432/novapos
       - KAFKA_BOOTSTRAP=kafka:9092
       - RUST_LOG=info
+      - JWT_ISSUER=https://auth.novapos.local
+      - JWT_AUDIENCE=novapos-frontend,novapos-admin,novapos-postgres
+      - JWT_JWKS_URL=http://auth-service:8085/.well-known/jwks.json
     depends_on:
       postgres:
         condition: service_started
@@ -158,6 +190,9 @@ services:
       - DATABASE_URL=postgres://novapos:novapos@postgres:5432/novapos
       - KAFKA_BOOTSTRAP=kafka:9092
       - RUST_LOG=info
+      - JWT_ISSUER=https://auth.novapos.local
+      - JWT_AUDIENCE=novapos-frontend,novapos-admin,novapos-postgres
+      - JWT_JWKS_URL=http://auth-service:8085/.well-known/jwks.json
     depends_on:
       postgres:
         condition: service_started
@@ -171,10 +206,34 @@ services:
       context: .
       dockerfile: services/customer-service/Dockerfile
     environment:
+      - CUSTOMER_MASTER_KEY=oDzFP29jTB7sNhBJCaVRJQvTIhhPCi+WuSSmdPxGNIs=
       - DATABASE_URL=postgres://novapos:novapos@postgres:5432/novapos
       - RUST_LOG=info
-    depends_on: [postgres]
+      - JWT_ISSUER=https://auth.novapos.local
+      - JWT_AUDIENCE=novapos-frontend,novapos-admin,novapos-postgres
+      - JWT_JWKS_URL=http://auth-service:8085/.well-known/jwks.json
+    depends_on:
+      auth-service:
+        condition: service_healthy
+      postgres:
+        condition: service_started
     ports: ["8089:8089"]
+    networks: [novanet]
+
+  payment-service:
+    build:
+      context: .
+      dockerfile: services/payment-service/Dockerfile
+    environment:
+      - KAFKA_BOOTSTRAP=kafka:9092
+      - RUST_LOG=info
+      - JWT_ISSUER=https://auth.novapos.local
+      - JWT_AUDIENCE=novapos-frontend,novapos-admin,novapos-postgres
+      - JWT_JWKS_URL=http://auth-service:8085/.well-known/jwks.json
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports: ["8086:8086"]
     networks: [novanet]
 
   integration-gateway:
@@ -183,7 +242,8 @@ services:
       dockerfile: services/integration-gateway/Dockerfile
     environment:
       - DATABASE_URL=postgres://novapos:novapos@postgres:5432/novapos
-      - KAFKA_BOOTSTRAP=kafka:9092
+      - KAFKA_BOOTSTRAP=${KAFKA_BOOTSTRAP:-kafka:9092}
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
       - PAYMENT_SERVICE_URL=http://payment-service:8086
       - ORDER_SERVICE_URL=http://order-service:8084
       # Optional: adjust refresh cadence for API key cache (defaults to 60s)
@@ -192,14 +252,50 @@ services:
       # - COINBASE_COMMERCE_API_KEY=
       # - COINBASE_WEBHOOK_SECRET=
       - RUST_LOG=info
+      - JWT_ISSUER=https://auth.novapos.local
+      - JWT_AUDIENCE=novapos-frontend,novapos-admin,novapos-postgres
+      - JWT_JWKS_URL=http://auth-service:8085/.well-known/jwks.json
+      - SECURITY_ALERT_TOPIC=${SECURITY_ALERT_TOPIC:-security.alerts.v1}
+      - SECURITY_ALERT_WEBHOOK_URL=${SECURITY_ALERT_WEBHOOK_URL:-}
+      - SECURITY_ALERT_WEBHOOK_BEARER=${SECURITY_ALERT_WEBHOOK_BEARER:-}
+      - VAULT_ENABLED=${VAULT_ENABLED:-1}
+      - VAULT_ADDR=${VAULT_ADDR:-http://vault:8200}
+      - VAULT_TOKEN=${VAULT_TOKEN:-root}
     depends_on:
       kafka:
         condition: service_healthy
       payment-service:
         condition: service_started
+      vault:
+        condition: service_started
     ports: ["8083:8083"]
     networks: [novanet]
 
+  prometheus:
+    image: prom/prometheus:v2.54.0
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+    ports:
+      - '9090:9090'
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/prometheus/alerts:/etc/prometheus/alerts:ro
+    restart: 'no'
+    networks: [novanet]
+
+  grafana:
+    image: grafana/grafana:11.1.3
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    depends_on:
+      - prometheus
+    ports:
+      - '3002:3000'
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning
+    restart: 'no'
+    networks: [novanet]
   # Frontends (optional in dev)
   pos-app:
     build:
@@ -236,3 +332,52 @@ services:
           done
     restart: "no"
     networks: [novanet]
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka-ui
+    ports:
+      - "8080:8080"
+    environment:
+      # Kafka cluster config
+      KAFKA_CLUSTERS_0_NAME: novapos
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181
+
+      # OAuth2 / JWT authentication is disabled for local use
+      # AUTH_TYPE: OAUTH2
+
+      # SPRING_SECURITY_OAUTH2_CLIENT_PROVIDER_KEYCLOAK_ISSUERURI: https://auth.novapos.local/realms/novapos
+      # SPRING_SECURITY_OAUTH2_CLIENT_REGISTRATION_KEYCLOAK_CLIENTID: kafka-ui
+      # SPRING_SECURITY_OAUTH2_CLIENT_REGISTRATION_KEYCLOAK_CLIENTSECRET: kafka-ui-secret
+      # SPRING_SECURITY_OAUTH2_CLIENT_REGISTRATION_KEYCLOAK_SCOPE: openid,profile,email
+      # SPRING_SECURITY_OAUTH2_CLIENT_PROVIDER_KEYCLOAK_USERNAMEATTRIBUTE: preferred_username
+
+      ### Future Role-Based Access Control
+      #### Once JWT validation works, you can enforce fine-grained RBAC inside Kafka-UI by mapping claims:
+      # RBAC is disabled for local use
+      # RBAC_ENABLED: "true"
+      # RBAC_ROLES_0_NAME: admin
+      # RBAC_ROLES_0_SUBJECTS_0_PROVIDER: oauth
+      # RBAC_ROLES_0_SUBJECTS_0_VALUE: admin@novapos.local
+      # RBAC_ROLES_0_PERMISSIONS_0_RESOURCE: cluster
+      # RBAC_ROLES_0_PERMISSIONS_0_ACTIONS: ALL
+
+      # RBAC_ROLES_1_NAME: viewer
+      # RBAC_ROLES_1_SUBJECTS_0_PROVIDER: oauth
+      # RBAC_ROLES_1_SUBJECTS_0_VALUE: *@novapos.local
+      # RBAC_ROLES_1_PERMISSIONS_0_RESOURCE: topic
+      # RBAC_ROLES_1_PERMISSIONS_0_ACTIONS: VIEW
+
+    depends_on:
+      - kafka
+      - auth-service
+    networks: [novanet]
+
+
+secrets:
+  jwt_dev_private_key:
+    file: ./jwt-dev.pem
+  jwt_dev_public_key:
+    file: ./jwt-dev.pub.pem
+

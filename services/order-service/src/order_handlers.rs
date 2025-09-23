@@ -3,12 +3,66 @@ use axum::{
     http::{HeaderMap, StatusCode},
     Json,
 };
+use common_auth::AuthContext;
 use rdkafka::producer::FutureRecord;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use uuid::Uuid;
 
 use crate::AppState;
+
+const ORDER_WRITE_ROLES: &[&str] = &["super_admin", "admin", "manager", "cashier"];
+const ORDER_REFUND_ROLES: &[&str] = &["super_admin", "admin", "manager"];
+const ORDER_VIEW_ROLES: &[&str] = &["super_admin", "admin", "manager", "cashier"];
+
+fn ensure_role(auth: &AuthContext, allowed: &[&str]) -> Result<(), (StatusCode, String)> {
+    let has_role = auth
+        .claims
+        .roles
+        .iter()
+        .any(|role| allowed.iter().any(|required| role == required));
+    if has_role {
+        Ok(())
+    } else {
+        Err((
+            StatusCode::FORBIDDEN,
+            format!("Insufficient role. Required one of: {}", allowed.join(", ")),
+        ))
+    }
+}
+
+fn tenant_id_from_request(
+    headers: &HeaderMap,
+    auth: &AuthContext,
+) -> Result<Uuid, (StatusCode, String)> {
+    let header_value = headers
+        .get("X-Tenant-ID")
+        .ok_or((
+            StatusCode::BAD_REQUEST,
+            "Missing X-Tenant-ID header".to_string(),
+        ))?
+        .to_str()
+        .map_err(|_| {
+            (
+                StatusCode::BAD_REQUEST,
+                "Invalid X-Tenant-ID header".to_string(),
+            )
+        })?
+        .trim();
+    let tenant_id = Uuid::parse_str(header_value).map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            "Invalid X-Tenant-ID header".to_string(),
+        )
+    })?;
+    if tenant_id != auth.claims.tenant_id {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Authenticated tenant does not match X-Tenant-ID header".to_string(),
+        ));
+    }
+    Ok(tenant_id)
+}
 
 #[derive(Deserialize, Serialize, Debug)]
 pub struct OrderItem {
@@ -49,17 +103,12 @@ pub struct RefundRequest {
 
 pub async fn create_order(
     State(state): State<AppState>,
+    auth: AuthContext,
     headers: HeaderMap,
     Json(new_order): Json<NewOrder>,
 ) -> Result<Json<Order>, (StatusCode, String)> {
-    let tenant_id = headers
-        .get("X-Tenant-ID")
-        .and_then(|hdr| hdr.to_str().ok())
-        .and_then(|value| Uuid::parse_str(value).ok())
-        .ok_or((
-            StatusCode::BAD_REQUEST,
-            "Missing or invalid X-Tenant-ID header".to_string(),
-        ))?;
+    ensure_role(&auth, ORDER_WRITE_ROLES)?;
+    let tenant_id = tenant_id_from_request(&headers, &auth)?;
 
     let order_id = Uuid::new_v4();
     let NewOrder {
@@ -150,17 +199,12 @@ pub async fn create_order(
 
 pub async fn refund_order(
     State(state): State<AppState>,
+    auth: AuthContext,
     headers: HeaderMap,
     Json(req): Json<RefundRequest>,
 ) -> Result<Json<Order>, (StatusCode, String)> {
-    let tenant_id = headers
-        .get("X-Tenant-ID")
-        .and_then(|h| h.to_str().ok())
-        .and_then(|s| Uuid::parse_str(s).ok())
-        .ok_or((
-            StatusCode::BAD_REQUEST,
-            "Missing or invalid X-Tenant-ID header".into(),
-        ))?;
+    ensure_role(&auth, ORDER_REFUND_ROLES)?;
+    let tenant_id = tenant_id_from_request(&headers, &auth)?;
 
     let updated_order = sqlx::query_as::<_, Order>(
         "UPDATE orders SET status = 'REFUNDED' WHERE id = $1 AND tenant_id = $2
@@ -213,16 +257,11 @@ pub async fn refund_order(
 
 pub async fn list_orders(
     State(state): State<AppState>,
+    auth: AuthContext,
     headers: HeaderMap,
 ) -> Result<Json<Vec<Order>>, (StatusCode, String)> {
-    let tenant_id = headers
-        .get("X-Tenant-ID")
-        .and_then(|hdr| hdr.to_str().ok())
-        .and_then(|value| Uuid::parse_str(value).ok())
-        .ok_or((
-            StatusCode::BAD_REQUEST,
-            "Missing or invalid X-Tenant-ID header".to_string(),
-        ))?;
+    ensure_role(&auth, ORDER_VIEW_ROLES)?;
+    let tenant_id = tenant_id_from_request(&headers, &auth)?;
 
     let orders = sqlx::query_as::<_, Order>(
         "SELECT id, tenant_id, total::FLOAT8 as total, status, customer_id, offline          FROM orders          WHERE tenant_id = $1          ORDER BY created_at DESC          LIMIT 20",
@@ -242,16 +281,11 @@ pub async fn list_orders(
 
 pub async fn clear_offline_orders(
     State(state): State<AppState>,
+    auth: AuthContext,
     headers: HeaderMap,
 ) -> Result<Json<ClearOfflineResponse>, (StatusCode, String)> {
-    let tenant_id = headers
-        .get("X-Tenant-ID")
-        .and_then(|hdr| hdr.to_str().ok())
-        .and_then(|value| Uuid::parse_str(value).ok())
-        .ok_or((
-            StatusCode::BAD_REQUEST,
-            "Missing or invalid X-Tenant-ID header".to_string(),
-        ))?;
+    ensure_role(&auth, ORDER_REFUND_ROLES)?;
+    let tenant_id = tenant_id_from_request(&headers, &auth)?;
 
     let result = sqlx::query("DELETE FROM orders WHERE tenant_id = $1 AND offline = TRUE")
         .bind(tenant_id)
