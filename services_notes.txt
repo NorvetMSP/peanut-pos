@@ -1,3 +1,16 @@
+HashiCorp Vault (local dev)
+--------------------------
+- docker compose up -d vault
+- export VAULT_ADDR="http://127.0.0.1:8200" (PowerShell: $env:VAULT_ADDR="http://127.0.0.1:8200")
+- export VAULT_TOKEN="root" (PowerShell: $env:VAULT_TOKEN="root")
+- vault kv put secret/novapos/auth \
+    KAFKA_BOOTSTRAP="kafka:9092" \
+    REDIS_URL="redis://redis:6379/0" \
+    SECURITY_MFA_ACTIVITY_TOPIC="security.mfa.activity"
+- vault kv put secret/novapos/integration-gateway \
+    SECURITY_ALERT_TOPIC="security.alerts.v1"
+- vault kv get secret/novapos/auth
+
 
 
 Full Docker Build including app

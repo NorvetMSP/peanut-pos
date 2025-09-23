@@ -26,6 +26,20 @@ services:
       - "6379:6379"
     networks: [novanet]
 
+  vault:
+    image: hashicorp/vault:1.16.1
+    container_name: vault
+    ports:
+      - "8200:8200"
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: root
+      VAULT_DEV_LISTEN_ADDRESS: "0.0.0.0:8200"
+    cap_add:
+      - IPC_LOCK
+    volumes:
+      - ./vault-data:/vault/file
+    networks: [novanet]
+
   zookeeper:
     image: bitnami/zookeeper:3.8
     environment:
@@ -88,13 +102,16 @@ services:
       - JWT_ISSUER=https://auth.novapos.local
       - JWT_AUDIENCE=novapos-frontend,novapos-admin,novapos-postgres
       - JWT_DEV_PRIVATE_KEY_PEM_FILE=/run/secrets/jwt_dev_private_key
-      - KAFKA_BOOTSTRAP=kafka:9092
-      - SECURITY_MFA_ACTIVITY_TOPIC=security.mfa.activity
-      - SECURITY_SUSPICIOUS_WEBHOOK_URL=
-      - SECURITY_SUSPICIOUS_WEBHOOK_BEARER=
+      - KAFKA_BOOTSTRAP=${KAFKA_BOOTSTRAP:-kafka:9092}
+      - SECURITY_MFA_ACTIVITY_TOPIC=${SECURITY_MFA_ACTIVITY_TOPIC:-security.mfa.activity}
+      - SECURITY_SUSPICIOUS_WEBHOOK_URL=${SECURITY_SUSPICIOUS_WEBHOOK_URL:-}
+      - SECURITY_SUSPICIOUS_WEBHOOK_BEARER=${SECURITY_SUSPICIOUS_WEBHOOK_BEARER:-}
+      - VAULT_ENABLED=${VAULT_ENABLED:-1}
+      - VAULT_ADDR=${VAULT_ADDR:-http://vault:8200}
+      - VAULT_TOKEN=${VAULT_TOKEN:-root}
     secrets:
       - jwt_dev_private_key
-    depends_on: [postgres]
+    depends_on: [postgres, vault]
     ports: ["8085:8085"]
     networks: [novanet]
     healthcheck:
@@ -223,8 +240,8 @@ services:
       dockerfile: services/integration-gateway/Dockerfile
     environment:
       - DATABASE_URL=postgres://novapos:novapos@postgres:5432/novapos
-      - KAFKA_BOOTSTRAP=kafka:9092
-      - REDIS_URL=redis://redis:6379/0
+      - KAFKA_BOOTSTRAP=${KAFKA_BOOTSTRAP:-kafka:9092}
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
       - PAYMENT_SERVICE_URL=http://payment-service:8086
       - ORDER_SERVICE_URL=http://order-service:8084
       # Optional: adjust refresh cadence for API key cache (defaults to 60s)
@@ -236,13 +253,18 @@ services:
       - JWT_ISSUER=https://auth.novapos.local
       - JWT_AUDIENCE=novapos-frontend,novapos-admin,novapos-postgres
       - JWT_JWKS_URL=http://auth-service:8085/.well-known/jwks.json
-      - SECURITY_ALERT_TOPIC=security.alerts.v1
-      - SECURITY_ALERT_WEBHOOK_URL=
-      - SECURITY_ALERT_WEBHOOK_BEARER=
+      - SECURITY_ALERT_TOPIC=${SECURITY_ALERT_TOPIC:-security.alerts.v1}
+      - SECURITY_ALERT_WEBHOOK_URL=${SECURITY_ALERT_WEBHOOK_URL:-}
+      - SECURITY_ALERT_WEBHOOK_BEARER=${SECURITY_ALERT_WEBHOOK_BEARER:-}
+      - VAULT_ENABLED=${VAULT_ENABLED:-1}
+      - VAULT_ADDR=${VAULT_ADDR:-http://vault:8200}
+      - VAULT_TOKEN=${VAULT_TOKEN:-root}
     depends_on:
       kafka:
         condition: service_healthy
       payment-service:
+        condition: service_started
+      vault:
         condition: service_started
     ports: ["8083:8083"]
     networks: [novanet]
