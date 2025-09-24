@@ -352,6 +352,64 @@ async fn axum_smoke_tests_core_routes() -> Result<()> {
         serde_json::from_slice(&verify_response.into_body().collect().await?.to_bytes())?;
     assert_eq!(verify_json["enabled"], Value::from(true));
 
+    kafka_recorder.fail_times("simulated kafka outage (cancel)", 2);
+    let cancel_user = seed_test_user(&pool, "cashier").await?;
+    let cancel_login_body = json!({
+        "email": cancel_user.email.clone(),
+        "password": cancel_user.password.clone(),
+        "tenant_id": cancel_user.tenant_id,
+        "device_fingerprint": "cancel-device"
+    });
+    let cancel_login_request = Request::builder()
+        .method("POST")
+        .uri("/login")
+        .header("content-type", "application/json")
+        .body(Body::from(cancel_login_body.to_string()))?;
+    let cancel_login_response = app.clone().oneshot(cancel_login_request).await?;
+    assert_eq!(cancel_login_response.status(), StatusCode::OK);
+    let cancel_login_json: Value = serde_json::from_slice(
+        &cancel_login_response
+            .into_body()
+            .collect()
+            .await?
+            .to_bytes(),
+    )?;
+    let cancel_access = cancel_login_json["access_token"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing cancel access token"))?
+        .to_string();
+    let cancel_auth_header = format!("Bearer {}", cancel_access);
+
+    let cancel_enroll_request = Request::builder()
+        .method("POST")
+        .uri("/mfa/enroll")
+        .header("authorization", &cancel_auth_header)
+        .body(Body::empty())?;
+    let cancel_enroll_response = app.clone().oneshot(cancel_enroll_request).await?;
+    assert_eq!(cancel_enroll_response.status(), StatusCode::OK);
+
+    let cancel_missing_body = json!({
+        "email": cancel_user.email.clone(),
+        "password": cancel_user.password.clone(),
+        "tenant_id": cancel_user.tenant_id,
+        "device_fingerprint": "cancel-device"
+    });
+    let cancel_missing_request = Request::builder()
+        .method("POST")
+        .uri("/login")
+        .header("content-type", "application/json")
+        .body(Body::from(cancel_missing_body.to_string()))?;
+    let cancel_missing_response = app.clone().oneshot(cancel_missing_request).await?;
+    assert_eq!(cancel_missing_response.status(), StatusCode::UNAUTHORIZED);
+    let cancel_missing_json: Value = serde_json::from_slice(
+        &cancel_missing_response
+            .into_body()
+            .collect()
+            .await?
+            .to_bytes(),
+    )?;
+    assert_eq!(cancel_missing_json["code"], Value::from("MFA_REQUIRED"));
+
     let jwks_response = app
         .clone()
         .oneshot(Request::builder().uri("/jwks").body(Body::empty())?)
@@ -495,22 +553,32 @@ async fn axum_smoke_tests_core_routes() -> Result<()> {
             primary_actions.push(action);
         }
     }
+    let all_actions: Vec<&str> = primary_actions
+        .iter()
+        .chain(dlq_actions.iter())
+        .map(|s| s.as_str())
+        .collect();
+    assert!(all_actions
+        .iter()
+        .any(|action| *action == "mfa.challenge.failed"));
+    assert!(all_actions
+        .iter()
+        .any(|action| *action == "mfa.challenge.missing_code"));
+    assert!(all_actions
+        .iter()
+        .any(|action| *action == "mfa.enrollment.start"));
+    assert!(all_actions
+        .iter()
+        .any(|action| *action == "mfa.enrollment.completed"));
     assert!(primary_actions
         .iter()
-        .any(|action| action == "mfa.challenge.failed"));
-    assert!(primary_actions
-        .iter()
-        .any(|action| action == "mfa.challenge.missing_code"));
-    assert!(primary_actions
-        .iter()
-        .any(|action| action == "mfa.enrollment.start"));
-    assert!(primary_actions
-        .iter()
-        .any(|action| action == "mfa.enrollment.completed"));
+        .any(|action| action == "mfa.challenge.pending_secret"));
     assert!(dlq_actions
         .iter()
         .any(|action| action == "mfa.challenge.missing_code"));
-
+    assert!(dlq_actions
+        .iter()
+        .any(|action| action == "mfa.enrollment.start"));
     sqlx::query("DELETE FROM auth_refresh_tokens WHERE user_id = $1")
         .bind(mfa_user.user_id)
         .execute(&pool)
