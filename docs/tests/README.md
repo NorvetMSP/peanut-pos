@@ -16,15 +16,17 @@ cargo test --workspace
 | --- | --- | --- | --- |
 | Shared Auth Library | `services/common/auth` | Unit tests | Covers JWT claims parsing, bearer extractor validation, in-memory key store behaviour, and JWKS refresh paths. Added in Sept 2025 to prevent regressions in auth-service consumers. |
 | Auth Service | `services/auth-service` | Unit tests | Protects cookie/session helpers, tenant header parsing, and password hashing. Forms the base for deeper handler integration tests. |
-| Auth Service (Login Flow) | `services/auth-service/tests/login_flow.rs` | Integration (ignored) | Spins up embedded Postgres with pg-embed (downloads ~200MB) or reuse an existing instance by setting `AUTH_TEST_DATABASE_URL`. Run with `cargo test -p auth-service --test login_flow -- --ignored`. |
+| Auth Service (Login Flow) | `services/auth-service/tests/login_flow.rs` | Integration (ignored) | Spins up embedded Postgres (`AUTH_TEST_USE_EMBED=1`) or reuse an existing instance via `AUTH_TEST_DATABASE_URL`. Optional flags: `AUTH_TEST_EMBED_CLEAR_CACHE=1`, `AUTH_TEST_APPLY_MIGRATIONS=1`. Run with `cargo test -p auth-service --test login_flow -- --ignored`. |
+| Auth Service (Token Signer) | `services/auth-service/tests/token_signer.rs` | Integration (ignored) | Exercises missing signing key failure, JWKS fallback, and refresh-token reuse. Same env flags as login flow; run with `cargo test -p auth-service --test token_signer -- --ignored`. |
+| Auth Service (Axum Smoke) | `services/auth-service/tests/axum_smoke.rs` | Integration (ignored) | Boots a Router with embedded Postgres fixtures to exercise /healthz, /metrics, /login, /session, /logout, and tenant integration-key admin routes. Run with `cargo test -p auth-service --test axum_smoke -- --ignored`. |
 
 ## Coverage Roadmap
 
 These are the immediate focus areas for expanding coverage. Add details or mark items complete as we build them out.
 
-- [ ] `auth-service` handler tests exercising login, refresh, logout, and MFA flows with an in-memory Postgres fixture. Happy-path login runs in `tests/login_flow.rs` (ignored by default until the embedded Postgres story is battle-tested); next step is broadening coverage and stabilising the fixture.
+- [ ] `auth-service` handler tests exercising login, refresh, logout, and MFA flows with an in-memory Postgres fixture. Happy-path login runs in `tests/login_flow.rs` (ignored by default until the embedded Postgres story is battle-tested); new smoke coverage lives in `tests/axum_smoke.rs`; next up is layering in MFA failure modes and webhook assertions to harden the fixture.
 - [ ] End-to-end smoke tests that stand up a minimal stack (`auth-service` + dependencies) to validate routing and telemetry wiring.
-- [ ] Negative-path tests for token issuance covering missing signing keys and revoked refresh tokens.
+- [x] Negative-path tests for token issuance covering missing signing keys and revoked refresh tokens (see `services/auth-service/tests/token_signer.rs`).
 - [ ] Load-shedding scenarios for JWKS refresh (network failures, malformed payloads) promoted to integration tests.
 
 ## Contribution Checklist

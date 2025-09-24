@@ -190,5 +190,94 @@ mod tests {
         };
         assert!(matches!(err, AuthError::JwksMissingKid));
     }
-}
+    #[tokio::test]
+    async fn fetch_rejects_unsupported_key_type() {
+        let (modulus, exponent) = sample_components();
+        let server = MockServer::start();
+        let body = serde_json::json!({
+            "keys": [
+                {
+                    "kid": "weird",
+                    "kty": "EC",
+                    "alg": "RS256",
+                    "n": modulus,
+                    "e": exponent
+                }
+            ]
+        });
 
+        let _mock = server.mock(|when, then| {
+            when.method(GET).path("/jwks");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(body.to_string());
+        });
+
+        let fetcher = JwksFetcher::new(format!("{}/jwks", server.base_url()));
+        let err = match fetcher.fetch().await {
+            Ok(_) => panic!("fetch should fail"),
+            Err(err) => err,
+        };
+        assert!(matches!(err, AuthError::JwksUnsupportedKey { .. }));
+    }
+
+    #[tokio::test]
+    async fn fetch_rejects_unsupported_algorithm() {
+        let (modulus, exponent) = sample_components();
+        let server = MockServer::start();
+        let body = serde_json::json!({
+            "keys": [
+                {
+                    "kid": "bad-alg",
+                    "kty": "RSA",
+                    "alg": "HS256",
+                    "n": modulus,
+                    "e": exponent
+                }
+            ]
+        });
+
+        let _mock = server.mock(|when, then| {
+            when.method(GET).path("/jwks");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(body.to_string());
+        });
+
+        let fetcher = JwksFetcher::new(format!("{}/jwks", server.base_url()));
+        let err = match fetcher.fetch().await {
+            Ok(_) => panic!("fetch should fail"),
+            Err(err) => err,
+        };
+        assert!(matches!(err, AuthError::JwksUnsupportedAlg { .. }));
+    }
+
+    #[tokio::test]
+    async fn fetch_rejects_missing_modulus_or_exponent() {
+        let server = MockServer::start();
+        let body = serde_json::json!({
+            "keys": [
+                {
+                    "kid": "incomplete",
+                    "kty": "RSA",
+                    "alg": "RS256",
+                    "e": "AQAB"
+                }
+            ]
+        });
+
+        let _mock = server.mock(|when, then| {
+            when.method(GET).path("/jwks");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(body.to_string());
+        });
+
+        let fetcher = JwksFetcher::new(format!("{}/jwks", server.base_url()));
+        let err = match fetcher.fetch().await {
+            Ok(_) => panic!("fetch should fail"),
+            Err(err) => err,
+        };
+        assert!(matches!(err, AuthError::JwksMissingComponents(_)));
+    }
+}

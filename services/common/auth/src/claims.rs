@@ -148,7 +148,10 @@ mod tests {
         });
 
         let claims = Claims::try_from(json).expect("claims to parse");
-        assert_eq!(claims.audience, vec!["aud-a".to_string(), "aud-b".to_string()]);
+        assert_eq!(
+            claims.audience,
+            vec!["aud-a".to_string(), "aud-b".to_string()]
+        );
         assert!(claims.issued_at.is_none());
     }
 

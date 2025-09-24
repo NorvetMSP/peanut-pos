@@ -227,9 +227,7 @@ mod tests {
         let private_pem = private_key
             .to_pkcs1_pem(LineEnding::LF)
             .expect("private pem");
-        let public_pem = public_key
-            .to_pkcs1_pem(LineEnding::LF)
-            .expect("public pem");
+        let public_pem = public_key.to_pkcs1_pem(LineEnding::LF).expect("public pem");
 
         let encoding = EncodingKey::from_rsa_pem(private_pem.as_bytes()).expect("encoding key");
         let decoding = DecodingKey::from_rsa_pem(public_pem.as_bytes()).expect("decoding key");
@@ -283,7 +281,10 @@ mod tests {
         assert!(store.contains("kid"));
         assert!(store.get("kid").is_some());
 
-        store.replace_all(vec![("another".to_string(), DecodingKey::from_secret(b"other"))]);
+        store.replace_all(vec![(
+            "another".to_string(),
+            DecodingKey::from_secret(b"other"),
+        )]);
         assert!(!store.contains("kid"));
         assert!(store.contains("another"));
     }
@@ -317,7 +318,9 @@ mod tests {
         let verifier = JwtVerifier::with_store(config, store);
 
         let (token, _, _, _) = issue_token(&material.encoding, kid, "issuer", "aud");
-        let err = verifier.verify(&token).expect_err("verification should fail");
+        let err = verifier
+            .verify(&token)
+            .expect_err("verification should fail");
         match err {
             AuthError::UnknownKeyId(actual) => assert_eq!(actual, kid),
             other => panic!("unexpected error: {other:?}"),
