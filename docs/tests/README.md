@@ -18,11 +18,11 @@ cargo test --workspace
 | Auth Service | `services/auth-service` | Unit tests | Protects cookie/session helpers, tenant header parsing, and password hashing. Forms the base for deeper handler integration tests. |
 | Auth Service (Login Flow) | `services/auth-service/tests/login_flow.rs` | Integration (ignored) | Spins up embedded Postgres (`AUTH_TEST_USE_EMBED=1`) or reuse an existing instance via `AUTH_TEST_DATABASE_URL`. Optional flags: `AUTH_TEST_EMBED_CLEAR_CACHE=1`, `AUTH_TEST_APPLY_MIGRATIONS=1`. Run with `cargo test -p auth-service --test login_flow -- --ignored`. |
 | Auth Service (Token Signer) | `services/auth-service/tests/token_signer.rs` | Integration (ignored) | Exercises missing signing key failure, JWKS fallback, and refresh-token reuse. Same env flags as login flow; run with `cargo test -p auth-service --test token_signer -- --ignored`. |
-| Auth Service (Axum Smoke) | `services/auth-service/tests/axum_smoke.rs` | Integration (ignored) | Boots a Router with embedded Postgres fixtures to exercise `/healthz`, `/metrics`, `/login`, `/session`, `/logout`, and tenant integration-key admin routes. Run with `cargo test -p auth-service --test axum_smoke -- --ignored`. |
+| Auth Service (Axum Smoke) | `services/auth-service/tests/axum_smoke.rs` | Integration (ignored) | Boots a Router with embedded Postgres fixtures to exercise `/healthz`, `/metrics`, `/login` (MFA negative/positive), `/session`, `/logout`, tenant integration-key admin, and webhook/Kafka handling. Run with `cargo test -p auth-service --test axum_smoke -- --ignored`. |
 
 ## Coverage Roadmap
 
-- [ ] `auth-service` handler tests exercising login, refresh, logout, and MFA flows with an in-memory Postgres fixture. Happy-path login runs in `tests/login_flow.rs` (ignored by default until the embedded Postgres story is battle-tested); new smoke coverage lives in `tests/axum_smoke.rs`; next up is layering in MFA failure modes and webhook assertions to harden the fixture.
+- [ ] `auth-service` handler tests exercising login, refresh, logout, and MFA flows with an in-memory Postgres fixture. Happy-path login runs in `tests/login_flow.rs` (ignored by default until the embedded Postgres story is battle-tested); new smoke coverage lives in `tests/axum_smoke.rs`; next up is exploring MFA enrollment cancellation and Kafka dead-letter scenarios.
 - [ ] End-to-end smoke tests that stand up a minimal stack (`auth-service` + dependencies) to validate routing and telemetry wiring.
 - [x] Negative-path tests for token issuance covering missing signing keys and revoked refresh tokens (see `services/auth-service/tests/token_signer.rs`).
 - [ ] Load-shedding scenarios for JWKS refresh (network failures, malformed payloads) promoted to integration tests.

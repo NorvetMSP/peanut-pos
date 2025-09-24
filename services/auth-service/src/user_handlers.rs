@@ -1045,6 +1045,7 @@ mod tests {
             bypass_tenants: HashSet::new(),
             mfa_issuer: "NovaPOS".to_string(),
             mfa_activity_topic: "security.mfa.activity".to_string(),
+            mfa_dead_letter_topic: None,
             suspicious_webhook_url: None,
             suspicious_webhook_bearer: None,
             refresh_cookie_name: "novapos_refresh".to_string(),

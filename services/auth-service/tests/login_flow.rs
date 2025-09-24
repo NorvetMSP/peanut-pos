@@ -4,6 +4,7 @@ use std::sync::Arc;
 use anyhow::{anyhow, Context, Result};
 use auth_service::config::AuthConfig;
 use auth_service::metrics::AuthMetrics;
+use auth_service::notifications::KafkaProducer;
 use auth_service::tokens::{TokenConfig, TokenSigner};
 use auth_service::user_handlers::{login_user, logout_user, refresh_session, LoginRequest};
 use auth_service::AppState;
@@ -137,10 +138,11 @@ impl TestContext {
         };
         let token_signer = TokenSigner::new(pool.clone(), token_config, Some(&private_pem)).await?;
 
-        let kafka_producer: FutureProducer = ClientConfig::new()
+        let kafka_client: FutureProducer = ClientConfig::new()
             .set("bootstrap.servers", "localhost:9092")
             .create()
             .context("Failed to create Kafka producer")?;
+        let kafka_producer: Arc<dyn KafkaProducer> = Arc::new(kafka_client);
 
         let http_client = Client::builder().build()?;
 

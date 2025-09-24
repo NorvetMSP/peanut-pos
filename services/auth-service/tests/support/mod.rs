@@ -1,8 +1,16 @@
-use std::{collections::HashSet, env, path::PathBuf, time::Duration};
+use std::{
+    collections::{HashSet, VecDeque},
+    env,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use argon2::{password_hash::SaltString, Argon2, PasswordHasher};
+use async_trait::async_trait;
 use auth_service::config::{AuthConfig, CookieSameSite};
+use auth_service::notifications::KafkaProducer;
 use data_encoding::BASE32_NOPAD;
 use dirs::cache_dir;
 use hmac::{Hmac, Mac};
@@ -17,11 +25,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tempfile::{tempdir, TempDir};
 use uuid::Uuid;
 
-#[allow(dead_code)]
 type HmacSha1 = Hmac<Sha1>;
-#[allow(dead_code)]
 const TOTP_PERIOD_SECONDS: u64 = 30;
-#[allow(dead_code)]
 const TOTP_DIGITS: u32 = 6;
 
 pub struct TestDatabase {
@@ -221,12 +226,63 @@ pub fn default_auth_config() -> AuthConfig {
         bypass_tenants: HashSet::new(),
         mfa_issuer: "NovaPOS".to_string(),
         mfa_activity_topic: "security.mfa.activity".to_string(),
+        mfa_dead_letter_topic: Some("security.mfa.activity.dlq".to_string()),
         suspicious_webhook_url: None,
         suspicious_webhook_bearer: None,
         refresh_cookie_name: "novapos_refresh".to_string(),
         refresh_cookie_domain: None,
         refresh_cookie_secure: false,
         refresh_cookie_same_site: CookieSameSite::Lax,
+    }
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct RecordedKafkaEvent {
+    pub topic: String,
+    pub key: String,
+    pub payload: String,
+}
+
+#[derive(Clone, Default)]
+#[allow(dead_code)]
+pub struct RecordingKafkaProducer {
+    events: Arc<Mutex<Vec<RecordedKafkaEvent>>>,
+    failures: Arc<Mutex<VecDeque<String>>>,
+}
+
+#[allow(dead_code)]
+impl RecordingKafkaProducer {
+    pub fn drain(&self) -> Vec<RecordedKafkaEvent> {
+        std::mem::take(&mut *self.events.lock().unwrap())
+    }
+
+    #[allow(dead_code)]
+    pub fn fail_next(&self, message: impl Into<String>) {
+        self.fail_times(message, 1);
+    }
+
+    pub fn fail_times(&self, message: impl Into<String>, count: usize) {
+        let message = message.into();
+        let mut failures = self.failures.lock().unwrap();
+        for _ in 0..count {
+            failures.push_back(message.clone());
+        }
+    }
+}
+
+#[async_trait]
+impl KafkaProducer for RecordingKafkaProducer {
+    async fn send(&self, topic: &str, key: &str, payload: String) -> Result<()> {
+        if let Some(message) = self.failures.lock().unwrap().pop_front() {
+            return Err(anyhow!(message));
+        }
+        self.events.lock().unwrap().push(RecordedKafkaEvent {
+            topic: topic.to_string(),
+            key: key.to_string(),
+            payload,
+        });
+        Ok(())
     }
 }
 

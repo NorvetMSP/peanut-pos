@@ -1,8 +1,9 @@
 mod support;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 use auth_service::metrics::AuthMetrics;
 use auth_service::mfa::generate_totp_secret;
+use auth_service::notifications::KafkaProducer;
 use auth_service::tenant_handlers::{
     create_integration_key, create_tenant, list_integration_keys, list_tenants,
     revoke_integration_key,
@@ -22,16 +23,20 @@ use axum::{Json, Router};
 use common_auth::{JwtConfig, JwtVerifier};
 use http_body_util::BodyExt;
 use rand_core::OsRng;
-use rdkafka::producer::FutureProducer;
-use rdkafka::ClientConfig;
 use reqwest::Client;
 use rsa::pkcs1::EncodeRsaPublicKey;
 use rsa::pkcs8::EncodePrivateKey;
 use rsa::RsaPrivateKey;
 use serde::Serialize;
 use serde_json::{json, Value};
-use std::{str, sync::Arc};
-use support::{current_totp_code, default_auth_config, seed_test_user, TestDatabase};
+use std::str;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+use support::{
+    current_totp_code, default_auth_config, seed_test_user, RecordingKafkaProducer, TestDatabase,
+};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tower::util::ServiceExt;
@@ -76,15 +81,22 @@ async fn axum_smoke_tests_core_routes() -> Result<()> {
     let (webhook_tx, mut webhook_rx) = mpsc::unbounded_channel::<(HeaderMap, Value)>();
     let webhook_listener = TcpListener::bind("127.0.0.1:0").await?;
     let webhook_addr = webhook_listener.local_addr()?;
+    let webhook_fail = Arc::new(AtomicBool::new(true));
     let webhook_router = {
         let sender = webhook_tx.clone();
+        let fail_once = webhook_fail.clone();
         Router::new().route(
             "/",
             post(move |headers: HeaderMap, Json(payload): Json<Value>| {
                 let sender = sender.clone();
+                let fail_once = fail_once.clone();
                 async move {
-                    let _ = sender.send((headers, payload));
-                    StatusCode::OK
+                    if fail_once.swap(false, Ordering::SeqCst) {
+                        StatusCode::INTERNAL_SERVER_ERROR
+                    } else {
+                        let _ = sender.send((headers, payload));
+                        StatusCode::OK
+                    }
                 }
             }),
         )
@@ -118,15 +130,13 @@ async fn axum_smoke_tests_core_routes() -> Result<()> {
     };
     let token_signer = TokenSigner::new(pool.clone(), token_config, Some(&private_pem)).await?;
 
-    let kafka_producer: FutureProducer = ClientConfig::new()
-        .set("bootstrap.servers", "localhost:9092")
-        .create()
-        .context("Failed to create Kafka producer")?;
+    let kafka_recorder = RecordingKafkaProducer::default();
+    let kafka_producer: Arc<dyn KafkaProducer> = Arc::new(kafka_recorder.clone());
 
     let http_client = Client::builder().build()?;
 
     let mut config = default_auth_config();
-    config.mfa_activity_topic = String::new();
+    config.mfa_activity_topic = "security.test.mfa".to_string();
     config.required_roles.insert("manager".to_string());
     config.suspicious_webhook_url = Some(webhook_url.clone());
     config.suspicious_webhook_bearer = Some("test-token".to_string());
@@ -204,6 +214,7 @@ async fn axum_smoke_tests_core_routes() -> Result<()> {
     assert!(metrics_text.contains("auth_login_attempts_total"));
     assert!(metrics_text.contains("success"));
 
+    kafka_recorder.fail_times("simulated kafka outage", 2);
     let mfa_user = seed_test_user(&pool, "manager").await?;
     let mfa_secret = generate_totp_secret();
     sqlx::query("UPDATE users SET mfa_secret = $1, mfa_enrolled_at = NOW(), mfa_pending_secret = NULL, mfa_failed_attempts = 0 WHERE id = $2")
@@ -286,6 +297,60 @@ async fn axum_smoke_tests_core_routes() -> Result<()> {
         .body(Body::from(success_body.to_string()))?;
     let success_response = app.clone().oneshot(success_request).await?;
     assert_eq!(success_response.status(), StatusCode::OK);
+
+    let enroll_user = seed_test_user(&pool, "cashier").await?;
+    let enroll_login_body = json!({
+        "email": enroll_user.email.clone(),
+        "password": enroll_user.password.clone(),
+        "tenant_id": enroll_user.tenant_id,
+        "device_fingerprint": "enroll-device"
+    });
+    let enroll_login_request = Request::builder()
+        .method("POST")
+        .uri("/login")
+        .header("content-type", "application/json")
+        .body(Body::from(enroll_login_body.to_string()))?;
+    let enroll_login_response = app.clone().oneshot(enroll_login_request).await?;
+    assert_eq!(enroll_login_response.status(), StatusCode::OK);
+    let enroll_login_bytes = enroll_login_response
+        .into_body()
+        .collect()
+        .await?
+        .to_bytes();
+    let enroll_login_json: Value = serde_json::from_slice(&enroll_login_bytes)?;
+    let access_token = enroll_login_json["access_token"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing access token"))?
+        .to_string();
+    let auth_header = format!("Bearer {}", access_token);
+
+    let enroll_request = Request::builder()
+        .method("POST")
+        .uri("/mfa/enroll")
+        .header("authorization", &auth_header)
+        .body(Body::empty())?;
+    let enroll_response = app.clone().oneshot(enroll_request).await?;
+    assert_eq!(enroll_response.status(), StatusCode::OK);
+    let enroll_bytes = enroll_response.into_body().collect().await?.to_bytes();
+    let enroll_json: Value = serde_json::from_slice(&enroll_bytes)?;
+    let enrollment_secret = enroll_json["secret"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing enrollment secret"))?
+        .to_string();
+    let verify_code = current_totp_code(&enrollment_secret)?;
+
+    let verify_body = json!({ "code": verify_code });
+    let verify_request = Request::builder()
+        .method("POST")
+        .uri("/mfa/verify")
+        .header("authorization", &auth_header)
+        .header("content-type", "application/json")
+        .body(Body::from(verify_body.to_string()))?;
+    let verify_response = app.clone().oneshot(verify_request).await?;
+    assert_eq!(verify_response.status(), StatusCode::OK);
+    let verify_json: Value =
+        serde_json::from_slice(&verify_response.into_body().collect().await?.to_bytes())?;
+    assert_eq!(verify_json["enabled"], Value::from(true));
 
     let jwks_response = app
         .clone()
@@ -417,6 +482,35 @@ async fn axum_smoke_tests_core_routes() -> Result<()> {
     let refresh_response = app.clone().oneshot(refresh_after_logout).await?;
     assert_eq!(refresh_response.status(), StatusCode::UNAUTHORIZED);
 
+    let recorded_events = kafka_recorder.drain();
+    assert!(recorded_events.iter().all(|event| !event.key.is_empty()));
+    let mut primary_actions = Vec::new();
+    let mut dlq_actions = Vec::new();
+    for event in &recorded_events {
+        let value: Value = serde_json::from_str(&event.payload)?;
+        let action = value["action"].as_str().unwrap_or("").to_string();
+        if event.topic == "security.test.mfa.dlq" {
+            dlq_actions.push(action);
+        } else {
+            primary_actions.push(action);
+        }
+    }
+    assert!(primary_actions
+        .iter()
+        .any(|action| action == "mfa.challenge.failed"));
+    assert!(primary_actions
+        .iter()
+        .any(|action| action == "mfa.challenge.missing_code"));
+    assert!(primary_actions
+        .iter()
+        .any(|action| action == "mfa.enrollment.start"));
+    assert!(primary_actions
+        .iter()
+        .any(|action| action == "mfa.enrollment.completed"));
+    assert!(dlq_actions
+        .iter()
+        .any(|action| action == "mfa.challenge.missing_code"));
+
     sqlx::query("DELETE FROM auth_refresh_tokens WHERE user_id = $1")
         .bind(mfa_user.user_id)
         .execute(&pool)
@@ -433,6 +527,19 @@ async fn axum_smoke_tests_core_routes() -> Result<()> {
         .bind(tenant_id)
         .execute(&pool)
         .await?;
+    sqlx::query("DELETE FROM auth_refresh_tokens WHERE user_id = $1")
+        .bind(enroll_user.user_id)
+        .execute(&pool)
+        .await?;
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(enroll_user.user_id)
+        .execute(&pool)
+        .await?;
+    sqlx::query("DELETE FROM tenants WHERE id = $1")
+        .bind(enroll_user.tenant_id)
+        .execute(&pool)
+        .await?;
+
     sqlx::query("DELETE FROM auth_refresh_tokens WHERE user_id = $1")
         .bind(seeded.user_id)
         .execute(&pool)

@@ -26,6 +26,7 @@ use tracing::{debug, info, warn};
 use auth_service::config::load_auth_config;
 use auth_service::metrics::AuthMetrics;
 use auth_service::mfa_handlers::{begin_mfa_enrollment, verify_mfa_enrollment};
+use auth_service::notifications::KafkaProducer;
 use auth_service::tenant_handlers::{
     create_integration_key, create_tenant, list_integration_keys, list_tenants,
     revoke_integration_key,
@@ -85,10 +86,11 @@ async fn main() -> anyhow::Result<()> {
         .or_else(|_| env::var("KAFKA_BROKERS"))
         .unwrap_or_else(|_| "localhost:9092".to_string());
 
-    let kafka_producer: FutureProducer = rdkafka::ClientConfig::new()
+    let kafka_client: FutureProducer = rdkafka::ClientConfig::new()
         .set("bootstrap.servers", &kafka_bootstrap)
         .create()
         .context("Failed to create Kafka producer")?;
+    let kafka_producer: Arc<dyn KafkaProducer> = Arc::new(kafka_client);
 
     let http_client = Client::builder()
         .build()

@@ -27,6 +27,7 @@ pub struct AuthConfig {
     pub bypass_tenants: HashSet<Uuid>,
     pub mfa_issuer: String,
     pub mfa_activity_topic: String,
+    pub mfa_dead_letter_topic: Option<String>,
     pub suspicious_webhook_url: Option<String>,
     pub suspicious_webhook_bearer: Option<String>,
     pub refresh_cookie_name: String,
@@ -88,6 +89,10 @@ pub fn load_auth_config() -> Result<AuthConfig> {
     let mfa_activity_topic = env::var("SECURITY_MFA_ACTIVITY_TOPIC")
         .unwrap_or_else(|_| "security.mfa.activity".to_string());
 
+    let mfa_dead_letter_topic = env::var("SECURITY_MFA_DEAD_LETTER_TOPIC")
+        .ok()
+        .and_then(|value| normalize_optional(&value));
+
     let suspicious_webhook_url = env::var("SECURITY_SUSPICIOUS_WEBHOOK_URL")
         .ok()
         .and_then(|value| normalize_optional(&value));
@@ -114,6 +119,7 @@ pub fn load_auth_config() -> Result<AuthConfig> {
         bypass_tenants,
         mfa_issuer,
         mfa_activity_topic,
+        mfa_dead_letter_topic,
         suspicious_webhook_url,
         suspicious_webhook_bearer,
         refresh_cookie_name,
