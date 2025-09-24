@@ -2,6 +2,7 @@ mod support;
 
 use anyhow::{anyhow, Context, Result};
 use auth_service::metrics::AuthMetrics;
+use auth_service::mfa::generate_totp_secret;
 use auth_service::tenant_handlers::{
     create_integration_key, create_tenant, list_integration_keys, list_tenants,
     revoke_integration_key,
@@ -13,7 +14,7 @@ use axum::body::Body;
 use axum::extract::State;
 use axum::http::{
     header::{COOKIE, SET_COOKIE},
-    Request, StatusCode,
+    HeaderMap, Request, StatusCode,
 };
 use axum::response::Response;
 use axum::routing::{get, post};
@@ -30,7 +31,9 @@ use rsa::RsaPrivateKey;
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::{str, sync::Arc};
-use support::{default_auth_config, seed_test_user, TestDatabase};
+use support::{current_totp_code, default_auth_config, seed_test_user, TestDatabase};
+use tokio::net::TcpListener;
+use tokio::sync::mpsc;
 use tower::util::ServiceExt;
 use uuid::Uuid;
 
@@ -70,6 +73,27 @@ async fn axum_smoke_tests_core_routes() -> Result<()> {
 
     let seeded = seed_test_user(&pool, "admin").await?;
 
+    let (webhook_tx, mut webhook_rx) = mpsc::unbounded_channel::<(HeaderMap, Value)>();
+    let webhook_listener = TcpListener::bind("127.0.0.1:0").await?;
+    let webhook_addr = webhook_listener.local_addr()?;
+    let webhook_router = {
+        let sender = webhook_tx.clone();
+        Router::new().route(
+            "/",
+            post(move |headers: HeaderMap, Json(payload): Json<Value>| {
+                let sender = sender.clone();
+                async move {
+                    let _ = sender.send((headers, payload));
+                    StatusCode::OK
+                }
+            }),
+        )
+    };
+    let _webhook_handle = tokio::spawn(async move {
+        let _ = axum::serve(webhook_listener, webhook_router).await;
+    });
+    let webhook_url = format!("http://{}/", webhook_addr);
+
     let mut rng = OsRng;
     let private_key = RsaPrivateKey::new(&mut rng, 2048)?;
     let private_pem = private_key
@@ -101,7 +125,11 @@ async fn axum_smoke_tests_core_routes() -> Result<()> {
 
     let http_client = Client::builder().build()?;
 
-    let config = default_auth_config();
+    let mut config = default_auth_config();
+    config.mfa_activity_topic = String::new();
+    config.required_roles.insert("manager".to_string());
+    config.suspicious_webhook_url = Some(webhook_url.clone());
+    config.suspicious_webhook_bearer = Some("test-token".to_string());
     let state = AppState {
         db: pool.clone(),
         jwt_verifier: Arc::new(verifier),
@@ -175,6 +203,89 @@ async fn axum_smoke_tests_core_routes() -> Result<()> {
     let metrics_text = str::from_utf8(metrics_body.as_ref())?;
     assert!(metrics_text.contains("auth_login_attempts_total"));
     assert!(metrics_text.contains("success"));
+
+    let mfa_user = seed_test_user(&pool, "manager").await?;
+    let mfa_secret = generate_totp_secret();
+    sqlx::query("UPDATE users SET mfa_secret = $1, mfa_enrolled_at = NOW(), mfa_pending_secret = NULL, mfa_failed_attempts = 0 WHERE id = $2")
+        .bind(&mfa_secret)
+        .bind(mfa_user.user_id)
+        .execute(&pool)
+        .await?;
+
+    let missing_code_body = json!({
+        "email": mfa_user.email.clone(),
+        "password": mfa_user.password.clone(),
+        "tenant_id": mfa_user.tenant_id,
+        "device_fingerprint": "mfa-device"
+    });
+    let missing_code_request = Request::builder()
+        .method("POST")
+        .uri("/login")
+        .header("content-type", "application/json")
+        .header("x-forwarded-for", "203.0.113.10")
+        .body(Body::from(missing_code_body.to_string()))?;
+    let missing_code_response = app.clone().oneshot(missing_code_request).await?;
+    assert_eq!(missing_code_response.status(), StatusCode::UNAUTHORIZED);
+    let missing_bytes = missing_code_response
+        .into_body()
+        .collect()
+        .await?
+        .to_bytes();
+    let missing_json: Value = serde_json::from_slice(&missing_bytes)?;
+    assert_eq!(missing_json["code"], Value::from("MFA_REQUIRED"));
+
+    let invalid_code_body = json!({
+        "email": mfa_user.email.clone(),
+        "password": mfa_user.password.clone(),
+        "tenant_id": mfa_user.tenant_id,
+        "mfa_code": "000000",
+        "device_fingerprint": "mfa-device"
+    });
+    let invalid_code_request = Request::builder()
+        .method("POST")
+        .uri("/login")
+        .header("content-type", "application/json")
+        .header("x-forwarded-for", "203.0.113.10")
+        .body(Body::from(invalid_code_body.to_string()))?;
+    let invalid_code_response = app.clone().oneshot(invalid_code_request).await?;
+    assert_eq!(invalid_code_response.status(), StatusCode::UNAUTHORIZED);
+    let invalid_bytes = invalid_code_response
+        .into_body()
+        .collect()
+        .await?
+        .to_bytes();
+    let invalid_json: Value = serde_json::from_slice(&invalid_bytes)?;
+    assert_eq!(invalid_json["code"], Value::from("MFA_CODE_INVALID"));
+
+    let (webhook_headers, webhook_payload) = webhook_rx
+        .recv()
+        .await
+        .expect("expected webhook notification");
+    assert_eq!(
+        webhook_headers
+            .get("authorization")
+            .and_then(|value| value.to_str().ok()),
+        Some("Bearer test-token")
+    );
+    let webhook_text = webhook_payload["text"].as_str().unwrap_or("");
+    assert!(webhook_text.contains("mfa.challenge.failed"));
+
+    let valid_code = current_totp_code(&mfa_secret)?;
+    let success_body = json!({
+        "email": mfa_user.email.clone(),
+        "password": mfa_user.password.clone(),
+        "tenant_id": mfa_user.tenant_id,
+        "mfa_code": valid_code,
+        "device_fingerprint": "mfa-device"
+    });
+    let success_request = Request::builder()
+        .method("POST")
+        .uri("/login")
+        .header("content-type", "application/json")
+        .header("x-forwarded-for", "203.0.113.10")
+        .body(Body::from(success_body.to_string()))?;
+    let success_response = app.clone().oneshot(success_request).await?;
+    assert_eq!(success_response.status(), StatusCode::OK);
 
     let jwks_response = app
         .clone()
@@ -306,6 +417,22 @@ async fn axum_smoke_tests_core_routes() -> Result<()> {
     let refresh_response = app.clone().oneshot(refresh_after_logout).await?;
     assert_eq!(refresh_response.status(), StatusCode::UNAUTHORIZED);
 
+    sqlx::query("DELETE FROM auth_refresh_tokens WHERE user_id = $1")
+        .bind(mfa_user.user_id)
+        .execute(&pool)
+        .await?;
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(mfa_user.user_id)
+        .execute(&pool)
+        .await?;
+    sqlx::query("DELETE FROM tenants WHERE id = $1")
+        .bind(mfa_user.tenant_id)
+        .execute(&pool)
+        .await?;
+    sqlx::query("DELETE FROM integration_keys WHERE tenant_id = $1")
+        .bind(tenant_id)
+        .execute(&pool)
+        .await?;
     sqlx::query("DELETE FROM auth_refresh_tokens WHERE user_id = $1")
         .bind(seeded.user_id)
         .execute(&pool)

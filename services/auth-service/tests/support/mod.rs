@@ -3,15 +3,26 @@ use std::{collections::HashSet, env, path::PathBuf, time::Duration};
 use anyhow::{Context, Result};
 use argon2::{password_hash::SaltString, Argon2, PasswordHasher};
 use auth_service::config::{AuthConfig, CookieSameSite};
+use data_encoding::BASE32_NOPAD;
 use dirs::cache_dir;
+use hmac::{Hmac, Mac};
 use pg_embed::pg_enums::PgAuthMethod;
 use pg_embed::pg_fetch::{PgFetchSettings, PG_V13};
 use pg_embed::postgres::{PgEmbed, PgSettings};
 use portpicker::pick_unused_port;
 use rand_core::OsRng;
+use sha1::Sha1;
 use sqlx::{postgres::PgPoolOptions, PgPool};
+use std::time::{SystemTime, UNIX_EPOCH};
 use tempfile::{tempdir, TempDir};
 use uuid::Uuid;
+
+#[allow(dead_code)]
+type HmacSha1 = Hmac<Sha1>;
+#[allow(dead_code)]
+const TOTP_PERIOD_SECONDS: u64 = 30;
+#[allow(dead_code)]
+const TOTP_DIGITS: u32 = 6;
 
 pub struct TestDatabase {
     pool: PgPool,
@@ -133,6 +144,36 @@ pub struct SeededUser {
     pub user_id: Uuid,
     pub email: String,
     pub password: String,
+}
+
+#[allow(dead_code)]
+pub fn current_totp_code(secret: &str) -> Result<String> {
+    let secret_bytes = BASE32_NOPAD
+        .decode(secret.trim().to_ascii_uppercase().as_bytes())
+        .context("invalid TOTP secret encoding")?;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system time before UNIX_EPOCH")?
+        .as_secs();
+    let counter = now / TOTP_PERIOD_SECONDS;
+
+    let code = hotp(&secret_bytes, counter);
+    Ok(format!("{:0width$}", code, width = TOTP_DIGITS as usize))
+}
+
+#[allow(dead_code)]
+fn hotp(secret: &[u8], counter: u64) -> u32 {
+    let mut mac = HmacSha1::new_from_slice(secret).expect("HMAC can take key of any size");
+    mac.update(&counter.to_be_bytes());
+    let result = mac.finalize().into_bytes();
+
+    let offset = (result[result.len() - 1] & 0x0f) as usize;
+    let code = ((result[offset] as u32 & 0x7f) << 24)
+        | ((result[offset + 1] as u32) << 16)
+        | ((result[offset + 2] as u32) << 8)
+        | (result[offset + 3] as u32);
+
+    code % 10u32.pow(TOTP_DIGITS)
 }
 
 #[allow(dead_code)]
