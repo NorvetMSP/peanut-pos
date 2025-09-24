@@ -1,4 +1,4 @@
-﻿use jsonwebtoken::DecodingKey;
+use jsonwebtoken::DecodingKey;
 use reqwest::Client;
 use serde::Deserialize;
 
@@ -93,3 +93,102 @@ struct JwkEntry {
     n: Option<String>,
     e: Option<String>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine;
+    use httpmock::prelude::*;
+    use rsa::rand_core::OsRng;
+    use rsa::traits::PublicKeyParts;
+    use rsa::RsaPrivateKey;
+
+    fn sample_components() -> (String, String) {
+        let mut rng = OsRng;
+        let private_key = RsaPrivateKey::new(&mut rng, 2048).expect("key generation");
+        let public_key = private_key.to_public_key();
+        let modulus = URL_SAFE_NO_PAD.encode(public_key.n().to_bytes_be());
+        let exponent = URL_SAFE_NO_PAD.encode(public_key.e().to_bytes_be());
+        (modulus, exponent)
+    }
+
+    #[tokio::test]
+    async fn fetch_parses_valid_response() {
+        let (modulus, exponent) = sample_components();
+        let server = MockServer::start();
+        let body = serde_json::json!({
+            "keys": [
+                {
+                    "kid": "key-1",
+                    "kty": "RSA",
+                    "alg": "RS256",
+                    "n": modulus,
+                    "e": exponent
+                }
+            ]
+        });
+
+        let _mock = server.mock(|when, then| {
+            when.method(GET).path("/jwks");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(body.to_string());
+        });
+
+        let fetcher = JwksFetcher::new(format!("{}/jwks", server.base_url()));
+        let keys = fetcher.fetch().await.expect("fetch succeeds");
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].0, "key-1");
+    }
+
+    #[tokio::test]
+    async fn fetch_rejects_error_status() {
+        let server = MockServer::start();
+        let _mock = server.mock(|when, then| {
+            when.method(GET).path("/jwks");
+            then.status(502);
+        });
+
+        let fetcher = JwksFetcher::new(format!("{}/jwks", server.base_url()));
+        let err = match fetcher.fetch().await {
+            Ok(_) => panic!("fetch should fail"),
+            Err(err) => err,
+        };
+        match err {
+            AuthError::JwksFetch(message) => assert!(message.contains("502")),
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_requires_kid() {
+        let (modulus, exponent) = sample_components();
+        let server = MockServer::start();
+        let body = serde_json::json!({
+            "keys": [
+                {
+                    "kty": "RSA",
+                    "alg": "RS256",
+                    "n": modulus,
+                    "e": exponent
+                }
+            ]
+        });
+
+        let _mock = server.mock(|when, then| {
+            when.method(GET).path("/jwks");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(body.to_string());
+        });
+
+        let fetcher = JwksFetcher::new(format!("{}/jwks", server.base_url()));
+        let err = match fetcher.fetch().await {
+            Ok(_) => panic!("fetch should fail"),
+            Err(err) => err,
+        };
+        assert!(matches!(err, AuthError::JwksMissingKid));
+    }
+}
+
