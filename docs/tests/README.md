@@ -76,7 +76,3 @@ When adding new tests:
 - Auth service: add focused handler/unit integration cases for lockout boundaries, role-based access, and webhook failure retries (building on the shared fixtures).
 - Compose-level end-to-end suite that wires multiple services together (auth-service + API gateway) to validate routing, authn/authz headers, and telemetry.
 - Non-auth services: expand smoke coverage for inventory/order/payment services once their fixtures mirror the auth harness (database seeds, Kafka stubs, etc.).
-
-
-
-
