@@ -16,10 +16,10 @@ mod support;
 use support::{seed_test_user, SeededUser, TestDatabase};
 
 const DEV_PRIVATE_KEY: &str =
-    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../jwt-dev.pem"));
+    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/jwt-dev.pem"));
 const DEV_PUBLIC_KEY: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../jwt-dev.pub.pem"
+    "/tests/fixtures/jwt-dev.pub.pem"
 ));
 
 fn log_step(message: impl AsRef<str>) {
