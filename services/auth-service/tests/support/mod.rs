@@ -1,10 +1,8 @@
-use std::{
-    collections::{HashSet, VecDeque},
-    env,
-    path::PathBuf,
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::collections::{HashSet, VecDeque};
+use std::env;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
 use argon2::{password_hash::SaltString, Argon2, PasswordHasher};
@@ -15,73 +13,94 @@ use data_encoding::BASE32_NOPAD;
 use dirs::cache_dir;
 use hmac::{Hmac, Mac};
 use pg_embed::pg_enums::PgAuthMethod;
+use pg_embed::pg_errors::{PgEmbedError, PgEmbedErrorType};
 use pg_embed::pg_fetch::{PgFetchSettings, PG_V13};
 use pg_embed::postgres::{PgEmbed, PgSettings};
 use portpicker::pick_unused_port;
 use rand_core::OsRng;
 use sha1::Sha1;
 use sqlx::{postgres::PgPoolOptions, PgPool};
-use std::time::{SystemTime, UNIX_EPOCH};
 use tempfile::{tempdir, TempDir};
 use uuid::Uuid;
 
 type HmacSha1 = Hmac<Sha1>;
 const TOTP_PERIOD_SECONDS: u64 = 30;
 const TOTP_DIGITS: u32 = 6;
+const DEFAULT_DOCKER_DATABASE_URL: &str = "postgres://novapos:novapos@localhost:5432/novapos";
 
 pub struct TestDatabase {
     pool: PgPool,
     embedded: Option<EmbeddedPg>,
+    #[allow(dead_code)]
+    database_url: String,
 }
 
 impl TestDatabase {
     pub async fn setup() -> Result<Option<Self>> {
-        if env::var("AUTH_TEST_DATABASE_URL").is_err() && !env_flag_enabled("AUTH_TEST_USE_EMBED") {
-            eprintln!(
-                "Skipping auth-service integration tests: set AUTH_TEST_DATABASE_URL or AUTH_TEST_USE_EMBED=1 to run them.",
-            );
-            return Ok(None);
-        }
-
+        let database_url = determine_database_url()?;
         let mut embedded = None;
-        let database_url = if let Ok(url) = env::var("AUTH_TEST_DATABASE_URL") {
+
+        let database_url = if let DatabaseSource::Provided(url) = database_url {
             url
         } else {
             if env_flag_enabled("AUTH_TEST_EMBED_CLEAR_CACHE") {
-                if let Some(cache_dir) = cache_dir() {
-                    let _ = std::fs::remove_dir_all(cache_dir.join("pg-embed"));
-                }
+                clear_pg_embed_cache();
             }
 
-            let temp = tempdir()?;
             let port = pick_unused_port()
                 .context("failed to find available port for embedded Postgres")?;
 
-            let mut fetch_settings = PgFetchSettings::default();
-            fetch_settings.version = PG_V13;
+            let mut retried_after_cache_clear = false;
 
-            let mut pg = PgEmbed::new(
-                PgSettings {
-                    database_dir: temp.path().to_path_buf(),
-                    port,
-                    user: "postgres".to_string(),
-                    password: "postgres".to_string(),
-                    auth_method: PgAuthMethod::Plain,
-                    persistent: false,
-                    timeout: Some(Duration::from_secs(30)),
-                    migration_dir: None,
-                },
-                fetch_settings,
-            )
-            .await?;
+            let (pg, temp_dir, uri) = loop {
+                let temp = tempdir()?;
 
-            pg.setup().await?;
-            pg.start_db().await?;
+                let mut fetch_settings = PgFetchSettings::default();
+                fetch_settings.version = PG_V13;
 
-            let uri = format!("{}/postgres", pg.db_uri);
+                let mut pg = PgEmbed::new(
+                    PgSettings {
+                        database_dir: temp.path().to_path_buf(),
+                        port,
+                        user: "postgres".to_string(),
+                        password: "postgres".to_string(),
+                        auth_method: PgAuthMethod::Plain,
+                        persistent: false,
+                        timeout: Some(Duration::from_secs(30)),
+                        migration_dir: None,
+                    },
+                    fetch_settings,
+                )
+                .await?;
+
+                match pg.setup().await {
+                    Ok(()) => {
+                        pg.start_db().await.map_err(anyhow::Error::from)?;
+                        let uri = format!("{}/postgres", pg.db_uri);
+                        break (pg, temp, uri);
+                    }
+                    Err(err) => {
+                        if should_retry_pg_embed(&err) {
+                            if !retried_after_cache_clear {
+                                retried_after_cache_clear = true;
+                                clear_pg_embed_cache();
+                                continue;
+                            } else {
+                                let message = err.to_string();
+                                eprintln!(
+                                    "Skipping auth-service integration tests: {message}. Set AUTH_TEST_DATABASE_URL to reuse an existing Postgres instance."
+                                );
+                                return Ok(None);
+                            }
+                        }
+                        return Err(err.into());
+                    }
+                }
+            };
+
             embedded = Some(EmbeddedPg {
                 pg,
-                _temp_dir: temp,
+                _temp_dir: temp_dir,
             });
             uri
         };
@@ -95,11 +114,20 @@ impl TestDatabase {
             run_migrations(&pool).await?;
         }
 
-        Ok(Some(Self { pool, embedded }))
+        Ok(Some(Self {
+            pool,
+            embedded,
+            database_url,
+        }))
     }
 
     pub fn pool_clone(&self) -> PgPool {
         self.pool.clone()
+    }
+
+    #[allow(dead_code)]
+    pub fn url(&self) -> &str {
+        &self.database_url
     }
 
     pub async fn teardown(self) -> Result<()> {
@@ -108,6 +136,30 @@ impl TestDatabase {
         }
         Ok(())
     }
+}
+
+enum DatabaseSource {
+    Provided(String),
+    Embedded,
+}
+
+fn determine_database_url() -> Result<DatabaseSource> {
+    if let Ok(url) = env::var("AUTH_TEST_DATABASE_URL") {
+        return Ok(DatabaseSource::Provided(url));
+    }
+
+    if env_flag_enabled("AUTH_TEST_USE_EMBED") {
+        return Ok(DatabaseSource::Embedded);
+    }
+
+    eprintln!(
+        "Using default Docker Postgres connection string: {}",
+        DEFAULT_DOCKER_DATABASE_URL
+    );
+    env::set_var("AUTH_TEST_DATABASE_URL", DEFAULT_DOCKER_DATABASE_URL);
+    Ok(DatabaseSource::Provided(
+        DEFAULT_DOCKER_DATABASE_URL.to_string(),
+    ))
 }
 
 struct EmbeddedPg {
@@ -119,6 +171,20 @@ impl EmbeddedPg {
     async fn shutdown(mut self) {
         let _ = self.pg.stop_db().await;
     }
+}
+
+fn clear_pg_embed_cache() {
+    if let Some(cache_dir) = cache_dir() {
+        let _ = std::fs::remove_dir_all(cache_dir.join("pg-embed"));
+    }
+}
+
+fn should_retry_pg_embed(err: &PgEmbedError) -> bool {
+    if err.error_type != PgEmbedErrorType::ReadFileError {
+        return false;
+    }
+
+    err.to_string().contains("InvalidArchive")
 }
 
 pub async fn run_migrations(pool: &PgPool) -> Result<()> {

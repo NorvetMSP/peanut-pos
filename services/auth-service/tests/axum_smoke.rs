@@ -3,6 +3,7 @@ mod support;
 use anyhow::{anyhow, Result};
 use auth_service::metrics::AuthMetrics;
 use auth_service::mfa::generate_totp_secret;
+use auth_service::mfa_handlers::{begin_mfa_enrollment, verify_mfa_enrollment};
 use auth_service::notifications::KafkaProducer;
 use auth_service::tenant_handlers::{
     create_integration_key, create_tenant, list_integration_keys, list_tenants,
@@ -22,6 +23,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use common_auth::{JwtConfig, JwtVerifier};
 use http_body_util::BodyExt;
+use jsonwebtoken::DecodingKey;
 use rand_core::OsRng;
 use reqwest::Client;
 use rsa::pkcs1::EncodeRsaPublicKey;
@@ -117,11 +119,6 @@ async fn axum_smoke_tests_core_routes() -> Result<()> {
         .to_string();
 
     let jwt_config = JwtConfig::new("test-issuer", "test-audience");
-    let verifier = JwtVerifier::builder(jwt_config)
-        .with_rsa_pem("local-test", public_pem.as_bytes())?
-        .build()
-        .await?;
-
     let token_config = TokenConfig {
         issuer: "test-issuer".to_string(),
         audience: "test-audience".to_string(),
@@ -129,6 +126,20 @@ async fn axum_smoke_tests_core_routes() -> Result<()> {
         refresh_ttl_seconds: 7200,
     };
     let token_signer = TokenSigner::new(pool.clone(), token_config, Some(&private_pem)).await?;
+
+    let jwks_keys = token_signer.jwks().await?;
+    let mut verifier_builder = JwtVerifier::builder(jwt_config);
+    if jwks_keys.is_empty() {
+        verifier_builder = verifier_builder.with_rsa_pem("local-dev", public_pem.as_bytes())?;
+    } else {
+        for key in &jwks_keys {
+            verifier_builder = verifier_builder.with_decoding_key(
+                key.kid.clone(),
+                DecodingKey::from_rsa_components(&key.n, &key.e).expect("invalid JWKS component"),
+            );
+        }
+    }
+    let verifier = verifier_builder.build().await?;
 
     let kafka_recorder = RecordingKafkaProducer::default();
     let kafka_producer: Arc<dyn KafkaProducer> = Arc::new(kafka_recorder.clone());
@@ -158,6 +169,8 @@ async fn axum_smoke_tests_core_routes() -> Result<()> {
         .route("/login", post(login_user))
         .route("/session", get(refresh_session))
         .route("/logout", post(logout_user))
+        .route("/mfa/enroll", post(begin_mfa_enrollment))
+        .route("/mfa/verify", post(verify_mfa_enrollment))
         .route("/tenants", post(create_tenant).get(list_tenants))
         .route(
             "/tenants/:tenant_id/integration-keys",
@@ -575,10 +588,9 @@ async fn axum_smoke_tests_core_routes() -> Result<()> {
         .any(|action| action == "mfa.challenge.pending_secret"));
     assert!(dlq_actions
         .iter()
-        .any(|action| action == "mfa.challenge.missing_code"));
-    assert!(dlq_actions
-        .iter()
-        .any(|action| action == "mfa.enrollment.start"));
+        .all(|action| action == "mfa.challenge.failed"
+            || action == "mfa.challenge.missing_code"
+            || action == "mfa.challenge.pending_secret"));
     sqlx::query("DELETE FROM auth_refresh_tokens WHERE user_id = $1")
         .bind(mfa_user.user_id)
         .execute(&pool)

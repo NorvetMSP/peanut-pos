@@ -598,10 +598,34 @@ pub async fn login_user(
     let requires_mfa = state.config.should_enforce_for(
         &auth_data.role,
         auth_data.tenant_id,
-        auth_data.mfa_secret.is_some(),
+        auth_data.mfa_secret.is_some() || auth_data.mfa_pending_secret.is_some(),
     );
 
     if requires_mfa {
+        if auth_data.mfa_pending_secret.is_some() {
+            record_mfa_event(
+                &state,
+                "mfa.challenge.pending_secret",
+                "info",
+                &auth_data,
+                &metadata,
+                trace_id,
+                Some(
+                    json!({
+                        "reason": "pending_secret",
+                        "ip": metadata.ip.as_deref(),
+                        "user_agent": metadata.user_agent.as_deref(),
+                        "device": metadata.device_fingerprint.as_deref(),
+                    })
+                    .to_string(),
+                ),
+                false,
+            )
+            .await;
+            state.record_login_metric("mfa_required");
+            return Err(AuthError::mfa_required());
+        }
+
         let secret = match auth_data.mfa_secret.as_deref() {
             Some(secret) => secret,
             None => {
@@ -624,32 +648,10 @@ pub async fn login_user(
                     false,
                 )
                 .await;
+                state.record_login_metric("mfa_not_enrolled");
                 return Err(AuthError::mfa_not_enrolled());
             }
         };
-
-        if auth_data.mfa_pending_secret.is_some() {
-            record_mfa_event(
-                &state,
-                "mfa.challenge.pending_secret",
-                "info",
-                &auth_data,
-                &metadata,
-                trace_id,
-                Some(
-                    json!({
-                        "reason": "pending_secret",
-                        "ip": metadata.ip.as_deref(),
-                        "user_agent": metadata.user_agent.as_deref(),
-                        "device": metadata.device_fingerprint.as_deref(),
-                    })
-                    .to_string(),
-                ),
-                false,
-            )
-            .await;
-        }
-
         let code = match mfa_code
             .as_deref()
             .and_then(|value| normalize_mfa_code(value))

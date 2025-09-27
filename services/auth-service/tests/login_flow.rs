@@ -1,3 +1,16 @@
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires embedded Postgres binary download"]
+async fn with_embedded_postgres() -> Result<()> {
+    let Some(db) = TestDatabase::setup().await? else {
+        return Ok(());
+    };
+
+    let pool = db.pool_clone();
+    sqlx::query("SELECT 1").execute(&pool).await?;
+
+    db.teardown().await?;
+    Ok(())
+}
 mod support;
 use std::sync::Arc;
 

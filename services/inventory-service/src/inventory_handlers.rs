@@ -98,7 +98,10 @@ mod tests {
     use super::*;
     use axum::extract::State;
     use axum::http::{HeaderMap, StatusCode};
+    use chrono::Utc;
+    use common_auth::{Claims, JwtConfig, JwtVerifier};
     use sqlx::postgres::PgPoolOptions;
+    use std::sync::Arc;
 
     #[test]
     fn list_inventory_query_uses_parameter_placeholder() {
@@ -113,7 +116,29 @@ mod tests {
         let pool = PgPoolOptions::new()
             .connect_lazy("postgres://postgres:postgres@localhost:5432/inventory_tests")
             .expect("should build lazy postgres pool");
-        let result = list_inventory(State(AppState { db: pool }), HeaderMap::new()).await;
+        let verifier = Arc::new(JwtVerifier::new(JwtConfig::new("issuer", "audience")));
+        let state = AppState {
+            db: pool,
+            jwt_verifier: verifier,
+        };
+
+        let tenant_id = Uuid::new_v4();
+        let claims = Claims {
+            subject: Uuid::new_v4(),
+            tenant_id,
+            roles: vec!["admin".to_string()],
+            expires_at: Utc::now() + chrono::Duration::hours(1),
+            issued_at: Some(Utc::now()),
+            issuer: "issuer".to_string(),
+            audience: vec!["audience".to_string()],
+            raw: serde_json::json!({}),
+        };
+        let auth = AuthContext {
+            claims,
+            token: "test-token".into(),
+        };
+
+        let result = list_inventory(State(state), auth, HeaderMap::new()).await;
         let (status, _) = result.expect_err("missing header should fail");
         assert_eq!(status, StatusCode::BAD_REQUEST);
     }
