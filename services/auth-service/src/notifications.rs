@@ -1,10 +1,29 @@
 use anyhow::{anyhow, Result};
+use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use rdkafka::producer::{FutureProducer, FutureRecord};
 use reqwest::Client;
 use serde::Serialize;
 use std::time::Duration;
 use uuid::Uuid;
+
+#[async_trait]
+pub trait KafkaProducer: Send + Sync {
+    async fn send(&self, topic: &str, key: &str, payload: String) -> Result<()>;
+}
+
+#[async_trait]
+impl KafkaProducer for FutureProducer {
+    async fn send(&self, topic: &str, key: &str, payload: String) -> Result<()> {
+        self.send(
+            FutureRecord::to(topic).payload(&payload).key(key),
+            Duration::from_secs(0),
+        )
+        .await
+        .map_err(|(err, _)| anyhow!("Failed to publish MFA activity: {err}"))?;
+        Ok(())
+    }
+}
 
 #[derive(Debug, Serialize)]
 pub struct MfaActivityEvent {
@@ -30,7 +49,7 @@ pub struct SuspiciousLoginPayload {
 }
 
 pub async fn publish_mfa_activity(
-    producer: &FutureProducer,
+    producer: &dyn KafkaProducer,
     topic: &str,
     event: &MfaActivityEvent,
 ) -> Result<()> {
@@ -40,14 +59,7 @@ pub async fn publish_mfa_activity(
 
     let payload = serde_json::to_string(event)?;
     let key = event.tenant_id.to_string();
-    producer
-        .send(
-            FutureRecord::to(topic).payload(&payload).key(&key),
-            Duration::from_secs(0),
-        )
-        .await
-        .map_err(|(err, _)| anyhow!("Failed to publish MFA activity: {err}"))?;
-    Ok(())
+    producer.send(topic, &key, payload).await
 }
 
 pub async fn post_suspicious_webhook(

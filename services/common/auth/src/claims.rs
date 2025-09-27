@@ -99,3 +99,80 @@ impl TryFrom<serde_json::Value> for Claims {
         Ok(claims)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use uuid::Uuid;
+
+    #[test]
+    fn converts_valid_claims_and_preserves_raw() {
+        let subject = Uuid::new_v4();
+        let tenant = Uuid::new_v4();
+        let exp = 1_700_000_000i64;
+        let iat = exp - 60;
+        let json = json!({
+            "sub": subject.to_string(),
+            "tid": tenant.to_string(),
+            "roles": ["admin", "user"],
+            "exp": exp,
+            "iat": iat,
+            "iss": "test-issuer",
+            "aud": "test-audience"
+        });
+
+        let claims = Claims::try_from(json.clone()).expect("claims to parse");
+        assert_eq!(claims.subject, subject);
+        assert_eq!(claims.tenant_id, tenant);
+        assert_eq!(claims.expires_at.timestamp(), exp);
+        assert_eq!(claims.issued_at.expect("iat").timestamp(), iat);
+        assert_eq!(claims.issuer, "test-issuer");
+        assert_eq!(claims.audience, vec!["test-audience".to_string()]);
+        assert!(claims.has_role("admin"));
+        assert_eq!(claims.raw, json);
+    }
+
+    #[test]
+    fn converts_array_audience() {
+        let subject = Uuid::new_v4();
+        let tenant = Uuid::new_v4();
+        let exp = 1_700_000_001i64;
+        let json = json!({
+            "sub": subject.to_string(),
+            "tid": tenant.to_string(),
+            "roles": [],
+            "exp": exp,
+            "iss": "issuer",
+            "aud": ["aud-a", "aud-b"]
+        });
+
+        let claims = Claims::try_from(json).expect("claims to parse");
+        assert_eq!(
+            claims.audience,
+            vec!["aud-a".to_string(), "aud-b".to_string()]
+        );
+        assert!(claims.issued_at.is_none());
+    }
+
+    #[test]
+    fn rejects_invalid_subject() {
+        let tenant = Uuid::new_v4();
+        let json = json!({
+            "sub": "not-a-uuid",
+            "tid": tenant.to_string(),
+            "exp": 1_700_000_000i64,
+            "iss": "issuer",
+            "aud": "aud"
+        });
+
+        let err = Claims::try_from(json).expect_err("claims should fail");
+        match err {
+            AuthError::InvalidClaim(field, value) => {
+                assert_eq!(field, "sub");
+                assert_eq!(value, "not-a-uuid");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+}

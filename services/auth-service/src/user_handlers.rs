@@ -142,7 +142,7 @@ pub struct NewUser {
     pub role: String,
 }
 
-#[derive(Debug, Serialize, FromRow)]
+#[derive(Debug, Serialize, Deserialize, FromRow)]
 pub struct User {
     pub id: Uuid,
     pub tenant_id: Uuid,
@@ -598,10 +598,34 @@ pub async fn login_user(
     let requires_mfa = state.config.should_enforce_for(
         &auth_data.role,
         auth_data.tenant_id,
-        auth_data.mfa_secret.is_some(),
+        auth_data.mfa_secret.is_some() || auth_data.mfa_pending_secret.is_some(),
     );
 
     if requires_mfa {
+        if auth_data.mfa_pending_secret.is_some() {
+            record_mfa_event(
+                &state,
+                "mfa.challenge.pending_secret",
+                "info",
+                &auth_data,
+                &metadata,
+                trace_id,
+                Some(
+                    json!({
+                        "reason": "pending_secret",
+                        "ip": metadata.ip.as_deref(),
+                        "user_agent": metadata.user_agent.as_deref(),
+                        "device": metadata.device_fingerprint.as_deref(),
+                    })
+                    .to_string(),
+                ),
+                false,
+            )
+            .await;
+            state.record_login_metric("mfa_required");
+            return Err(AuthError::mfa_required());
+        }
+
         let secret = match auth_data.mfa_secret.as_deref() {
             Some(secret) => secret,
             None => {
@@ -624,32 +648,10 @@ pub async fn login_user(
                     false,
                 )
                 .await;
+                state.record_login_metric("mfa_not_enrolled");
                 return Err(AuthError::mfa_not_enrolled());
             }
         };
-
-        if auth_data.mfa_pending_secret.is_some() {
-            record_mfa_event(
-                &state,
-                "mfa.challenge.pending_secret",
-                "info",
-                &auth_data,
-                &metadata,
-                trace_id,
-                Some(
-                    json!({
-                        "reason": "pending_secret",
-                        "ip": metadata.ip.as_deref(),
-                        "user_agent": metadata.user_agent.as_deref(),
-                        "device": metadata.device_fingerprint.as_deref(),
-                    })
-                    .to_string(),
-                ),
-                false,
-            )
-            .await;
-        }
-
         let code = match mfa_code
             .as_deref()
             .and_then(|value| normalize_mfa_code(value))
@@ -1028,4 +1030,142 @@ fn hash_password(password: &str) -> Result<String, (StatusCode, String)> {
                 format!("Failed to hash password: {err}"),
             )
         })
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use argon2::{password_hash::PasswordHash, Argon2};
+    use axum::http::{header::COOKIE, HeaderMap, HeaderValue};
+    use std::collections::HashSet;
+
+    use crate::config::CookieSameSite;
+
+    fn test_config() -> AuthConfig {
+        AuthConfig {
+            require_mfa: false,
+            required_roles: HashSet::new(),
+            bypass_tenants: HashSet::new(),
+            mfa_issuer: "NovaPOS".to_string(),
+            mfa_activity_topic: "security.mfa.activity".to_string(),
+            mfa_dead_letter_topic: None,
+            suspicious_webhook_url: None,
+            suspicious_webhook_bearer: None,
+            refresh_cookie_name: "novapos_refresh".to_string(),
+            refresh_cookie_domain: Some("example.com".to_string()),
+            refresh_cookie_secure: true,
+            refresh_cookie_same_site: CookieSameSite::Strict,
+        }
+    }
+
+    #[test]
+    fn build_refresh_cookie_sets_expected_attributes() {
+        let config = test_config();
+        let cookie = build_refresh_cookie(&config, "token123", 3600);
+
+        assert!(cookie.contains("novapos_refresh=token123"));
+        assert!(cookie.contains("Max-Age=3600"));
+        assert!(cookie.contains("Expires="));
+        assert!(cookie.contains("Domain=example.com"));
+        assert!(cookie.contains("SameSite=Strict"));
+        assert!(cookie.contains("Secure"));
+    }
+
+    #[test]
+    fn build_refresh_cookie_handles_negative_max_age() {
+        let mut config = test_config();
+        config.refresh_cookie_domain = None;
+        config.refresh_cookie_secure = false;
+
+        let cookie = build_refresh_cookie(&config, "short", -10);
+        assert!(cookie.contains("Max-Age=0"));
+        assert!(!cookie.contains("Expires="));
+        assert!(!cookie.contains("Domain="));
+        assert!(!cookie.contains("Secure"));
+    }
+
+    #[test]
+    fn clear_refresh_cookie_produces_expired_cookie() {
+        let config = test_config();
+        let cookie = clear_refresh_cookie(&config);
+        assert!(cookie.contains("novapos_refresh="));
+        assert!(cookie.contains("Max-Age=0"));
+        assert!(cookie.contains("Expires=Thu, 01 Jan 1970 00:00:00 GMT"));
+        assert!(cookie.contains("SameSite=Strict"));
+        assert!(cookie.contains("Secure"));
+    }
+
+    #[test]
+    fn extract_refresh_cookie_reads_value() {
+        let config = test_config();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            COOKIE,
+            HeaderValue::from_static("foo=bar; novapos_refresh=mytoken; other=value"),
+        );
+
+        let value = extract_refresh_cookie(&headers, &config);
+        assert_eq!(value.as_deref(), Some("mytoken"));
+    }
+
+    #[test]
+    fn extract_refresh_cookie_handles_missing_header() {
+        let config = test_config();
+        let headers = HeaderMap::new();
+        assert!(extract_refresh_cookie(&headers, &config).is_none());
+    }
+
+    #[test]
+    fn extract_tenant_id_parses_header() {
+        let mut headers = HeaderMap::new();
+        let tenant = Uuid::new_v4();
+        headers.insert(
+            "X-Tenant-ID",
+            HeaderValue::from_str(&tenant.to_string()).expect("tenant header"),
+        );
+
+        let result = extract_tenant_id(&headers).expect("tenant id");
+        assert_eq!(result, tenant);
+    }
+
+    #[test]
+    fn extract_tenant_id_rejects_invalid_value() {
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Tenant-ID", HeaderValue::from_static("not-a-uuid"));
+
+        let err = extract_tenant_id(&headers).expect_err("should fail");
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(err.1.contains("Invalid"));
+    }
+
+    #[test]
+    fn validate_role_accepts_allowed_roles() {
+        for role in ALLOWED_ROLES {
+            validate_role(role).expect("role allowed");
+        }
+    }
+
+    #[test]
+    fn validate_role_rejects_unknown_role() {
+        let err = validate_role("guest").expect_err("reject guest");
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(err.1.contains("Unsupported role"));
+    }
+
+    #[test]
+    fn hash_password_rejects_blank_passwords() {
+        let err = hash_password("   ").expect_err("reject blank");
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn hash_password_generates_verifiable_hash() {
+        let password = "CorrectHorseBatteryStaple!";
+        let hashed = hash_password(password).expect("hash");
+        assert_ne!(hashed, password);
+
+        let parsed = PasswordHash::new(&hashed).expect("parse hash");
+        assert!(Argon2::default()
+            .verify_password(password.as_bytes(), &parsed)
+            .is_ok());
+    }
 }

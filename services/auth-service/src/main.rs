@@ -1,6 +1,7 @@
 use anyhow::Context;
+use auth_service::AppState;
 use axum::{
-    extract::{FromRef, State},
+    extract::State,
     http::{
         header::{ACCEPT, CONTENT_TYPE},
         HeaderName, HeaderValue, Method, StatusCode,
@@ -22,100 +23,18 @@ use tokio::{
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tracing::{debug, info, warn};
 
-use config::{load_auth_config, AuthConfig};
-use mfa_handlers::{begin_mfa_enrollment, verify_mfa_enrollment};
-
-mod config;
-mod metrics;
-mod mfa;
-mod mfa_handlers;
-mod notifications;
-mod tenant_handlers;
-mod tokens;
-mod user_handlers;
-
-use metrics::AuthMetrics;
-use notifications::{
-    post_suspicious_webhook, publish_mfa_activity, MfaActivityEvent, SuspiciousLoginPayload,
-};
-use tenant_handlers::{
+use auth_service::config::load_auth_config;
+use auth_service::metrics::AuthMetrics;
+use auth_service::mfa_handlers::{begin_mfa_enrollment, verify_mfa_enrollment};
+use auth_service::notifications::KafkaProducer;
+use auth_service::tenant_handlers::{
     create_integration_key, create_tenant, list_integration_keys, list_tenants,
     revoke_integration_key,
 };
-use tokens::{JwkKey, TokenConfig, TokenSigner};
-use user_handlers::{
+use auth_service::tokens::{JwkKey, TokenConfig, TokenSigner};
+use auth_service::user_handlers::{
     create_user, list_roles, list_users, login_user, logout_user, refresh_session,
 };
-
-/// Shared application state
-#[derive(Clone)]
-pub struct AppState {
-    pub db: PgPool,
-    pub jwt_verifier: Arc<JwtVerifier>,
-    pub token_signer: Arc<TokenSigner>,
-    pub config: Arc<AuthConfig>,
-    pub kafka_producer: FutureProducer,
-    pub http_client: Client,
-    pub metrics: Arc<AuthMetrics>,
-}
-
-impl FromRef<AppState> for Arc<JwtVerifier> {
-    fn from_ref(state: &AppState) -> Self {
-        state.jwt_verifier.clone()
-    }
-}
-
-impl FromRef<AppState> for Arc<TokenSigner> {
-    fn from_ref(state: &AppState) -> Self {
-        state.token_signer.clone()
-    }
-}
-
-impl FromRef<AppState> for Arc<AuthConfig> {
-    fn from_ref(state: &AppState) -> Self {
-        state.config.clone()
-    }
-}
-
-impl AppState {
-    pub fn record_login_metric(&self, outcome: &str) {
-        self.metrics.login_attempt(outcome);
-    }
-
-    pub fn record_mfa_metric(&self, event: &str) {
-        self.metrics.mfa_event(event);
-    }
-
-    pub async fn emit_mfa_activity(
-        &self,
-        event: MfaActivityEvent,
-        webhook_message: Option<String>,
-    ) {
-        if let Err(err) = publish_mfa_activity(
-            &self.kafka_producer,
-            &self.config.mfa_activity_topic,
-            &event,
-        )
-        .await
-        {
-            warn!(?err, tenant_id = %event.tenant_id, trace_id = %event.trace_id, "Failed to publish MFA activity");
-        }
-
-        if let Some(message) = webhook_message {
-            if let Some(url) = &self.config.suspicious_webhook_url {
-                if !url.is_empty() {
-                    let bearer = self.config.suspicious_webhook_bearer.as_deref();
-                    let payload = SuspiciousLoginPayload { text: message };
-                    if let Err(err) =
-                        post_suspicious_webhook(&self.http_client, url, bearer, &payload).await
-                    {
-                        warn!(?err, trace_id = %event.trace_id, "Failed to post suspicious login webhook");
-                    }
-                }
-            }
-        }
-    }
-}
 
 async fn health() -> &'static str {
     "ok"
@@ -167,10 +86,11 @@ async fn main() -> anyhow::Result<()> {
         .or_else(|_| env::var("KAFKA_BROKERS"))
         .unwrap_or_else(|_| "localhost:9092".to_string());
 
-    let kafka_producer: FutureProducer = rdkafka::ClientConfig::new()
+    let kafka_client: FutureProducer = rdkafka::ClientConfig::new()
         .set("bootstrap.servers", &kafka_bootstrap)
         .create()
         .context("Failed to create Kafka producer")?;
+    let kafka_producer: Arc<dyn KafkaProducer> = Arc::new(kafka_client);
 
     let http_client = Client::builder()
         .build()

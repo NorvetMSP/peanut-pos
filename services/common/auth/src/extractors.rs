@@ -65,3 +65,30 @@ fn parse_bearer(value: &axum::http::HeaderValue) -> AuthResult<String> {
 
     Ok(token.to_owned())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::HeaderValue;
+
+    #[test]
+    fn parse_bearer_accepts_valid_token() {
+        let header = HeaderValue::from_static("Bearer abc.def.ghi");
+        let token = parse_bearer(&header).expect("token");
+        assert_eq!(token, "abc.def.ghi");
+    }
+
+    #[test]
+    fn parse_bearer_rejects_wrong_scheme() {
+        let header = HeaderValue::from_static("Basic credentials");
+        let err = parse_bearer(&header).expect_err("should reject");
+        assert!(matches!(err, AuthError::InvalidAuthorization));
+    }
+
+    #[test]
+    fn parse_bearer_rejects_empty_value() {
+        let header = HeaderValue::from_static("Bearer    ");
+        let err = parse_bearer(&header).expect_err("should reject empty token");
+        assert!(matches!(err, AuthError::InvalidAuthorization));
+    }
+}

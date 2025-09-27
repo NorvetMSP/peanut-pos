@@ -1,4 +1,4 @@
-﻿[package]
+[package]
 name = "common-auth"
 version = "0.1.0"
 edition = "2021"
@@ -19,3 +19,9 @@ thiserror = "1"
 tower = "0.4"
 tracing = "0.1"
 uuid = { version = "1", features = ["serde", "v4"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
+httpmock = "0.7"
+rsa = { version = "0.9", features = ["pem"] }
+base64 = "0.22"
