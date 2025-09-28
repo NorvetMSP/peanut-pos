@@ -105,6 +105,24 @@ struct InventoryReservationItemPayload {
     quantity: i32,
 }
 
+#[allow(dead_code)]
+#[derive(sqlx::FromRow)]
+struct OrderStatusSnapshot {
+    status: String,
+    payment_method: String,
+    customer_id: Option<Uuid>,
+    offline: bool,
+    total: Option<f64>,
+}
+
+#[derive(sqlx::FromRow)]
+struct OrderItemFinancialRow {
+    product_id: Uuid,
+    quantity: i32,
+    unit_price: f64,
+    line_total: f64,
+}
+
 #[derive(Serialize)]
 struct InventoryReservationRequestPayload {
     order_id: Uuid,
@@ -598,11 +616,11 @@ pub async fn void_order(
         .filter(|value| !value.is_empty())
         .map(|value| value.to_string());
 
-    let existing = sqlx::query!(
+    let existing = sqlx::query_as::<_, OrderStatusSnapshot>(
         "SELECT status, payment_method, customer_id, offline, total::FLOAT8 AS total FROM orders WHERE id = $1 AND tenant_id = $2",
-        order_id,
-        tenant_id
     )
+    .bind(order_id)
+    .bind(tenant_id)
     .fetch_optional(&state.db)
     .await
     .map_err(|e| {
@@ -657,10 +675,10 @@ pub async fn void_order(
         "Order status changed before void could be applied".to_string(),
     ))?;
 
-    let item_rows = sqlx::query!(
+    let item_rows = sqlx::query_as::<_, OrderItemFinancialRow>(
         "SELECT product_id, quantity, unit_price::FLOAT8 AS unit_price, line_total::FLOAT8 AS line_total FROM order_items WHERE order_id = $1",
-        order_id
     )
+    .bind(order_id)
     .fetch_all(&state.db)
     .await
     .map_err(|e| {
@@ -732,11 +750,11 @@ pub async fn refund_order(
         )
     })?;
 
-    let order_snapshot = sqlx::query!(
+    let order_snapshot = sqlx::query_as::<_, OrderStatusSnapshot>(
         "SELECT status, payment_method, customer_id, offline, total::FLOAT8 AS total FROM orders WHERE id = $1 AND tenant_id = $2 FOR UPDATE",
-        req.order_id,
-        tenant_id
     )
+    .bind(req.order_id)
+    .bind(tenant_id)
     .fetch_optional(&mut tx)
     .await
     .map_err(|e| {

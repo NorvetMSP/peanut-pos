@@ -60,6 +60,22 @@ struct PaymentFailedEvent {
     pub reason: String,
 }
 
+#[derive(sqlx::FromRow)]
+struct OrderFinancialSummary {
+    total: Option<f64>,
+    customer_id: Option<Uuid>,
+    offline: bool,
+    payment_method: String,
+}
+
+#[derive(sqlx::FromRow)]
+struct OrderItemFinancialRow {
+    product_id: Uuid,
+    quantity: i32,
+    unit_price: f64,
+    line_total: f64,
+}
+
 async fn health() -> &'static str {
     "ok"
 }
@@ -164,11 +180,11 @@ async fn main() -> anyhow::Result<()> {
                             "payment.completed" => {
                                 match serde_json::from_str::<PaymentCompletedEvent>(payload) {
                                     Ok(evt) => {
-                                        if let Err(err) = sqlx::query!(
+                                        if let Err(err) = sqlx::query(
                                             "UPDATE orders SET status = 'COMPLETED' WHERE id = $1 AND tenant_id = $2 AND status = 'PENDING'",
-                                            evt.order_id,
-                                            evt.tenant_id
                                         )
+                                        .bind(evt.order_id)
+                                        .bind(evt.tenant_id)
                                         .execute(&db_pool)
                                         .await
                                         {
@@ -180,19 +196,19 @@ async fn main() -> anyhow::Result<()> {
                                             );
                                         }
 
-                                        match sqlx::query!(
+                                        match sqlx::query_as::<_, OrderFinancialSummary>(
                                             "SELECT total::FLOAT8 as total, customer_id, offline, payment_method FROM orders WHERE id = $1 AND tenant_id = $2",
-                                            evt.order_id,
-                                            evt.tenant_id
                                         )
+                                        .bind(evt.order_id)
+                                        .bind(evt.tenant_id)
                                         .fetch_optional(&db_pool)
                                         .await
                                         {
                                             Ok(Some(order_row)) => {
-                                                match sqlx::query!(
+                                                match sqlx::query_as::<_, OrderItemFinancialRow>(
                                                     "SELECT product_id, quantity, unit_price::FLOAT8 as unit_price, line_total::FLOAT8 as line_total FROM order_items WHERE order_id = $1",
-                                                    evt.order_id
                                                 )
+                                                .bind(evt.order_id)
                                                 .fetch_all(&db_pool)
                                                 .await
                                                 {
@@ -280,11 +296,11 @@ async fn main() -> anyhow::Result<()> {
                             "payment.failed" => {
                                 match serde_json::from_str::<PaymentFailedEvent>(payload) {
                                     Ok(evt) => {
-                                        match sqlx::query!(
+                                        match sqlx::query(
                                             "UPDATE orders SET status = 'NOT_ACCEPTED' WHERE id = $1 AND tenant_id = $2 AND status = 'PENDING'",
-                                            evt.order_id,
-                                            evt.tenant_id
                                         )
+                                        .bind(evt.order_id)
+                                        .bind(evt.tenant_id)
                                         .execute(&db_pool)
                                         .await
                                         {
@@ -306,19 +322,19 @@ async fn main() -> anyhow::Result<()> {
                                                         "Order marked NOT_ACCEPTED due to payment failure"
                                                     );
 
-                                                    match sqlx::query!(
+                                                    match sqlx::query_as::<_, OrderFinancialSummary>(
                                                         "SELECT total::FLOAT8 as total, customer_id, offline, payment_method FROM orders WHERE id = $1 AND tenant_id = $2",
-                                                        evt.order_id,
-                                                        evt.tenant_id
                                                     )
+                                                    .bind(evt.order_id)
+                                                    .bind(evt.tenant_id)
                                                     .fetch_optional(&db_pool)
                                                     .await
                                                     {
                                                         Ok(Some(order_row)) => {
-                                                            match sqlx::query!(
+                                                            match sqlx::query_as::<_, OrderItemFinancialRow>(
                                                                 "SELECT product_id, quantity, unit_price::FLOAT8 as unit_price, line_total::FLOAT8 as line_total FROM order_items WHERE order_id = $1",
-                                                                evt.order_id
                                                             )
+                                                            .bind(evt.order_id)
                                                             .fetch_all(&db_pool)
                                                             .await
                                                             {
