@@ -25,7 +25,7 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 mod order_handlers;
-use order_handlers::{clear_offline_orders, create_order, list_orders, refund_order};
+use order_handlers::{clear_offline_orders, create_order, list_orders, refund_order, void_order};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -122,6 +122,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/healthz", get(health))
         .route("/orders", post(create_order).get(list_orders))
         .route("/orders/offline/clear", post(clear_offline_orders))
+        .route("/orders/:order_id/void", post(void_order))
         .route("/orders/refund", post(refund_order))
         .with_state(state.clone())
         .layer(cors);

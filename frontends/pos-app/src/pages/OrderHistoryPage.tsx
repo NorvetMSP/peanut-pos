@@ -51,7 +51,7 @@ const categorizeStatus = (order: RecentOrder): StatusFilter => {
 const matchesSearch = (haystack: string, needle: string) => haystack.toLowerCase().includes(needle);
 
 const OrderHistoryPage: React.FC = () => {
-  const { queuedOrders, recentOrders, isOnline, isSyncing, retryQueue, refreshOrderStatuses } = useOrders();
+  const { queuedOrders, recentOrders, isOnline, isSyncing, retryQueue, refreshOrderStatuses, voidOrder } = useOrders();
   const navigate = useNavigate();
 
   const readStoredFilters = React.useCallback(() => {
@@ -80,6 +80,7 @@ const OrderHistoryPage: React.FC = () => {
   const [statusFilter, setStatusFilter] = React.useState<StatusFilter>(storedFilters.status);
   const [paymentFilter, setPaymentFilter] = React.useState<'all' | PaymentMethod>(storedFilters.payment);
   const [isRefreshing, setIsRefreshing] = React.useState(false);
+  const [voidingOrderId, setVoidingOrderId] = React.useState<string | null>(null);
 
   const normalizedSearch = searchTerm.trim().toLowerCase();
 
@@ -115,6 +116,21 @@ const OrderHistoryPage: React.FC = () => {
       .catch(err => console.warn('Status refresh failed', err))
       .finally(() => setIsRefreshing(false));
   }, [refreshOrderStatuses]);
+
+  const handleVoidOrder = React.useCallback((orderId: string) => {
+    if (!isOnline) {
+      window.alert('Go online to void orders.');
+      return;
+    }
+    const reason = window.prompt('Reason for void (optional):') ?? undefined;
+    setVoidingOrderId(orderId);
+    voidOrder(orderId, reason)
+      .catch(err => {
+        const message = err instanceof Error ? err.message : String(err);
+        window.alert(message);
+      })
+      .finally(() => setVoidingOrderId(null));
+  }, [isOnline, voidOrder]);
 
   const paymentOptions: Array<'all' | PaymentMethod> = ['all', 'card', 'cash', 'crypto'];
 
@@ -266,6 +282,16 @@ const OrderHistoryPage: React.FC = () => {
                     <div className="text-right">
                       <div className="text-sm">Status: {order.status}</div>
                       {order.paymentStatus && <div className="text-xs text-gray-500 dark:text-gray-400">Payment: {order.paymentStatus}</div>}
+                      {categorizeStatus(order) === 'pending' && (
+                        <button
+                          type="button"
+                          className="mt-2 inline-flex items-center justify-center rounded bg-red-600 px-3 py-1 text-xs font-semibold text-white hover:bg-red-700 disabled:opacity-60"
+                          onClick={() => handleVoidOrder(order.reference)}
+                          disabled={voidingOrderId === order.reference}
+                        >
+                          {voidingOrderId === order.reference ? 'Voiding…' : 'Void Order'}
+                        </button>
+                      )}
                     </div>
                   </div>
                   <div className="mt-3 text-sm text-gray-600 dark:text-gray-300 flex flex-wrap gap-4">

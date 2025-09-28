@@ -9,7 +9,7 @@ use tokio::time::sleep;
 use uuid::Uuid;
 
 use crate::{
-    events::{PaymentCompletedEvent, PaymentFailedEvent},
+    events::{PaymentCompletedEvent, PaymentFailedEvent, PaymentVoidedEvent},
     AppState,
 };
 
@@ -20,6 +20,16 @@ pub struct PaymentRequest {
     pub order_id: String,
     pub method: String,
     pub amount: f64,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct PaymentVoidRequest {
+    #[serde(rename = "orderId")]
+    pub order_id: String,
+    pub method: String,
+    pub amount: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -264,6 +274,69 @@ pub async fn process_payment(
 
     Ok(Json(PaymentResult {
         status: "paid".into(),
+        payment_url: None,
+    }))
+}
+
+pub async fn void_payment(
+    State(state): State<AppState>,
+    Extension(tenant_id): Extension<Uuid>,
+    Json(req): Json<PaymentVoidRequest>,
+) -> Result<Json<PaymentResult>, (StatusCode, String)> {
+    let order_id = Uuid::parse_str(&req.order_id)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid orderId".to_string()))?;
+
+    if req.method.eq_ignore_ascii_case("card") {
+        let pay_svc_url = std::env::var("PAYMENT_SERVICE_URL")
+            .unwrap_or_else(|_| "http://localhost:8086".to_string());
+        let client = Client::new();
+        let pay_resp = client
+            .post(format!("{}/payments/void", pay_svc_url))
+            .json(&req)
+            .send()
+            .await
+            .map_err(|err| {
+                let reason = format!("Payment service error: {err}");
+                (StatusCode::BAD_GATEWAY, reason)
+            })?;
+        if !pay_resp.status().is_success() {
+            let status = pay_resp.status();
+            let reason = format!("Payment void declined (status {status})");
+            return Err((StatusCode::BAD_GATEWAY, reason));
+        }
+    } else if req.method.eq_ignore_ascii_case("crypto") {
+        tracing::info!(order_id = %order_id, "Stub crypto void processed");
+    }
+
+    let pay_event = PaymentVoidedEvent {
+        order_id,
+        tenant_id,
+        method: req.method.clone(),
+        amount: req.amount,
+        reason: req.reason.clone(),
+    };
+    let payload = serde_json::to_string(&pay_event).map_err(|err| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to serialize payment.voided: {err}"),
+        )
+    })?;
+
+    if let Err(err) = state
+        .kafka_producer
+        .send(
+            FutureRecord::to("payment.voided")
+                .payload(&payload)
+                .key(&tenant_id.to_string()),
+            Duration::from_secs(0),
+        )
+        .await
+    {
+        tracing::error!(?err, order_id = %order_id, "Failed to emit payment.voided");
+    }
+
+    Ok(Json(PaymentResult {
+        status: "voided".into(),
         payment_url: None,
     }))
 }

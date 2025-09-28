@@ -1,10 +1,11 @@
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::{
     http::{HeaderMap, StatusCode},
     Json,
 };
 use common_auth::AuthContext;
 use rdkafka::producer::FutureRecord;
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use sqlx::{Postgres, Transaction};
 use std::time::Duration;
@@ -14,6 +15,7 @@ use crate::AppState;
 
 const ORDER_WRITE_ROLES: &[&str] = &["super_admin", "admin", "manager", "cashier"];
 const ORDER_REFUND_ROLES: &[&str] = &["super_admin", "admin", "manager"];
+const ORDER_VOID_ROLES: &[&str] = &["super_admin", "admin", "manager"];
 const ORDER_VIEW_ROLES: &[&str] = &["super_admin", "admin", "manager", "cashier"];
 
 fn ensure_role(auth: &AuthContext, allowed: &[&str]) -> Result<(), (StatusCode, String)> {
@@ -106,6 +108,71 @@ pub struct RefundRequest {
     pub order_id: Uuid,
     pub items: Vec<OrderItem>,
     pub total: f64,
+}
+
+#[derive(Deserialize)]
+pub struct VoidOrderRequest {
+    pub reason: Option<String>,
+}
+
+async fn notify_payment_void(
+    order_id: Uuid,
+    tenant_id: Uuid,
+    payment_method: &str,
+    amount: f64,
+    reason: Option<&str>,
+) -> Result<(), String> {
+    if !payment_method.eq_ignore_ascii_case("card")
+        && !payment_method.eq_ignore_ascii_case("crypto")
+    {
+        return Ok(());
+    }
+
+    let base_url = std::env::var("INTEGRATION_GATEWAY_URL")
+        .unwrap_or_else(|_| "http://localhost:8083".to_string());
+    let url = format!("{}/payments/void", base_url.trim_end_matches('/'));
+
+    let mut body = serde_json::json!({
+        "orderId": order_id.to_string(),
+        "method": payment_method,
+        "amount": amount,
+    });
+    if let Some(text) = reason {
+        if !text.is_empty() {
+            body["reason"] = serde_json::Value::String(text.to_string());
+        }
+    }
+
+    let client = Client::new();
+    let mut request = client
+        .post(url)
+        .header("Content-Type", "application/json")
+        .header("X-Tenant-ID", tenant_id.to_string())
+        .json(&body);
+
+    if let Ok(api_key) = std::env::var("INTEGRATION_GATEWAY_API_KEY") {
+        if !api_key.is_empty() {
+            request = request.header("X-API-Key", api_key);
+        }
+    }
+
+    let response = request
+        .send()
+        .await
+        .map_err(|err| format!("Failed to contact integration-gateway: {err}"))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let text = response
+            .text()
+            .await
+            .unwrap_or_else(|_| String::from("<no body>"));
+        return Err(format!(
+            "integration-gateway void request failed (status {status}): {text}"
+        ));
+    }
+
+    Ok(())
 }
 
 async fn insert_order_items(
@@ -297,6 +364,134 @@ pub async fn create_order(
     }
 
     Ok(Json(order))
+}
+
+pub async fn void_order(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path(order_id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(req): Json<VoidOrderRequest>,
+) -> Result<Json<Order>, (StatusCode, String)> {
+    ensure_role(&auth, ORDER_VOID_ROLES)?;
+    let tenant_id = tenant_id_from_request(&headers, &auth)?;
+
+    let void_reason = req
+        .reason
+        .as_ref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string());
+
+    let existing = sqlx::query!(
+        "SELECT status, payment_method, customer_id, offline, total::FLOAT8 AS total FROM orders WHERE id = $1 AND tenant_id = $2",
+        order_id,
+        tenant_id
+    )
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to fetch order: {}", e),
+        )
+    })?;
+
+    let existing = existing.ok_or((StatusCode::NOT_FOUND, "Order not found".to_string()))?;
+
+    if existing.status.as_str() != "PENDING" {
+        return Err((
+            StatusCode::CONFLICT,
+            format!("Order in status '{}' cannot be voided", existing.status),
+        ));
+    }
+
+    if let Err(err) = notify_payment_void(
+        order_id,
+        tenant_id,
+        &existing.payment_method,
+        existing.total.unwrap_or(0.0),
+        void_reason.as_deref(),
+    )
+    .await
+    {
+        tracing::error!(order_id = %order_id, tenant_id = %tenant_id, ?err, "Failed to notify payment void");
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            "Unable to void payment with upstream provider".to_string(),
+        ));
+    }
+
+    let updated_order = sqlx::query_as::<_, Order>(
+        "UPDATE orders SET status = 'VOIDED', void_reason = $3 WHERE id = $1 AND tenant_id = $2 AND status = 'PENDING'
+         RETURNING id, tenant_id, total::FLOAT8 AS total, status, customer_id, offline, payment_method, idempotency_key",
+    )
+    .bind(order_id)
+    .bind(tenant_id)
+    .bind(void_reason.as_deref())
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to void order: {}", e),
+        )
+    })?
+    .ok_or((
+        StatusCode::CONFLICT,
+        "Order status changed before void could be applied".to_string(),
+    ))?;
+
+    let item_rows = sqlx::query!(
+        "SELECT product_id, quantity, unit_price::FLOAT8 AS unit_price, line_total::FLOAT8 AS line_total FROM order_items WHERE order_id = $1",
+        order_id
+    )
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to load order items: {}", e),
+        )
+    })?;
+
+    let event_items: Vec<serde_json::Value> = item_rows
+        .into_iter()
+        .map(|row| {
+            serde_json::json!({
+                "product_id": row.product_id,
+                "quantity": row.quantity,
+                "unit_price": row.unit_price,
+                "line_total": row.line_total,
+            })
+        })
+        .collect();
+
+    let order_void_event = serde_json::json!({
+        "order_id": updated_order.id,
+        "tenant_id": tenant_id,
+        "items": event_items,
+        "total": updated_order.total,
+        "customer_id": updated_order.customer_id,
+        "offline": updated_order.offline,
+        "payment_method": updated_order.payment_method,
+        "reason": void_reason,
+    });
+
+    if let Err(err) = state
+        .kafka_producer
+        .send(
+            FutureRecord::to("order.voided")
+                .payload(&order_void_event.to_string())
+                .key(&tenant_id.to_string()),
+            Duration::from_secs(0),
+        )
+        .await
+    {
+        tracing::error!("Failed to send order.voided: {:?}", err);
+    }
+
+    Ok(Json(updated_order))
 }
 
 pub async fn refund_order(

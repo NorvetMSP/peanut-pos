@@ -17,7 +17,7 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 mod payment_handlers;
-use payment_handlers::process_card_payment;
+use payment_handlers::{process_card_payment, void_card_payment};
 
 const PAYMENT_ROLES: &[&str] = &["super_admin", "admin", "cashier"];
 
@@ -65,6 +65,7 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route("/payments", post(process_card_payment))
+        .route("/payments/void", post(void_card_payment))
         .with_state(state)
         .layer(cors);
 

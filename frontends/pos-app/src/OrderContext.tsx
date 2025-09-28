@@ -120,6 +120,7 @@ type OrderContextValue = {
   isSyncing: boolean;
   retryQueue: () => Promise<void>;
   refreshOrderStatuses: () => Promise<void>;
+  voidOrder: (orderId: string, reason?: string) => Promise<void>;
 };
 
 const OrderContext = createContext<OrderContextValue | undefined>(undefined);
@@ -402,6 +403,7 @@ export const OrderProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     }
   }, [buildHeaders]);
 
+
   const addRecentOrder = useCallback((entry: OrderHistoryEntry) => {
     const normalized: OrderHistoryEntry = {
       ...entry,
@@ -431,6 +433,56 @@ export const OrderProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     });
     return updated;
   }, []);
+
+  const voidOrder = useCallback(async (orderId: string, reason?: string): Promise<void> => {
+    const headers = buildHeaders();
+    const payload: Record<string, unknown> = {};
+    if (typeof reason === 'string' && reason.trim().length > 0) {
+      payload.reason = reason.trim();
+    }
+    const response = await fetch(`${ORDER_SERVICE_URL}/orders/${orderId}/void`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) {
+      let message = `Unable to void order (${response.status})`;
+      try {
+        const text = await response.text();
+        if (text) message = text;
+      } catch {
+        /* ignore */
+      }
+      throw new Error(message);
+    }
+    const order = (await response.json()) as OrderResponse;
+    const didUpdate = updateRecentOrder(orderId, existing => ({
+      ...existing,
+      id: typeof order.id === 'string' ? order.id : existing.id,
+      reference: typeof order.id === 'string' ? order.id : existing.reference,
+      status: typeof order.status === 'string' ? order.status : 'VOIDED',
+      paymentStatus: 'voided',
+      offline: false,
+      note: reason && reason.trim().length > 0 ? reason.trim() : existing.note,
+      syncedAt: Date.now(),
+      items: existing.items,
+    }));
+    if (!didUpdate) {
+      addRecentOrder({
+        id: typeof order.id === 'string' ? order.id : orderId,
+        reference: typeof order.id === 'string' ? order.id : orderId,
+        status: typeof order.status === 'string' ? order.status : 'VOIDED',
+        paymentStatus: 'voided',
+        paymentMethod: order.payment_method as PaymentMethod,
+        total: typeof order.total === 'number' ? order.total : existing.total ?? 0,
+        createdAt: Date.now(),
+        offline: false,
+        note: reason,
+        syncedAt: Date.now(),
+        items: existing.items,
+      });
+    }
+  }, [addRecentOrder, buildHeaders, updateRecentOrder]);
 
   const queueOrder = useCallback((payload: DraftOrderPayload, reason?: string) => {
     const timestamp = Date.now();
@@ -833,7 +885,8 @@ export const OrderProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     isSyncing,
     retryQueue: flushQueue,
     refreshOrderStatuses,
-  }), [flushQueue, isOnline, isSyncing, queuedOrders, recentOrders, refreshOrderStatuses, submitOrder]);
+    voidOrder,
+  }), [flushQueue, isOnline, isSyncing, queuedOrders, recentOrders, refreshOrderStatuses, submitOrder, voidOrder]);
 
   return <OrderContext.Provider value={value}>{children}</OrderContext.Provider>;
 };
