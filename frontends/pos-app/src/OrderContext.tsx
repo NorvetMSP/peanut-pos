@@ -468,18 +468,54 @@ export const OrderProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       items: existing.items,
     }));
     if (!didUpdate) {
+      const orderRecord = order as Record<string, unknown>;
+      const paymentCandidate = orderRecord['payment_method'] ?? orderRecord['paymentMethod'];
+      const paymentMethod: PaymentMethod =
+        paymentCandidate === 'cash' || paymentCandidate === 'crypto' || paymentCandidate === 'card'
+          ? (paymentCandidate as PaymentMethod)
+          : 'card';
+      const itemsRaw = orderRecord['items'];
+      const items: OrderItemPayload[] = Array.isArray(itemsRaw)
+        ? itemsRaw
+            .map(item => {
+              if (!item || typeof item !== 'object') return null;
+              const record = item as Record<string, unknown>;
+              const productId = record['product_id'] ?? record['productId'];
+              const quantityNumber = Number(record['quantity']);
+              const unitPriceNumber = Number(record['unit_price'] ?? record['unitPrice']);
+              const lineTotalRaw = record['line_total'] ?? record['lineTotal'];
+              if ((typeof productId !== 'string' && typeof productId !== 'number') ||
+                  !Number.isFinite(quantityNumber) ||
+                  !Number.isFinite(unitPriceNumber)) {
+                return null;
+              }
+              const computedLineTotal = Number(lineTotalRaw);
+              const lineTotal = Number.isFinite(computedLineTotal) ? computedLineTotal : quantityNumber * unitPriceNumber;
+              return {
+                product_id: typeof productId === 'string' ? productId : String(productId),
+                quantity: quantityNumber,
+                unit_price: unitPriceNumber,
+                line_total: lineTotal,
+              } as OrderItemPayload;
+            })
+            .filter((item): item is OrderItemPayload => Boolean(item))
+        : [];
+      const totalRaw = orderRecord['total'];
+      const parsedTotal = Number(totalRaw);
+      const fallbackTotal = Number.isFinite(parsedTotal) ? parsedTotal : items.reduce((sum, item) => sum + item.line_total, 0);
+
       addRecentOrder({
         id: typeof order.id === 'string' ? order.id : orderId,
         reference: typeof order.id === 'string' ? order.id : orderId,
         status: typeof order.status === 'string' ? order.status : 'VOIDED',
         paymentStatus: 'voided',
-        paymentMethod: order.payment_method as PaymentMethod,
-        total: typeof order.total === 'number' ? order.total : existing.total ?? 0,
+        paymentMethod,
+        total: fallbackTotal,
         createdAt: Date.now(),
         offline: false,
         note: reason,
         syncedAt: Date.now(),
-        items: existing.items,
+        items,
       });
     }
   }, [addRecentOrder, buildHeaders, updateRecentOrder]);
