@@ -6,7 +6,9 @@ This document aggregates the gaps we have identified while reviewing the current
 
 ### Current Implementation
 
-- Rust microservice exposes REST endpoints for create/list/refund and an offline clear helper (`services/order-service/src/order_handlers.rs:139`, `services/order-service/src/main.rs:123`).
+- Rust microservice exposes REST endpoints
+- Order creation now pre-reserves inventory via the inventory-service reservation API and rolls back holds on failure cases (`services/order-service/src/order_handlers.rs:358`, `services/inventory-service/src/reservation_handlers.rs:46`).
+- Refund processing validates quantities, persists return records, and flips orders to partial/full refunded states while emitting audit events (`services/order-service/src/order_handlers.rs:713`, `services/order-service/migrations/2005_add_return_tracking.sql:1`). for create/list/refund and an offline clear helper (`services/order-service/src/order_handlers.rs:139`, `services/order-service/src/main.rs:123`).
 - Order writes enforce `X-Tenant-ID`, persist payment method metadata, and accept optional idempotency keys to dedupe retries (`services/order-service/src/order_handlers.rs:140`, `services/order-service/migrations/2003_add_order_items_and_idempotency.sql:1`).
 - Line items now persist to `order_items` with unit pricing, and events/refunds pull pricing from the database (`services/order-service/src/order_handlers.rs:111`, `services/order-service/src/order_handlers.rs:287`, `services/order-service/src/main.rs:170`).
 - Managers can void in-flight orders via `POST /orders/:id/void`, which marks the sale `VOIDED` and emits an `order.voided` event for downstream cleanup (`services/order-service/src/order_handlers.rs:308`, `services/order-service/src/main.rs:131`).
@@ -14,8 +16,7 @@ This document aggregates the gaps we have identified while reviewing the current
 
 ### Order Service: Confirmed Gaps / Risks
 
-- No pre-commit inventory reservation or validation; oversell is possible when stock is tight (`services/order-service/src/order_handlers.rs:139`).
-- Operational tooling gaps persist: search is still limited (20 latest only) and partial return / receipt workflows remain unimplemented (`services/order-service/src/order_handlers.rs:381`).
+- Operational tooling gaps persist: admin surfaces still lack deep order search, receipts, or return dashboards despite richer APIs (`services/order-service/src/order_handlers.rs:1017`, `frontends/admin-portal/src/pages/OrdersPage.tsx`).
 
 ### Order Service: Implications
 
@@ -208,8 +209,7 @@ This document aggregates the gaps we have identified while reviewing the current
 
 ### Returns & Exchanges: Confirmed Gaps / Risks
 
-- No dedicated return domain linking refund lines to the original sale, no restock rules or fees, and no manager override workflow (`services/order-service/src/order_handlers.rs:200`).
-- Exchanges and partial returns lack API coverage entirely.
+- Returns now record per-line adjustments and enforce quantity limits, but policy workflows (restock rules, fees, manager overrides) and exchange flows are still missing (`services/order-service/src/order_handlers.rs:713`).
 
 ### Returns & Exchanges: Implications
 

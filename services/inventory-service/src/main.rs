@@ -5,7 +5,7 @@ use axum::{
         header::{ACCEPT, CONTENT_TYPE},
         HeaderName, HeaderValue, Method,
     },
-    routing::get,
+    routing::{delete, get, post},
     Router,
 };
 use common_auth::{JwtConfig, JwtVerifier};
@@ -14,7 +14,7 @@ use rdkafka::consumer::{Consumer, StreamConsumer};
 use rdkafka::producer::FutureProducer;
 use rdkafka::Message;
 use serde::Deserialize;
-use sqlx::{query, query_as, PgPool};
+use sqlx::PgPool;
 use std::{env, net::SocketAddr, sync::Arc, time::Duration};
 use tokio::net::TcpListener;
 use tokio::time::{interval, MissedTickBehavior};
@@ -24,13 +24,22 @@ use uuid::Uuid;
 
 mod inventory_handlers;
 use inventory_handlers::list_inventory;
+mod reservation_handlers;
+use reservation_handlers::{create_reservation, release_reservation};
 
-const DEFAULT_THRESHOLD: i32 = 5;
+pub(crate) const DEFAULT_THRESHOLD: i32 = 5;
 
 #[derive(Deserialize)]
 struct OrderCompletedEvent {
+    order_id: Uuid,
     tenant_id: Uuid,
     items: Vec<OrderItem>,
+}
+
+#[derive(Deserialize)]
+struct OrderVoidedEvent {
+    order_id: Uuid,
+    tenant_id: Uuid,
 }
 
 #[derive(Deserialize)]
@@ -89,7 +98,12 @@ async fn main() -> anyhow::Result<()> {
         .set("enable.auto.commit", "true")
         .create()
         .expect("failed to create kafka consumer");
-    consumer.subscribe(&["order.completed", "payment.completed", "product.created"])?;
+    consumer.subscribe(&[
+        "order.completed",
+        "order.voided",
+        "payment.completed",
+        "product.created",
+    ])?;
 
     let producer: FutureProducer = rdkafka::ClientConfig::new()
         .set(
@@ -128,6 +142,11 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/healthz", get(health))
         .route("/inventory", get(list_inventory))
+        .route("/inventory/reservations", post(create_reservation))
+        .route(
+            "/inventory/reservations/:order_id",
+            delete(release_reservation),
+        )
         .with_state(state.clone())
         .layer(cors);
 
@@ -141,6 +160,8 @@ async fn main() -> anyhow::Result<()> {
                     if let Some(Ok(text)) = m.payload_view::<str>() {
                         if topic == "order.completed" {
                             handle_order_completed(text, &db_for_consumer, &producer).await;
+                        } else if topic == "order.voided" {
+                            handle_order_voided(text, &db_for_consumer).await;
                         } else if topic == "product.created" {
                             handle_product_created(text, &db_for_consumer).await;
                         } else if topic == "payment.completed" {
@@ -171,44 +192,59 @@ async fn main() -> anyhow::Result<()> {
 async fn handle_order_completed(text: &str, db: &PgPool, producer: &FutureProducer) {
     match serde_json::from_str::<OrderCompletedEvent>(text) {
         Ok(event) => {
-            for item in event.items {
+            let OrderCompletedEvent {
+                order_id,
+                tenant_id,
+                items,
+            } = event;
+
+            let mut tx = match db.begin().await {
+                Ok(tx) => tx,
+                Err(err) => {
+                    tracing::error!(?err, order_id = %order_id, tenant_id = %tenant_id, "Failed to open inventory transaction for completion");
+                    return;
+                }
+            };
+
+            let mut alerts: Vec<(Uuid, i32, i32)> = Vec::new();
+
+            for item in items {
                 let product_id = item.product_id;
                 let quantity_delta = item.quantity;
                 let mut attempts = 0;
                 let mut latest: Option<(i32, i32)> = None;
 
                 loop {
-                    let update = query_as::<_, (i32, i32)>(
-                        "UPDATE inventory SET quantity = quantity -  WHERE product_id =  AND tenant_id =  RETURNING quantity, threshold",
+                    match sqlx::query!(
+                        "UPDATE inventory SET quantity = quantity - $1 WHERE product_id = $2 AND tenant_id = $3 RETURNING quantity, threshold",
+                        quantity_delta,
+                        product_id,
+                        tenant_id
                     )
-                    .bind(quantity_delta)
-                    .bind(product_id)
-                    .bind(event.tenant_id)
-                    .fetch_optional(db)
-                    .await;
-
-                    match update {
+                    .fetch_optional(&mut *tx)
+                    .await
+                    {
                         Ok(Some(row)) => {
-                            latest = Some(row);
+                            latest = Some((row.quantity, row.threshold));
                             break;
                         }
                         Ok(None) if attempts == 0 => {
                             attempts += 1;
-                            if let Err(err) = query(
-                                "INSERT INTO inventory (product_id, tenant_id, quantity, threshold) VALUES (, , , ) ON CONFLICT (product_id, tenant_id) DO NOTHING",
+                            if let Err(err) = sqlx::query!(
+                                "INSERT INTO inventory (product_id, tenant_id, quantity, threshold) VALUES ($1, $2, $3, $4) ON CONFLICT (product_id, tenant_id) DO NOTHING",
+                                product_id,
+                                tenant_id,
+                                0,
+                                DEFAULT_THRESHOLD
                             )
-                            .bind(product_id)
-                            .bind(event.tenant_id)
-                            .bind(0)
-                            .bind(DEFAULT_THRESHOLD)
-                            .execute(db)
+                            .execute(&mut *tx)
                             .await
                             {
                                 tracing::error!(
+                                    ?err,
                                     product_id = %product_id,
-                                    tenant_id = %event.tenant_id,
-                                    error = %err,
-                                    "Failed to initialize inventory record"
+                                    tenant_id = %tenant_id,
+                                    "Failed to initialise inventory row before completion"
                                 );
                                 break;
                             }
@@ -217,39 +253,182 @@ async fn handle_order_completed(text: &str, db: &PgPool, producer: &FutureProduc
                         Ok(None) => {
                             tracing::warn!(
                                 product_id = %product_id,
-                                tenant_id = %event.tenant_id,
-                                "Inventory record missing; skipping"
+                                tenant_id = %tenant_id,
+                                "Inventory record missing for completed order; skipping adjustment"
                             );
                             break;
                         }
                         Err(err) => {
-                            tracing::error!(error = %err, "Inventory DB error");
+                            tracing::error!(
+                                ?err,
+                                product_id = %product_id,
+                                tenant_id = %tenant_id,
+                                "Failed to update inventory for completed order"
+                            );
                             break;
                         }
                     }
                 }
 
+                if let Err(err) = sqlx::query!(
+                    "DELETE FROM inventory_reservations WHERE order_id = $1 AND tenant_id = $2 AND product_id = $3",
+                    order_id,
+                    tenant_id,
+                    product_id
+                )
+                .execute(&mut *tx)
+                .await
+                {
+                    tracing::error!(
+                        ?err,
+                        order_id = %order_id,
+                        tenant_id = %tenant_id,
+                        product_id = %product_id,
+                        "Failed to clear reservation after order completion"
+                    );
+                }
+
                 if let Some((quantity, threshold)) = latest {
                     if quantity <= threshold {
-                        let alert = serde_json::json!({
-                            "product_id": product_id,
-                            "tenant_id": event.tenant_id,
-                            "quantity": quantity,
-                            "threshold": threshold
-                        });
-                        let _ = producer
-                            .send(
-                                rdkafka::producer::FutureRecord::to("inventory.low_stock")
-                                    .payload(&alert.to_string())
-                                    .key(&event.tenant_id.to_string()),
-                                Duration::from_secs(0),
-                            )
-                            .await;
+                        alerts.push((product_id, quantity, threshold));
                     }
+                }
+            }
+
+            if let Err(err) = tx.commit().await {
+                tracing::error!(?err, order_id = %order_id, tenant_id = %tenant_id, "Failed to commit inventory updates for completion");
+                return;
+            }
+
+            for (product_id, quantity, threshold) in alerts {
+                let alert = serde_json::json!({
+                    "product_id": product_id,
+                    "tenant_id": tenant_id,
+                    "quantity": quantity,
+                    "threshold": threshold
+                });
+                if let Err(err) = producer
+                    .send(
+                        rdkafka::producer::FutureRecord::to("inventory.low_stock")
+                            .payload(&alert.to_string())
+                            .key(&tenant_id.to_string()),
+                        Duration::from_secs(0),
+                    )
+                    .await
+                {
+                    tracing::error!(
+                        ?err,
+                        product_id = %product_id,
+                        tenant_id = %tenant_id,
+                        "Failed to emit inventory.low_stock after completion"
+                    );
                 }
             }
         }
         Err(err) => tracing::error!(?err, "Failed to parse OrderCompletedEvent"),
+    }
+}
+
+async fn handle_order_voided(text: &str, db: &PgPool) {
+    match serde_json::from_str::<OrderVoidedEvent>(text) {
+        Ok(event) => {
+            let OrderVoidedEvent {
+                order_id,
+                tenant_id,
+            } = event;
+
+            let mut tx = match db.begin().await {
+                Ok(tx) => tx,
+                Err(err) => {
+                    tracing::error!(?err, order_id = %order_id, tenant_id = %tenant_id, "Failed to open inventory transaction for void");
+                    return;
+                }
+            };
+
+            let reservations = match sqlx::query!(
+                "DELETE FROM inventory_reservations WHERE order_id = $1 AND tenant_id = $2 RETURNING product_id, quantity",
+                order_id,
+                tenant_id
+            )
+            .fetch_all(&mut *tx)
+            .await
+            {
+                Ok(rows) => rows,
+                Err(err) => {
+                    tracing::error!(?err, order_id = %order_id, tenant_id = %tenant_id, "Failed to release reservations for voided order");
+                    let _ = tx.rollback().await;
+                    return;
+                }
+            };
+
+            for row in reservations.iter() {
+                if row.quantity <= 0 {
+                    continue;
+                }
+
+                let mut attempts = 0;
+                loop {
+                    match sqlx::query!(
+                        "UPDATE inventory SET quantity = quantity + $1 WHERE product_id = $2 AND tenant_id = $3 RETURNING quantity",
+                        row.quantity,
+                        row.product_id,
+                        tenant_id
+                    )
+                    .fetch_optional(&mut *tx)
+                    .await
+                    {
+                        Ok(Some(_)) => break,
+                        Ok(None) if attempts == 0 => {
+                            attempts += 1;
+                            if let Err(err) = sqlx::query!(
+                                "INSERT INTO inventory (product_id, tenant_id, quantity, threshold) VALUES ($1, $2, $3, $4) ON CONFLICT (product_id, tenant_id) DO NOTHING",
+                                row.product_id,
+                                tenant_id,
+                                row.quantity,
+                                DEFAULT_THRESHOLD
+                            )
+                            .execute(&mut *tx)
+                            .await
+                            {
+                                tracing::error!(
+                                    ?err,
+                                    order_id = %order_id,
+                                    tenant_id = %tenant_id,
+                                    product_id = %row.product_id,
+                                    "Failed to backfill inventory row during void"
+                                );
+                                break;
+                            }
+                            continue;
+                        }
+                        Ok(None) => {
+                            tracing::warn!(
+                                order_id = %order_id,
+                                tenant_id = %tenant_id,
+                                product_id = %row.product_id,
+                                "Inventory row still missing after insert attempt"
+                            );
+                            break;
+                        }
+                        Err(err) => {
+                            tracing::error!(
+                                ?err,
+                                order_id = %order_id,
+                                tenant_id = %tenant_id,
+                                product_id = %row.product_id,
+                                "Failed to restock inventory for voided order"
+                            );
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if let Err(err) = tx.commit().await {
+                tracing::error!(?err, order_id = %order_id, tenant_id = %tenant_id, "Failed to commit inventory release for voided order");
+            }
+        }
+        Err(err) => tracing::error!(?err, "Failed to parse OrderVoidedEvent"),
     }
 }
 
@@ -258,13 +437,13 @@ async fn handle_product_created(text: &str, db: &PgPool) {
         Ok(event) => {
             let initial_quantity = event.initial_quantity.unwrap_or(0);
             let threshold = event.threshold.unwrap_or(DEFAULT_THRESHOLD);
-            if let Err(err) = query(
-                "INSERT INTO inventory (product_id, tenant_id, quantity, threshold) VALUES (, , , ) ON CONFLICT (product_id, tenant_id) DO NOTHING",
+            if let Err(err) = sqlx::query!(
+                "INSERT INTO inventory (product_id, tenant_id, quantity, threshold) VALUES ($1, $2, $3, $4) ON CONFLICT (product_id, tenant_id) DO NOTHING",
+                event.product_id,
+                event.tenant_id,
+                initial_quantity,
+                threshold
             )
-            .bind(event.product_id)
-            .bind(event.tenant_id)
-            .bind(initial_quantity)
-            .bind(threshold)
             .execute(db)
             .await
             {

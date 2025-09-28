@@ -13,6 +13,7 @@ use futures_util::StreamExt;
 use rdkafka::consumer::{Consumer, StreamConsumer};
 use rdkafka::producer::{FutureProducer, FutureRecord};
 use rdkafka::Message;
+use reqwest::Client;
 use sqlx::PgPool;
 use std::env;
 use std::net::SocketAddr;
@@ -25,13 +26,17 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 mod order_handlers;
-use order_handlers::{clear_offline_orders, create_order, list_orders, refund_order, void_order};
+use order_handlers::{
+    clear_offline_orders, create_order, get_order, list_orders, refund_order, void_order,
+};
 
 #[derive(Clone)]
 pub struct AppState {
     pub db: PgPool,
     pub kafka_producer: FutureProducer,
     pub jwt_verifier: Arc<JwtVerifier>,
+    pub http_client: Client,
+    pub inventory_base_url: String,
 }
 
 impl FromRef<AppState> for Arc<JwtVerifier> {
@@ -77,10 +82,16 @@ async fn main() -> anyhow::Result<()> {
     let jwt_verifier = build_jwt_verifier_from_env().await?;
     spawn_jwks_refresh(jwt_verifier.clone());
 
+    let http_client = Client::new();
+    let inventory_base_url =
+        env::var("INVENTORY_SERVICE_URL").unwrap_or_else(|_| "http://localhost:8087".to_string());
+
     let state = AppState {
         db: db.clone(),
         kafka_producer: kafka_producer.clone(),
         jwt_verifier,
+        http_client: http_client.clone(),
+        inventory_base_url: inventory_base_url.clone(),
     };
 
     let allowed_origins = [
@@ -121,6 +132,7 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/healthz", get(health))
         .route("/orders", post(create_order).get(list_orders))
+        .route("/orders/:order_id", get(get_order))
         .route("/orders/offline/clear", post(clear_offline_orders))
         .route("/orders/:order_id/void", post(void_order))
         .route("/orders/refund", post(refund_order))
@@ -293,6 +305,95 @@ async fn main() -> anyhow::Result<()> {
                                                         reason = %evt.reason,
                                                         "Order marked NOT_ACCEPTED due to payment failure"
                                                     );
+
+                                                    match sqlx::query!(
+                                                        "SELECT total::FLOAT8 as total, customer_id, offline, payment_method FROM orders WHERE id = $1 AND tenant_id = $2",
+                                                        evt.order_id,
+                                                        evt.tenant_id
+                                                    )
+                                                    .fetch_optional(&db_pool)
+                                                    .await
+                                                    {
+                                                        Ok(Some(order_row)) => {
+                                                            match sqlx::query!(
+                                                                "SELECT product_id, quantity, unit_price::FLOAT8 as unit_price, line_total::FLOAT8 as line_total FROM order_items WHERE order_id = $1",
+                                                                evt.order_id
+                                                            )
+                                                            .fetch_all(&db_pool)
+                                                            .await
+                                                            {
+                                                                Ok(item_rows) => {
+                                                                    let event_items: Vec<serde_json::Value> = item_rows
+                                                                        .into_iter()
+                                                                        .map(|row| {
+                                                                            serde_json::json!({
+                                                                                "product_id": row.product_id,
+                                                                                "quantity": row.quantity,
+                                                                                "unit_price": row.unit_price,
+                                                                                "line_total": row.line_total,
+                                                                            })
+                                                                        })
+                                                                        .collect();
+
+                                                                    let void_reason = if evt.reason.is_empty() {
+                                                                        Some(String::from("payment_failed"))
+                                                                    } else {
+                                                                        Some(format!("payment_failed: {}", evt.reason))
+                                                                    };
+                                                                    let void_event = serde_json::json!({
+                                                                        "order_id": evt.order_id,
+                                                                        "tenant_id": evt.tenant_id,
+                                                                        "items": event_items,
+                                                                        "total": order_row.total.unwrap_or(0.0),
+                                                                        "customer_id": order_row.customer_id,
+                                                                        "offline": order_row.offline,
+                                                                        "payment_method": order_row.payment_method,
+                                                                        "reason": void_reason,
+                                                                    });
+
+                                                                    if let Err(err) = producer
+                                                                        .send(
+                                                                            FutureRecord::to("order.voided")
+                                                                                .payload(&void_event.to_string())
+                                                                                .key(&evt.tenant_id.to_string()),
+                                                                            Duration::from_secs(0),
+                                                                        )
+                                                                        .await
+                                                                    {
+                                                                        tracing::error!(
+                                                                            ?err,
+                                                                            order_id = %evt.order_id,
+                                                                            tenant_id = %evt.tenant_id,
+                                                                            "Failed to emit order.voided after payment failure"
+                                                                        );
+                                                                    }
+                                                                }
+                                                                Err(err) => {
+                                                                    tracing::error!(
+                                                                        ?err,
+                                                                        order_id = %evt.order_id,
+                                                                        tenant_id = %evt.tenant_id,
+                                                                        "Failed to load order items after payment failure"
+                                                                    );
+                                                                }
+                                                            }
+                                                        }
+                                                        Ok(None) => {
+                                                            tracing::error!(
+                                                                order_id = %evt.order_id,
+                                                                tenant_id = %evt.tenant_id,
+                                                                "Order missing when preparing void event after payment failure"
+                                                            );
+                                                        }
+                                                        Err(err) => {
+                                                            tracing::error!(
+                                                                ?err,
+                                                                order_id = %evt.order_id,
+                                                                tenant_id = %evt.tenant_id,
+                                                                "Failed to fetch order snapshot after payment failure"
+                                                            );
+                                                        }
+                                                    }
                                                 }
                                             }
                                             Err(err) => {
