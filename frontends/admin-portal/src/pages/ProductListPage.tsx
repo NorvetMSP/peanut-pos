@@ -138,33 +138,53 @@ const ProductListPage: React.FC = () => {
 
   // Helper to normalize audit entries from API response
   function normalizeAuditEntries(input: unknown): ProductAuditEntry[] {
+    const hasEntriesArray = (value: unknown): value is { entries: unknown[] } => {
+      if (typeof value !== 'object' || value === null) return false;
+      if (!('entries' in value)) return false;
+      const { entries } = value as { entries: unknown };
+      return Array.isArray(entries);
+    };
+
     if (!input) return [];
     if (Array.isArray(input)) {
       return input
         .map(normalizeAuditEntry)
-        .filter((e): e is ProductAuditEntry => Boolean(e));
+        .filter((entry): entry is ProductAuditEntry => entry !== null);
     }
-    if (typeof input === 'object' && input !== null && Array.isArray((input as any).entries)) {
-      return (input as any).entries
+    if (hasEntriesArray(input)) {
+      return input.entries
         .map(normalizeAuditEntry)
-        .filter((e: unknown): e is ProductAuditEntry => Boolean(e));
+        .filter((entry): entry is ProductAuditEntry => entry !== null);
     }
     return [];
   }
 
   // Helper to normalize a single audit entry
-  function normalizeAuditEntry(entry: any): ProductAuditEntry | null {
-    if (!entry || typeof entry !== 'object') return null;
-    const { id, action, created_at, actor_id, actor_name, actor_email, changes } = entry;
-    if (typeof id !== 'string' || typeof action !== 'string' || typeof created_at !== 'string') return null;
+  function normalizeAuditEntry(entry: unknown): ProductAuditEntry | null {
+    if (typeof entry !== 'object' || entry === null) return null;
+
+    const candidate = entry as Record<string, unknown>;
+    const id = candidate.id;
+    const action = candidate.action;
+    const createdAt = candidate.created_at;
+
+    if (typeof id !== 'string' || typeof action !== 'string' || typeof createdAt !== 'string') {
+      return null;
+    }
+
+    const actorId = candidate.actor_id;
+    const actorName = candidate.actor_name;
+    const actorEmail = candidate.actor_email;
+    const changes = candidate.changes;
+
     return {
       id,
       action,
-      created_at,
-      actor_id: typeof actor_id === 'string' ? actor_id : null,
-      actor_name: typeof actor_name === 'string' ? actor_name : null,
-      actor_email: typeof actor_email === 'string' ? actor_email : null,
-      changes: changes ?? {},
+      created_at: createdAt,
+      actor_id: typeof actorId === 'string' ? actorId : null,
+      actor_name: typeof actorName === 'string' ? actorName : null,
+      actor_email: typeof actorEmail === 'string' ? actorEmail : null,
+      changes: changes === undefined || changes === null ? {} : changes,
     };
   }
 
