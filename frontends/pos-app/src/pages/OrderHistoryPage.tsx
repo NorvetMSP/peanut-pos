@@ -285,6 +285,19 @@ const OrderHistoryPage: React.FC = () => {
                   {order.note && (
                     <div className="mt-2 text-xs text-red-600 dark:text-red-400">{order.note}</div>
                   )}
+                  {order.items.length > 0 && (
+                    <div className="mt-3 text-xs text-gray-600 dark:text-gray-300">
+                      <div className="font-semibold">Line Items</div>
+                      <ul className="mt-1 space-y-1">
+                        {order.items.map((item, index) => (
+                          <li key={`${order.reference}-item-${index}`} className="flex justify-between">
+                            <span>{item.quantity} x {item.product_id}</span>
+                            <span>${item.line_total.toFixed(2)}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
                 </div>
               ))}
             </div>

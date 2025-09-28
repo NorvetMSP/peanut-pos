@@ -6,17 +6,16 @@ This document aggregates the gaps we have identified while reviewing the current
 
 ### Current Implementation
 
-- Rust microservice exposes REST endpoints for create/list/refund and an offline clear helper (`services/order-service/src/order_handlers.rs:104`, `services/order-service/src/main.rs:151`).
-- All writes enforce `X-Tenant-ID` against authenticated claims and persist order headers in Postgres (`services/order-service/src/order_handlers.rs:34`, `services/order-service/src/order_handlers.rs:142`).
-- Card/crypto payments land in `PENDING` status and are tracked in-memory until Kafka events confirm (`services/order-service/src/main.rs:35`, `services/order-service/src/main.rs:158`).
+- Rust microservice exposes REST endpoints for create/list/refund and an offline clear helper (`services/order-service/src/order_handlers.rs:139`, `services/order-service/src/main.rs:123`).
+- Order writes enforce `X-Tenant-ID`, persist payment method metadata, and accept optional idempotency keys to dedupe retries (`services/order-service/src/order_handlers.rs:140`, `services/order-service/migrations/2003_add_order_items_and_idempotency.sql:1`).
+- Line items now persist to `order_items` with unit pricing, and events/refunds pull pricing from the database (`services/order-service/src/order_handlers.rs:111`, `services/order-service/src/order_handlers.rs:287`, `services/order-service/src/main.rs:170`).
+- Card/crypto payments remain `PENDING` until Kafka confirmation; the consumer applies parameterised status updates and rehydrates payloads from storage instead of an in-memory cache (`services/order-service/src/main.rs:150`, `services/order-service/src/main.rs:170`).
 
 ### Order Service: Confirmed Gaps / Risks
 
-- Kafka payment listeners ship malformed SQL without positional parameters, so status never flips to `COMPLETED`/`NOT_ACCEPTED` in practice (`services/order-service/src/main.rs:162`, `services/order-service/src/main.rs:211`).
-- Pending payment map is in-memory only; a process restart drops items before payment confirmation (`services/order-service/src/main.rs:35`).
-- No void endpoint or payment-state rollback path; only refund to negative `order.completed` events exists (`services/order-service/src/order_handlers.rs:200`).
-- No pre-commit inventory reservation or validation; oversell is possible when stock is tight (`services/order-service/src/order_handlers.rs:104`).
-- Operational tooling gaps: no idempotency guard on create, limited search (20 latest only), no receipt reprint or partial return workflows (`services/order-service/src/order_handlers.rs:258`).
+- No void endpoint or payment-state rollback path; only refund to negative `order.completed` events exists (`services/order-service/src/order_handlers.rs:307`).
+- No pre-commit inventory reservation or validation; oversell is possible when stock is tight (`services/order-service/src/order_handlers.rs:139`).
+- Operational tooling gaps persist: search is still limited (20 latest only) and partial return / receipt workflows remain unimplemented (`services/order-service/src/order_handlers.rs:381`).
 
 ### Order Service: Implications
 
@@ -28,12 +27,12 @@ This document aggregates the gaps we have identified while reviewing the current
 ### Checkout Speed & Offline-first: Current Implementation
 
 - POS keeps an offline queue in localStorage and retries submits when connectivity returns (`frontends/pos-app/src/OrderContext.tsx:23`, `frontends/pos-app/src/OrderContext.tsx:386`).
-- Order records store totals and an `offline` flag but no item-level pricing or idempotency metadata (`services/order-service/src/order_handlers.rs:68`, `services/order-service/migrations/2001_create_orders.sql:1`).
+- Order records now carry payment method, persisted line items, and optional idempotency metadata to safeguard retries (`services/order-service/src/order_handlers.rs:69`, `services/order-service/src/order_handlers.rs:160`, `services/order-service/migrations/2003_add_order_items_and_idempotency.sql:1`).
 
 ### Checkout Speed & Offline-first: Confirmed Gaps / Risks
 
-- Without idempotency keys or an outbox pattern, reconnect retries can double-create orders (`frontends/pos-app/src/OrderContext.tsx:386`).
-- Item-level context is missing, preventing reliable price-lock reconciliation.
+- Offline queue still generates submissions without deterministic `idempotency_key` values; frontend work remains to leverage the backend guard (`frontends/pos-app/src/OrderContext.tsx:386`, `services/order-service/src/order_handlers.rs:160`).
+- Item-level data is stored server-side but UI reconciliation and receipt flows still rely on cached payloads (`frontends/pos-app/src/components/pos/ProductGrid.tsx:9`).
 
 ### Checkout Speed & Offline-first: Implications
 

@@ -63,6 +63,16 @@ const RecentOrdersDrawer: React.FC<RecentOrdersDrawerProps> = ({ open, onClose }
                     </>
                   )}
                 </div>
+                {order.items.length > 0 && (
+                  <ul className="mt-2 text-xs text-gray-700 dark:text-gray-200 border-t border-gray-200 dark:border-gray-600 pt-2 space-y-1">
+                    {order.items.map((item, index) => (
+                      <li key={`${order.reference}-item-${index}`} className="flex justify-between">
+                        <span>{item.quantity} x {item.product_id}</span>
+                        <span>${item.line_total.toFixed(2)}</span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
                 {order.paymentUrl && (
                   <a
                     href={order.paymentUrl}

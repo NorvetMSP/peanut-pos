@@ -6,6 +6,7 @@ use axum::{
 use common_auth::AuthContext;
 use rdkafka::producer::FutureRecord;
 use serde::{Deserialize, Serialize};
+use sqlx::{Postgres, Transaction};
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -64,10 +65,12 @@ fn tenant_id_from_request(
     Ok(tenant_id)
 }
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct OrderItem {
     pub product_id: Uuid,
     pub quantity: i32,
+    pub unit_price: f64,
+    pub line_total: f64,
 }
 
 #[derive(Deserialize, Debug)]
@@ -77,6 +80,7 @@ pub struct NewOrder {
     pub total: f64,
     pub customer_id: Option<String>,
     pub offline: Option<bool>,
+    pub idempotency_key: Option<String>,
 }
 
 #[derive(Serialize, Debug, sqlx::FromRow)]
@@ -87,6 +91,9 @@ pub struct Order {
     pub status: String,
     pub customer_id: Option<Uuid>,
     pub offline: bool,
+    pub payment_method: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
 }
 
 #[derive(Serialize, Debug)]
@@ -101,6 +108,31 @@ pub struct RefundRequest {
     pub total: f64,
 }
 
+async fn insert_order_items(
+    tx: &mut Transaction<'_, Postgres>,
+    order_id: Uuid,
+    items: &[OrderItem],
+) -> Result<(), (StatusCode, String)> {
+    for item in items {
+        sqlx::query("INSERT INTO order_items (id, order_id, product_id, quantity, unit_price, line_total) VALUES ($1, $2, $3, $4, $5, $6)")
+        .bind(Uuid::new_v4())
+        .bind(order_id)
+        .bind(item.product_id)
+        .bind(item.quantity)
+        .bind(item.unit_price)
+        .bind(item.line_total)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to insert order item: {}", e),
+            )
+        })?;
+    }
+    Ok(())
+}
+
 pub async fn create_order(
     State(state): State<AppState>,
     auth: AuthContext,
@@ -110,17 +142,57 @@ pub async fn create_order(
     ensure_role(&auth, ORDER_WRITE_ROLES)?;
     let tenant_id = tenant_id_from_request(&headers, &auth)?;
 
+    if new_order.items.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Order must contain at least one item".to_string(),
+        ));
+    }
+
+    let mut payment_method = new_order.payment_method.trim().to_lowercase();
+    if payment_method.is_empty() {
+        payment_method = "cash".to_string();
+    }
+
+    let idempotency_key = new_order
+        .idempotency_key
+        .as_ref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string());
+
+    if let Some(ref key) = idempotency_key {
+        if let Some(existing) = sqlx::query_as::<_, Order>(
+            "SELECT id, tenant_id, total::FLOAT8 AS total, status, customer_id, offline, payment_method, idempotency_key
+             FROM orders WHERE tenant_id = $1 AND idempotency_key = $2"
+        )
+        .bind(tenant_id)
+        .bind(key)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("DB error while checking idempotency: {}", e),
+            )
+        })?
+        {
+            return Ok(Json(existing));
+        }
+    }
+
+    let total_from_items: f64 = new_order.items.iter().map(|item| item.line_total).sum();
+    if (total_from_items - new_order.total).abs() > 0.01 {
+        tracing::warn!(
+            tenant_id = %tenant_id,
+            provided_total = new_order.total,
+            derived_total = total_from_items,
+            "Order total differs from item aggregate by more than a cent"
+        );
+    }
+
     let order_id = Uuid::new_v4();
-    let NewOrder {
-        items,
-        payment_method,
-        total,
-        customer_id,
-        offline,
-    } = new_order;
-
-    let offline_flag = offline.unwrap_or(false);
-
+    let offline_flag = new_order.offline.unwrap_or(false);
     let status = if payment_method.eq_ignore_ascii_case("crypto")
         || payment_method.eq_ignore_ascii_case("card")
     {
@@ -129,7 +201,7 @@ pub async fn create_order(
         "COMPLETED"
     };
 
-    let customer_uuid = customer_id.as_ref().and_then(|value| {
+    let customer_uuid = new_order.customer_id.as_ref().and_then(|value| {
         let trimmed = value.trim();
         if trimmed.is_empty() {
             None
@@ -148,33 +220,68 @@ pub async fn create_order(
         }
     });
 
+    let mut tx = state.db.begin().await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to begin transaction: {}", e),
+        )
+    })?;
+
     let order = sqlx::query_as::<_, Order>(
-        "INSERT INTO orders (id, tenant_id, total, status, customer_id, offline)          VALUES ($1, $2, $3, $4, $5, $6)          RETURNING id, tenant_id, total::FLOAT8 as total, status, customer_id, offline",
+        "INSERT INTO orders (id, tenant_id, total, status, customer_id, offline, payment_method, idempotency_key)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         RETURNING id, tenant_id, total::FLOAT8 AS total, status, customer_id, offline, payment_method, idempotency_key"
     )
     .bind(order_id)
     .bind(tenant_id)
-    .bind(total)
+    .bind(new_order.total)
     .bind(status)
     .bind(customer_uuid)
     .bind(offline_flag)
-    .fetch_one(&state.db)
+    .bind(&payment_method)
+    .bind(idempotency_key.as_deref())
+    .fetch_one(&mut tx)
     .await
     .map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("DB error: {}", e),
+            format!("Failed to insert order: {}", e),
         )
     })?;
 
-    if status == "COMPLETED" {
+    insert_order_items(&mut tx, order.id, &new_order.items).await?;
+
+    tx.commit().await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to commit transaction: {}", e),
+        )
+    })?;
+
+    if order.status == "COMPLETED" {
+        let event_items: Vec<serde_json::Value> = new_order
+            .items
+            .iter()
+            .map(|item| {
+                serde_json::json!({
+                    "product_id": item.product_id,
+                    "quantity": item.quantity,
+                    "unit_price": item.unit_price,
+                    "line_total": item.line_total
+                })
+            })
+            .collect();
+
         let event = serde_json::json!({
             "order_id": order.id,
             "tenant_id": tenant_id,
-            "items": items,
-            "total": total,
+            "items": event_items,
+            "total": new_order.total,
             "customer_id": customer_uuid,
-            "offline": order.offline
+            "offline": order.offline,
+            "payment_method": order.payment_method,
         });
+
         if let Err(err) = state
             .kafka_producer
             .send(
@@ -187,11 +294,6 @@ pub async fn create_order(
         {
             tracing::error!("Failed to send order.completed: {:?}", err);
         }
-    } else if let Some(pending_orders) = &state.pending_orders {
-        pending_orders
-            .lock()
-            .unwrap()
-            .insert(order.id, (items, customer_uuid, offline_flag));
     }
 
     Ok(Json(order))
@@ -208,7 +310,7 @@ pub async fn refund_order(
 
     let updated_order = sqlx::query_as::<_, Order>(
         "UPDATE orders SET status = 'REFUNDED' WHERE id = $1 AND tenant_id = $2
-         RETURNING id, tenant_id, total::FLOAT8 as total, status, customer_id, offline",
+         RETURNING id, tenant_id, total::FLOAT8 as total, status, customer_id, offline, payment_method, idempotency_key",
     )
     .bind(req.order_id)
     .bind(tenant_id)
@@ -227,7 +329,9 @@ pub async fn refund_order(
         .map(|item| {
             serde_json::json!({
                 "product_id": item.product_id,
-                "quantity": -(item.quantity as i32)
+                "quantity": -(item.quantity as i32),
+                "unit_price": item.unit_price,
+                "line_total": -item.line_total,
             })
         })
         .collect();
@@ -237,7 +341,8 @@ pub async fn refund_order(
         "items": neg_items,
         "total": -req.total,
         "customer_id": updated_order.customer_id,
-        "offline": updated_order.offline
+        "offline": updated_order.offline,
+        "payment_method": updated_order.payment_method,
     });
     if let Err(err) = state
         .kafka_producer
@@ -264,7 +369,11 @@ pub async fn list_orders(
     let tenant_id = tenant_id_from_request(&headers, &auth)?;
 
     let orders = sqlx::query_as::<_, Order>(
-        "SELECT id, tenant_id, total::FLOAT8 as total, status, customer_id, offline          FROM orders          WHERE tenant_id = $1          ORDER BY created_at DESC          LIMIT 20",
+        "SELECT id, tenant_id, total::FLOAT8 as total, status, customer_id, offline, payment_method, idempotency_key
+         FROM orders
+         WHERE tenant_id = $1
+         ORDER BY created_at DESC
+         LIMIT 20",
     )
     .bind(tenant_id)
     .fetch_all(&state.db)

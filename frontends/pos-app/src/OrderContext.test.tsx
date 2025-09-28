@@ -17,8 +17,16 @@ describe('OrderContext offline queue', () => {
     window.localStorage.setItem('session', JSON.stringify(session));
     Object.defineProperty(window.navigator, 'onLine', { value: false, configurable: true });
 
-    const fetchMock = vi.fn((input: RequestInfo | URL, _init?: RequestInit) => {
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
       const url = typeof input === 'string' || input instanceof URL ? input.toString() : input.url;
+      if (url.includes('/session')) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({ token: 'test-token', user: { tenant_id: 'tenant-123' } }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+          ),
+        );
+      }
       if (url.includes('/orders')) {
         return Promise.resolve(
           new Response(
@@ -48,6 +56,10 @@ describe('OrderContext offline queue', () => {
 
   it('queues orders when offline and flushes on reconnect', async () => {
     const { result } = renderHook(() => useOrders(), { wrapper });
+
+    await act(async () => {
+      await Promise.resolve();
+    });
 
     const draftOrder: DraftOrderPayload = {
       items: [{ product_id: 'p1', quantity: 1, unit_price: 5, line_total: 5 }],

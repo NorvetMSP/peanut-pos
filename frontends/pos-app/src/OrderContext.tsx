@@ -33,6 +33,13 @@ const AUTO_FLUSH_MIN_INTERVAL_MS = 5000;
 
 const TERMINAL_STATUS_KEYWORDS = ['complete', 'completed', 'accepted', 'fulfilled', 'cancel', 'cancelled', 'void', 'voided', 'declined', 'failed', 'refunded', 'closed'];
 const PENDING_STATUS_KEYWORDS = ['pending', 'processing', 'awaiting', 'submitted'];
+const generateIdempotencyKey = (): string => {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return `pos-${crypto.randomUUID()}`;
+  }
+  return `pos-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+};
+
 const PENDING_PAYMENT_KEYWORDS = ['pending', 'processing', 'awaiting', 'requires', 'open'];
 
 export type PaymentMethod = 'card' | 'cash' | 'crypto';
@@ -50,6 +57,7 @@ export type DraftOrderPayload = {
   total: number;
   customer_id?: string;
   metadata?: Record<string, unknown>;
+  idempotency_key?: string;
 };
 
 type OrderSubmissionPayload = DraftOrderPayload & { offline: boolean };
@@ -92,6 +100,8 @@ type OrderHistoryEntry = {
   paymentUrl?: string | null;
   note?: string;
   syncedAt?: number;
+  items: OrderItemPayload[];
+  idempotencyKey?: string;
 };
 
 export type SubmitOrderResult =
@@ -192,6 +202,7 @@ const readQueueFromStorage = (): QueuedOrder[] => {
         total: Number(total),
         customer_id: typeof payloadRecord.customer_id === 'string' ? payloadRecord.customer_id : undefined,
         metadata: typeof payloadRecord.metadata === 'object' && payloadRecord.metadata !== null ? (payloadRecord.metadata as Record<string, unknown>) : undefined,
+        idempotency_key: typeof payloadRecord.idempotency_key === 'string' && payloadRecord.idempotency_key.trim().length > 0 ? payloadRecord.idempotency_key.trim() : undefined,
         offline: true,
       };
       if (normalizedPayload.items.length === 0 || !Number.isFinite(normalizedPayload.total)) {
@@ -230,6 +241,33 @@ const readRecentOrders = (): OrderHistoryEntry[] => {
         if (!reference || !status || (paymentMethod !== 'card' && paymentMethod !== 'cash' && paymentMethod !== 'crypto')) {
           return null;
         }
+        const rawItems = Array.isArray(candidate.items) ? candidate.items : [];
+        const items = rawItems
+          .map(entry => {
+            if (!entry || typeof entry !== 'object') return null;
+            const row = entry as Record<string, unknown>;
+            const productId = row.product_id;
+            const quantity = row.quantity;
+            const unitPrice = row.unit_price;
+            const lineTotal = row.line_total;
+            if (typeof productId !== 'string' && typeof productId !== 'number') return null;
+            if (!Number.isFinite(Number(quantity)) || !Number.isFinite(Number(unitPrice))) return null;
+            const quantityNumber = Number(quantity);
+            const priceNumber = Number(unitPrice);
+            return {
+              product_id: typeof productId === 'string' ? productId : String(productId),
+              quantity: quantityNumber,
+              unit_price: priceNumber,
+              line_total: Number(lineTotal ?? priceNumber * quantityNumber),
+            };
+          })
+          .filter((row): row is OrderItemPayload => Boolean(row));
+        const storedIdempotencyKey = (() => {
+          const direct = typeof candidate.idempotencyKey === 'string' ? candidate.idempotencyKey.trim() : '';
+          if (direct.length > 0) return direct;
+          const legacy = typeof candidate.idempotency_key === 'string' ? candidate.idempotency_key.trim() : '';
+          return legacy.length > 0 ? legacy : undefined;
+        })();
         return {
           id: typeof candidate.id === 'string' ? candidate.id : reference,
           reference,
@@ -243,6 +281,8 @@ const readRecentOrders = (): OrderHistoryEntry[] => {
           paymentUrl: typeof candidate.paymentUrl === 'string' ? candidate.paymentUrl : undefined,
           note: typeof candidate.note === 'string' ? candidate.note : undefined,
           syncedAt: typeof candidate.syncedAt === 'number' ? candidate.syncedAt : undefined,
+          items,
+          idempotencyKey: storedIdempotencyKey,
         } as OrderHistoryEntry;
       })
       .filter((item): item is OrderHistoryEntry => Boolean(item));
@@ -363,9 +403,18 @@ export const OrderProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   }, [buildHeaders]);
 
   const addRecentOrder = useCallback((entry: OrderHistoryEntry) => {
+    const normalized: OrderHistoryEntry = {
+      ...entry,
+      items: entry.items ?? [],
+      idempotencyKey: entry.idempotencyKey ?? entry.tempId ?? entry.reference,
+    };
     setRecentOrders(current => {
-      const withoutDuplicate = current.filter(item => item.reference !== entry.reference && item.tempId !== entry.tempId);
-      const next = [entry, ...withoutDuplicate];
+      const withoutDuplicate = current.filter(item =>
+        item.reference !== normalized.reference &&
+        item.tempId !== normalized.tempId &&
+        (item.idempotencyKey === undefined || item.idempotencyKey !== normalized.idempotencyKey),
+      );
+      const next = [normalized, ...withoutDuplicate];
       return next.slice(0, RECENT_ORDERS_LIMIT);
     });
   }, []);
@@ -386,10 +435,15 @@ export const OrderProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const queueOrder = useCallback((payload: DraftOrderPayload, reason?: string) => {
     const timestamp = Date.now();
     const tempId = `offline-${timestamp}-${Math.random().toString(36).slice(2, 8)}`;
+    const keyFromPayload = typeof payload.idempotency_key === 'string' && payload.idempotency_key.trim().length > 0 ? payload.idempotency_key.trim() : undefined;
+    const payloadWithKey: DraftOrderPayload = {
+      ...payload,
+      idempotency_key: keyFromPayload ?? tempId,
+    };
     const entry: QueuedOrder = {
       tempId,
       createdAt: timestamp,
-      payload: { ...payload, offline: true },
+      payload: { ...payloadWithKey, offline: true },
       attempts: 0,
       lastError: reason,
     };
@@ -399,12 +453,14 @@ export const OrderProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       reference: tempId,
       status: 'Queued (offline)',
       paymentStatus: reason ? `Awaiting sync (${reason})` : 'Awaiting sync',
-      paymentMethod: payload.payment_method,
-      total: payload.total,
+      paymentMethod: payloadWithKey.payment_method,
+      total: payloadWithKey.total,
       createdAt: timestamp,
       offline: true,
       tempId,
       note: reason,
+      items: payloadWithKey.items,
+      idempotencyKey: payloadWithKey.idempotency_key,
     });
     return entry;
   }, [addRecentOrder]);
@@ -427,6 +483,8 @@ export const OrderProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         paymentUrl: paymentOutcome.payment?.payment_url ?? paymentOutcome.payment?.paymentUrl ?? existing.paymentUrl ?? null,
         note: paymentOutcome.paymentError,
         syncedAt: Date.now(),
+        items: existing.items.length > 0 ? existing.items : entry.payload.items,
+        idempotencyKey: existing.idempotencyKey ?? entry.payload.idempotency_key ?? existing.idempotencyKey,
       }));
       if (!didUpdate) {
         addRecentOrder({
@@ -443,6 +501,8 @@ export const OrderProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           paymentUrl: paymentOutcome.payment?.payment_url ?? paymentOutcome.payment?.paymentUrl ?? null,
           note: paymentOutcome.paymentError,
           syncedAt: Date.now(),
+          items: entry.payload.items,
+          idempotencyKey: entry.payload.idempotency_key ?? order.id,
         });
       }
       return true;
@@ -455,6 +515,8 @@ export const OrderProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         paymentStatus: `Sync failed: ${message}`,
         status: 'Queued (offline)',
         offline: true,
+        items: existing.items.length > 0 ? existing.items : entry.payload.items,
+        idempotencyKey: existing.idempotencyKey ?? entry.payload.idempotency_key ?? existing.idempotencyKey,
       }));
       if (!didUpdateFailure) {
         addRecentOrder({
@@ -468,6 +530,8 @@ export const OrderProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           offline: true,
           tempId: entry.tempId,
           note: message,
+          items: entry.payload.items,
+          idempotencyKey: entry.payload.idempotency_key ?? entry.tempId,
         });
       }
       return false;
@@ -702,9 +766,13 @@ export const OrderProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       throw new Error('Order total is invalid.');
     }
 
+    const idempotencyKey = typeof payload.idempotency_key === 'string' && payload.idempotency_key.trim().length > 0
+      ? payload.idempotency_key.trim()
+      : generateIdempotencyKey();
     const basePayload: DraftOrderPayload = {
       ...payload,
       total: normalizedTotal,
+      idempotency_key: idempotencyKey,
     };
 
     if (shouldForceOffline || !isOnline) {
@@ -745,6 +813,8 @@ export const OrderProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       paymentUrl: paymentOutcome.payment?.payment_url ?? paymentOutcome.payment?.paymentUrl ?? null,
       note: paymentOutcome.paymentError,
       syncedAt: Date.now(),
+      items: basePayload.items,
+      idempotencyKey: basePayload.idempotency_key,
     });
 
     return {
