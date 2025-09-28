@@ -63,6 +63,52 @@ const normalizeProduct = (input: unknown): ServiceProduct | null => {
   };
 };
 
+type AuditEntriesContainer = {
+  entries?: unknown;
+};
+
+const isAuditEntriesContainer = (value: unknown): value is AuditEntriesContainer =>
+  typeof value === 'object' && value !== null && 'entries' in value;
+
+const isProductAuditEntry = (entry: ProductAuditEntry | null): entry is ProductAuditEntry => entry !== null;
+
+// Helper to normalize a single audit entry
+function normalizeAuditEntry(entry: unknown): ProductAuditEntry | null {
+  if (!entry || typeof entry !== 'object') return null;
+  const candidate = entry as Record<string, unknown>;
+  const id = candidate.id;
+  const action = candidate.action;
+  const createdAt = candidate.created_at;
+  if (typeof id !== 'string' || typeof action !== 'string' || typeof createdAt !== 'string') return null;
+
+  const actorId = typeof candidate.actor_id === 'string' ? candidate.actor_id : null;
+  const actorName = typeof candidate.actor_name === 'string' ? candidate.actor_name : null;
+  const actorEmail = typeof candidate.actor_email === 'string' ? candidate.actor_email : null;
+  const changes = 'changes' in candidate ? candidate.changes : undefined;
+
+  return {
+    id,
+    action,
+    created_at: createdAt,
+    actor_id: actorId,
+    actor_name: actorName,
+    actor_email: actorEmail,
+    changes: changes ?? {},
+  };
+}
+
+// Helper to normalize audit entries from API response
+function normalizeAuditEntries(input: unknown): ProductAuditEntry[] {
+  if (!input) return [];
+  if (Array.isArray(input)) {
+    return input.map(normalizeAuditEntry).filter(isProductAuditEntry);
+  }
+  if (isAuditEntriesContainer(input) && Array.isArray(input.entries)) {
+    return input.entries.map(normalizeAuditEntry).filter(isProductAuditEntry);
+  }
+  return [];
+}
+
 const ProductListPage: React.FC = () => {
   const { isLoggedIn, currentUser, token } = useAuth();
   const navigate = useNavigate();
@@ -136,37 +182,7 @@ const ProductListPage: React.FC = () => {
     }
   }, [buildHeaders, ensureTenantContext]);
 
-  // Helper to normalize audit entries from API response
-  function normalizeAuditEntries(input: unknown): ProductAuditEntry[] {
-    if (!input) return [];
-    if (Array.isArray(input)) {
-      return input
-        .map(normalizeAuditEntry)
-        .filter((e): e is ProductAuditEntry => Boolean(e));
-    }
-    if (typeof input === 'object' && input !== null && Array.isArray((input as any).entries)) {
-      return (input as any).entries
-        .map(normalizeAuditEntry)
-        .filter((e: unknown): e is ProductAuditEntry => Boolean(e));
-    }
-    return [];
-  }
 
-  // Helper to normalize a single audit entry
-  function normalizeAuditEntry(entry: any): ProductAuditEntry | null {
-    if (!entry || typeof entry !== 'object') return null;
-    const { id, action, created_at, actor_id, actor_name, actor_email, changes } = entry;
-    if (typeof id !== 'string' || typeof action !== 'string' || typeof created_at !== 'string') return null;
-    return {
-      id,
-      action,
-      created_at,
-      actor_id: typeof actor_id === 'string' ? actor_id : null,
-      actor_name: typeof actor_name === 'string' ? actor_name : null,
-      actor_email: typeof actor_email === 'string' ? actor_email : null,
-      changes: changes ?? {},
-    };
-  }
 
   const fetchProductAudit = useCallback(
     async (productId: string, force = false): Promise<void> => {
@@ -397,16 +413,19 @@ const ProductListPage: React.FC = () => {
       if (response.status === 204) {
         setProducts(prev => prev.filter(item => item.id !== product.id));
         setAuditLogByProduct(prev => {
-          const { [product.id]: _unused, ...rest } = prev;
-          return rest;
+          const next = { ...prev };
+          delete next[product.id];
+          return next;
         });
         setAuditLoadingByProduct(prev => {
-          const { [product.id]: _unused, ...rest } = prev;
-          return rest;
+          const next = { ...prev };
+          delete next[product.id];
+          return next;
         });
         setAuditErrorByProduct(prev => {
-          const { [product.id]: _unused, ...rest } = prev;
-          return rest;
+          const next = { ...prev };
+          delete next[product.id];
+          return next;
         });
         if (editingProductId === product.id) {
           resetEditState();
@@ -558,8 +577,6 @@ const ProductListPage: React.FC = () => {
                     const auditEntries = auditLogByProduct[prod.id] ?? [];
                     const auditLoading = auditLoadingByProduct[prod.id];
                     const auditError = auditErrorByProduct[prod.id];
-                    const showHistory = isEditing || historyProductId === prod.id;
-
                     if (isEditing) {
                       return (
                         <React.Fragment key={prod.id}>
