@@ -4,7 +4,7 @@ use argon2::{
 };
 use axum::{
     body::Body,
-    extract::State,
+    extract::{Path, State},
     http::{
         header::{COOKIE, SET_COOKIE},
         HeaderMap, HeaderValue, StatusCode,
@@ -13,10 +13,11 @@ use axum::{
     Json,
 };
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
+use common_auth::AuthContext;
 use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use sqlx::FromRow;
+use sqlx::{FromRow, Postgres, QueryBuilder};
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
@@ -77,6 +78,14 @@ impl AuthError {
         );
         error.body.locked_until = locked_until;
         error
+    }
+
+    pub(crate) fn account_inactive() -> Self {
+        Self::new(
+            StatusCode::FORBIDDEN,
+            "ACCOUNT_INACTIVE",
+            "This account is disabled. Please contact an administrator.",
+        )
     }
 
     pub(crate) fn mfa_required() -> Self {
@@ -142,6 +151,18 @@ pub struct NewUser {
     pub role: String,
 }
 
+#[derive(Deserialize)]
+pub struct UpdateUserRequest {
+    pub name: Option<String>,
+    pub role: Option<String>,
+    pub is_active: Option<bool>,
+}
+
+#[derive(Deserialize)]
+pub struct ResetPasswordRequest {
+    pub password: String,
+}
+
 #[derive(Debug, Serialize, Deserialize, FromRow)]
 pub struct User {
     pub id: Uuid,
@@ -149,8 +170,12 @@ pub struct User {
     pub name: String,
     pub email: String,
     pub role: String,
+    pub is_active: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub last_password_reset: Option<DateTime<Utc>>,
+    pub force_password_reset: bool,
 }
-
 #[derive(FromRow)]
 #[allow(dead_code)]
 struct AuthRow {
@@ -159,9 +184,14 @@ struct AuthRow {
     name: String,
     email: String,
     role: String,
+    is_active: bool,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
     password_hash: String,
     failed_attempts: i16,
     locked_until: Option<DateTime<Utc>>,
+    last_password_reset: Option<DateTime<Utc>>,
+    force_password_reset: bool,
     mfa_secret: Option<String>,
     mfa_pending_secret: Option<String>,
     mfa_enrolled_at: Option<DateTime<Utc>>,
@@ -347,10 +377,13 @@ async fn record_mfa_event(
 
 pub async fn create_user(
     State(state): State<AppState>,
+    auth: AuthContext,
     headers: HeaderMap,
     Json(new_user): Json<NewUser>,
 ) -> Result<Json<User>, (StatusCode, String)> {
+    ensure_role_any(&auth, &["super_admin", "admin"])?;
     let tenant_id = extract_tenant_id(&headers)?;
+    ensure_tenant_access(&auth, tenant_id)?;
 
     let user_id = Uuid::new_v4();
     let NewUser {
@@ -360,20 +393,40 @@ pub async fn create_user(
         role,
     } = new_user;
 
-    validate_role(&role)?;
+    let trimmed_name = name.trim();
+    if trimmed_name.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Name must not be empty".to_string(),
+        ));
+    }
+
+    let trimmed_email = email.trim();
+    if trimmed_email.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Email must not be empty".to_string(),
+        ));
+    }
+
+    let trimmed_role = role.trim();
+    validate_role(trimmed_role)?;
     let password_hash = hash_password(&password)?;
+    let now = Utc::now();
 
     let user = sqlx::query_as::<_, User>(
-        "INSERT INTO users (id, tenant_id, name, email, role, password_hash)
-         VALUES ($1, $2, $3, $4, $5, $6)
-         RETURNING id, tenant_id, name, email, role",
+        "INSERT INTO users (id, tenant_id, name, email, role, password_hash, is_active, created_at, updated_at, last_password_reset, force_password_reset)
+         VALUES ($1, $2, $3, $4, $5, $6, TRUE, $7, $8, NULL, TRUE)
+         RETURNING id, tenant_id, name, email, role, is_active, created_at, updated_at, last_password_reset, force_password_reset",
     )
     .bind(user_id)
     .bind(tenant_id)
-    .bind(name)
-    .bind(email)
-    .bind(role)
+    .bind(trimmed_name)
+    .bind(trimmed_email)
+    .bind(trimmed_role)
     .bind(password_hash)
+    .bind(now)
+    .bind(now)
     .fetch_one(&state.db)
     .await
     .map_err(|e| {
@@ -388,12 +441,18 @@ pub async fn create_user(
 
 pub async fn list_users(
     State(state): State<AppState>,
+    auth: AuthContext,
     headers: HeaderMap,
 ) -> Result<Json<Vec<User>>, (StatusCode, String)> {
+    ensure_role_any(&auth, &["super_admin", "admin", "manager"])?;
     let tenant_id = extract_tenant_id(&headers)?;
+    ensure_tenant_access(&auth, tenant_id)?;
 
     let users = sqlx::query_as::<_, User>(
-        "SELECT id, tenant_id, name, email, role FROM users WHERE tenant_id = $1",
+        "SELECT id, tenant_id, name, email, role, is_active, created_at, updated_at, last_password_reset, force_password_reset
+         FROM users
+         WHERE tenant_id = $1
+         ORDER BY name",
     )
     .bind(tenant_id)
     .fetch_all(&state.db)
@@ -406,6 +465,162 @@ pub async fn list_users(
     })?;
 
     Ok(Json(users))
+}
+
+pub async fn update_user(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path(user_id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(payload): Json<UpdateUserRequest>,
+) -> Result<Json<User>, (StatusCode, String)> {
+    ensure_role_any(&auth, &["super_admin", "admin"])?;
+    let tenant_id = extract_tenant_id(&headers)?;
+    ensure_tenant_access(&auth, tenant_id)?;
+
+    let existing = sqlx::query_as::<_, User>(
+        "SELECT id, tenant_id, name, email, role, is_active, created_at, updated_at, last_password_reset, force_password_reset
+         FROM users
+         WHERE id = $1 AND tenant_id = $2",
+    )
+    .bind(user_id)
+    .bind(tenant_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {e}")))?
+    .ok_or((StatusCode::NOT_FOUND, "User not found".to_string()))?;
+
+    let mut name_changed = false;
+    let mut role_changed = false;
+    let mut active_changed = false;
+    let mut updated_name = existing.name.clone();
+    let mut updated_role = existing.role.clone();
+    let mut updated_active = existing.is_active;
+
+    if let Some(name) = payload.name.as_ref() {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Name must not be empty".to_string(),
+            ));
+        }
+        if trimmed != existing.name {
+            updated_name = trimmed.to_string();
+            name_changed = true;
+        }
+    }
+    if let Some(role) = payload.role.as_ref() {
+        let trimmed = role.trim();
+        if trimmed.is_empty() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Role must not be empty".to_string(),
+            ));
+        }
+        validate_role(trimmed)?;
+        if trimmed != existing.role {
+            updated_role = trimmed.to_string();
+            role_changed = true;
+        }
+    }
+
+    if let Some(is_active) = payload.is_active {
+        if is_active != existing.is_active {
+            updated_active = is_active;
+            active_changed = true;
+        }
+    }
+
+    if !name_changed && !role_changed && !active_changed {
+        return Ok(Json(existing));
+    }
+
+    let now = Utc::now();
+    let mut builder = QueryBuilder::<Postgres>::new("UPDATE users SET ");
+    {
+        let mut separated = builder.separated(", ");
+        separated.push("updated_at = ");
+        separated.push_bind(now);
+        if name_changed {
+            separated.push("name = ");
+            separated.push_bind(&updated_name);
+        }
+        if role_changed {
+            separated.push("role = ");
+            separated.push_bind(&updated_role);
+        }
+        if active_changed {
+            separated.push("is_active = ");
+            separated.push_bind(updated_active);
+        }
+    }
+    builder.push(" WHERE id = ");
+    builder.push_bind(user_id);
+    builder.push(" AND tenant_id = ");
+    builder.push_bind(tenant_id);
+    builder.push(
+        " RETURNING id, tenant_id, name, email, role, is_active, created_at, updated_at, last_password_reset, force_password_reset",
+    );
+
+    let user = builder
+        .build_query_as::<User>()
+        .fetch_one(&state.db)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Database error: {e}"),
+            )
+        })?;
+
+    Ok(Json(user))
+}
+
+pub async fn reset_user_password(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path(user_id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(payload): Json<ResetPasswordRequest>,
+) -> Result<Json<User>, (StatusCode, String)> {
+    ensure_role_any(&auth, &["super_admin", "admin"])?;
+    let tenant_id = extract_tenant_id(&headers)?;
+    ensure_tenant_access(&auth, tenant_id)?;
+
+    let trimmed = payload.password.trim();
+    if trimmed.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Password must not be empty".to_string(),
+        ));
+    }
+    if trimmed.len() < 8 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Password must be at least 8 characters long.".to_string(),
+        ));
+    }
+
+    let password_hash = hash_password(trimmed)?;
+    let now = Utc::now();
+
+    let user = sqlx::query_as::<_, User>(
+        "UPDATE users
+         SET password_hash = $1, updated_at = $2, last_password_reset = $2, force_password_reset = TRUE
+         WHERE id = $3 AND tenant_id = $4
+         RETURNING id, tenant_id, name, email, role, is_active, created_at, updated_at, last_password_reset, force_password_reset",
+    )
+    .bind(password_hash)
+    .bind(now)
+    .bind(user_id)
+    .bind(tenant_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {e}")))?
+    .ok_or((StatusCode::NOT_FOUND, "User not found".to_string()))?;
+
+    Ok(Json(user))
 }
 
 #[derive(Deserialize)]
@@ -454,7 +669,7 @@ pub async fn login_user(
 
     let user_row = match tenant_id {
         Some(tenant) => sqlx::query_as::<_, AuthRow>(
-            "SELECT id, tenant_id, name, email, role, password_hash, failed_attempts, locked_until, mfa_secret, mfa_pending_secret, mfa_enrolled_at, mfa_failed_attempts, mfa_last_challenge_at FROM users WHERE email = $1 AND tenant_id = $2",
+            "SELECT id, tenant_id, name, email, role, is_active, created_at, updated_at, password_hash, failed_attempts, locked_until, last_password_reset, force_password_reset, mfa_secret, mfa_pending_secret, mfa_enrolled_at, mfa_failed_attempts, mfa_last_challenge_at FROM users WHERE email = $1 AND tenant_id = $2",
         )
         .bind(&email)
         .bind(tenant)
@@ -462,7 +677,7 @@ pub async fn login_user(
         .await
         .map_err(|e| AuthError::internal_error(format!("DB query failed: {e}")))?,
         None => sqlx::query_as::<_, AuthRow>(
-            "SELECT id, tenant_id, name, email, role, password_hash, failed_attempts, locked_until, mfa_secret, mfa_pending_secret, mfa_enrolled_at, mfa_failed_attempts, mfa_last_challenge_at FROM users WHERE email = $1",
+            "SELECT id, tenant_id, name, email, role, is_active, created_at, updated_at, password_hash, failed_attempts, locked_until, last_password_reset, force_password_reset, mfa_secret, mfa_pending_secret, mfa_enrolled_at, mfa_failed_attempts, mfa_last_challenge_at FROM users WHERE email = $1",
         )
         .bind(&email)
         .fetch_optional(&state.db)
@@ -477,6 +692,11 @@ pub async fn login_user(
             return Err(AuthError::invalid_credentials());
         }
     };
+
+    if !auth_data.is_active {
+        state.record_login_metric("account_inactive");
+        return Err(AuthError::account_inactive());
+    }
 
     let now = Utc::now();
 
@@ -809,7 +1029,12 @@ pub async fn login_user(
         tenant_id: auth_data.tenant_id,
         name: auth_data.name,
         email: auth_data.email,
-        role: auth_data.role,
+        role: auth_data.role.clone(),
+        is_active: auth_data.is_active,
+        created_at: auth_data.created_at,
+        updated_at: auth_data.updated_at,
+        last_password_reset: auth_data.last_password_reset,
+        force_password_reset: auth_data.force_password_reset,
     };
 
     let subject = TokenSubject {
@@ -898,6 +1123,11 @@ pub async fn refresh_session(
         name: account.name,
         email: account.email,
         role: account.role.clone(),
+        is_active: account.is_active,
+        created_at: account.created_at,
+        updated_at: account.updated_at,
+        last_password_reset: account.last_password_reset,
+        force_password_reset: account.force_password_reset,
     };
 
     let subject = TokenSubject {
@@ -990,6 +1220,28 @@ pub(crate) fn extract_tenant_id(headers: &HeaderMap) -> Result<Uuid, (StatusCode
             StatusCode::BAD_REQUEST,
             "Invalid or missing X-Tenant-ID header".to_string(),
         )),
+    }
+}
+
+fn ensure_role_any(auth: &AuthContext, allowed: &[&str]) -> Result<(), (StatusCode, String)> {
+    if allowed.iter().any(|role| auth.has_role(role)) {
+        Ok(())
+    } else {
+        Err((
+            StatusCode::FORBIDDEN,
+            format!("Insufficient role. Required one of: {}", allowed.join(", ")),
+        ))
+    }
+}
+
+fn ensure_tenant_access(auth: &AuthContext, tenant_id: Uuid) -> Result<(), (StatusCode, String)> {
+    if auth.has_role("super_admin") || auth.claims.tenant_id == tenant_id {
+        Ok(())
+    } else {
+        Err((
+            StatusCode::FORBIDDEN,
+            "You are not permitted to manage another tenant.".to_string(),
+        ))
     }
 }
 

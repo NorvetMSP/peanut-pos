@@ -23,6 +23,9 @@ const ORDER_STATUS_WS_URL = (() => {
 const OFFLINE_QUEUE_STORAGE_KEY = 'pos-offline-orders';
 const RECENT_ORDERS_STORAGE_KEY = 'pos-recent-orders';
 const RECENT_ORDERS_LIMIT = 20;
+const DEVICE_ID_STORAGE_KEY = 'pos-device-id';
+const OFFLINE_SEQUENCE_STORAGE_KEY = 'pos-offline-sequence';
+const OFFLINE_KEY_PREFIX = 'pos-offline-';
 const STATUS_POLL_INTERVAL_MS = (() => {
   const raw = Number(import.meta.env.VITE_ORDER_STATUS_POLL_MS);
   if (Number.isFinite(raw) && raw >= 5000) return raw;
@@ -155,6 +158,59 @@ const parseError = (input: unknown): string => {
   }
 };
 
+const ensureSanitisedSegment = (input: string): string => {
+  return input.toLowerCase().replace(/[^a-z0-9-]/g, '');
+};
+
+const ensureDeviceIdentifier = (): string => {
+  if (!isBrowser) {
+    return 'device-simulated';
+  }
+  const cached = window.localStorage.getItem(DEVICE_ID_STORAGE_KEY);
+  if (cached && cached.trim().length > 0) {
+    return ensureSanitisedSegment(cached.trim());
+  }
+  const raw =
+    typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  const normalised = ensureSanitisedSegment(raw) || `device-${Date.now().toString(36)}`;
+  window.localStorage.setItem(DEVICE_ID_STORAGE_KEY, normalised);
+  return normalised;
+};
+
+const nextOfflineSequence = (): number => {
+  if (!isBrowser) {
+    return Date.now();
+  }
+  const raw = window.localStorage.getItem(OFFLINE_SEQUENCE_STORAGE_KEY);
+  const parsed = raw ? Number(raw) : 0;
+  const safe = Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
+  const next = safe + 1;
+  window.localStorage.setItem(OFFLINE_SEQUENCE_STORAGE_KEY, String(next));
+  return next;
+};
+
+const generateOfflineIdempotencyKey = (): string => {
+  const deviceId = ensureDeviceIdentifier();
+  const sequence = nextOfflineSequence();
+  return `${OFFLINE_KEY_PREFIX}${deviceId}-${sequence}`;
+};
+
+const ensureOfflineIdempotencyKey = (existing?: string | null, forceReplacement = false): string => {
+  const trimmed = typeof existing === 'string' ? existing.trim() : '';
+  if (!trimmed) {
+    return generateOfflineIdempotencyKey();
+  }
+  if (trimmed.startsWith(OFFLINE_KEY_PREFIX)) {
+    return trimmed;
+  }
+  if (forceReplacement) {
+    return generateOfflineIdempotencyKey();
+  }
+  return trimmed;
+};
+
 const readQueueFromStorage = (): QueuedOrder[] => {
   if (!isBrowser) return [];
   const raw = window.localStorage.getItem(OFFLINE_QUEUE_STORAGE_KEY);
@@ -163,6 +219,7 @@ const readQueueFromStorage = (): QueuedOrder[] => {
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
     const hydrated: QueuedOrder[] = [];
+    let highestOfflineSequence = 0;
     for (const item of parsed) {
       if (!item || typeof item !== 'object') continue;
       const candidate = item as Record<string, unknown>;
@@ -206,6 +263,16 @@ const readQueueFromStorage = (): QueuedOrder[] => {
         idempotency_key: typeof payloadRecord.idempotency_key === 'string' && payloadRecord.idempotency_key.trim().length > 0 ? payloadRecord.idempotency_key.trim() : undefined,
         offline: true,
       };
+      if (
+        normalizedPayload.idempotency_key &&
+        normalizedPayload.idempotency_key.startsWith(OFFLINE_KEY_PREFIX)
+      ) {
+        const parts = normalizedPayload.idempotency_key.split('-');
+        const sequenceCandidate = Number(parts[parts.length - 1]);
+        if (Number.isFinite(sequenceCandidate) && sequenceCandidate > highestOfflineSequence) {
+          highestOfflineSequence = sequenceCandidate;
+        }
+      }
       if (normalizedPayload.items.length === 0 || !Number.isFinite(normalizedPayload.total)) {
         continue;
       }
@@ -216,6 +283,13 @@ const readQueueFromStorage = (): QueuedOrder[] => {
         attempts,
         lastError: typeof candidate.lastError === 'string' ? candidate.lastError : undefined,
       });
+    }
+    if (isBrowser && highestOfflineSequence > 0) {
+      const storedSequence = Number(window.localStorage.getItem(OFFLINE_SEQUENCE_STORAGE_KEY));
+      const safeStored = Number.isFinite(storedSequence) && storedSequence >= 0 ? storedSequence : 0;
+      if (highestOfflineSequence > safeStored) {
+        window.localStorage.setItem(OFFLINE_SEQUENCE_STORAGE_KEY, String(highestOfflineSequence));
+      }
     }
     return hydrated;
   } catch (err) {
@@ -522,12 +596,12 @@ export const OrderProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
   const queueOrder = useCallback((payload: DraftOrderPayload, reason?: string) => {
     const timestamp = Date.now();
-    const tempId = `offline-${timestamp}-${Math.random().toString(36).slice(2, 8)}`;
-    const keyFromPayload = typeof payload.idempotency_key === 'string' && payload.idempotency_key.trim().length > 0 ? payload.idempotency_key.trim() : undefined;
+    const offlineKey = ensureOfflineIdempotencyKey(payload.idempotency_key, true);
     const payloadWithKey: DraftOrderPayload = {
       ...payload,
-      idempotency_key: keyFromPayload ?? tempId,
+      idempotency_key: offlineKey,
     };
+    const tempId = offlineKey.startsWith(OFFLINE_KEY_PREFIX) ? offlineKey : `${OFFLINE_KEY_PREFIX}${offlineKey}`;
     const entry: QueuedOrder = {
       tempId,
       createdAt: timestamp,
@@ -854,16 +928,20 @@ export const OrderProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       throw new Error('Order total is invalid.');
     }
 
-    const idempotencyKey = typeof payload.idempotency_key === 'string' && payload.idempotency_key.trim().length > 0
+    const providedIdKey = typeof payload.idempotency_key === 'string' && payload.idempotency_key.trim().length > 0
       ? payload.idempotency_key.trim()
-      : generateIdempotencyKey();
+      : undefined;
+    const willAttemptOnline = !shouldForceOffline && isOnline;
+    const idempotencyKey = willAttemptOnline
+      ? providedIdKey ?? generateIdempotencyKey()
+      : ensureOfflineIdempotencyKey(providedIdKey, !providedIdKey);
     const basePayload: DraftOrderPayload = {
       ...payload,
       total: normalizedTotal,
       idempotency_key: idempotencyKey,
     };
 
-    if (shouldForceOffline || !isOnline) {
+    if (!willAttemptOnline) {
       const queued = queueOrder(basePayload, shouldForceOffline ? 'Forced offline' : undefined);
       return {
         status: 'queued',

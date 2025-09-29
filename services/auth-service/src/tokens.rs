@@ -57,6 +57,11 @@ struct RefreshTokenRow {
     name: String,
     email: String,
     role: String,
+    is_active: bool,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    last_password_reset: Option<DateTime<Utc>>,
+    force_password_reset: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -67,8 +72,12 @@ pub struct RefreshTokenAccount {
     pub name: String,
     pub email: String,
     pub role: String,
+    pub is_active: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub last_password_reset: Option<DateTime<Utc>>,
+    pub force_password_reset: bool,
 }
-
 pub struct IssuedTokens {
     pub access_token: String,
     pub refresh_token: String,
@@ -297,8 +306,8 @@ impl TokenSigner {
         let mut tx = self.pool.begin().await?;
 
         let row = sqlx::query_as::<_, RefreshTokenRow>(
-            "SELECT r.jti, r.user_id, r.tenant_id, r.expires_at, u.name, u.email, u.role \
-             FROM auth_refresh_tokens r \
+            "SELECT r.jti, r.user_id, r.tenant_id, r.expires_at, u.name, u.email, u.role, u.is_active, u.created_at, u.updated_at, u.last_password_reset, u.force_password_reset \\
+             FROM auth_refresh_tokens r \\
              JOIN users u ON u.id = r.user_id \
              WHERE r.token_hash = $1 AND r.revoked_at IS NULL \
              FOR UPDATE",
@@ -332,6 +341,11 @@ impl TokenSigner {
                     name: row.name,
                     email: row.email,
                     role: row.role,
+                    is_active: row.is_active,
+                    created_at: row.created_at,
+                    updated_at: row.updated_at,
+                    last_password_reset: row.last_password_reset,
+                    force_password_reset: row.force_password_reset,
                 })
             }
         } else {

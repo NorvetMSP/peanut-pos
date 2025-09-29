@@ -1,6 +1,18 @@
 # MVP Gaps Log
 
 This document aggregates the gaps we have identified while reviewing the current NovaPOS implementation. It will evolve as new analyses land.
+9/29 update remaining gaps. Remaining Gaps
+
+Order flow resiliency and reporting still need work: pending/POS divergence remains unresolved, and ops still lack richer exports/analytics despite the new workspace tooling (doc/analysis/MVP_Gaps.md:24, doc/analysis/MVP_Gaps.md:25).
+Offline-first UI must reconcile against server truth instead of cached payloads to avoid receipt drift after outages (doc/analysis/MVP_Gaps.md:37).
+Payments stack requires terminal SDK integration, granular failure/retry handling, upstream reversals, and hardened idempotency/webhook verification before it’s production ready (doc/analysis/MVP_Gaps.md:53–doc/analysis/MVP_Gaps.md:56).
+Admin experience still lacks lifecycle tooling, deeper analytics, inventory oversight views, richer onboarding, and surfaced audits even though route guards are in place (doc/analysis/MVP_Gaps.md:74–doc/analysis/MVP_Gaps.md:78).
+Security posture remains gap-heavy: tenant checks are duplicated, RBAC is inconsistent across services, auditing is narrow, broader GDPR parity is missing, network segmentation is absent, and alerting is minimal (doc/analysis/MVP_Gaps.md:166–doc/analysis/MVP_Gaps.md:171).
+Inventory service must add per-location stock, pre-sale validation/holds, adjustment + transfer APIs with alert surfacing, history/audit trails, and clearer event semantics (doc/analysis/MVP_Gaps.md:190–doc/analysis/MVP_Gaps.md:195).
+Returns/exchanges need policy-aware workflows, fee handling, overrides, and true exchange paths layered onto the existing line-item tracking (doc/analysis/MVP_Gaps.md:211).
+Loyalty & customer programs still lack redemption/tiering, offline visibility, and consolidated customer context at POS (doc/analysis/MVP_Gaps.md:226–doc/analysis/MVP_Gaps.md:227).
+BOPIS remains blocked without a reservation/promise layer to guard inventory for pickup orders (doc/analysis/MVP_Gaps.md:241).
+Cross-cutting fixes—shared tenancy middleware, API versioning/idempotency conventions, saga/compensation patterns, and local-time handling—are still outstanding (doc/analysis/MVP_Gaps.md:249–doc/analysis/MVP_Gaps.md:252).
 
 ## -------------- Order Service (Sales Transactions)
 
@@ -14,14 +26,15 @@ This document aggregates the gaps we have identified while reviewing the current
 - Managers can void in-flight orders via `POST /orders/:id/void`, which marks the sale `VOIDED` and emits an `order.voided` event for downstream cleanup (`services/order-service/src/order_handlers.rs:308`, `services/order-service/src/main.rs:131`).
 - Card/crypto payments remain `PENDING` until Kafka confirmation; the consumer applies parameterised status updates and rehydrates payloads from storage instead of an in-memory cache (`services/order-service/src/main.rs:150`, `services/order-service/src/main.rs:170`).
 
+- Admin portal now exposes an Orders workspace with deep filters, receipt previews, and return initiation (`frontends/admin-portal/src/pages/OrdersPage.tsx`, `frontends/admin-portal/src/pages/ReturnsPage.tsx`).
 ### Order Service: Confirmed Gaps / Risks
 
-- Operational tooling gaps persist: admin surfaces still lack deep order search, receipts, or return dashboards despite richer APIs (`services/order-service/src/order_handlers.rs:1017`, `frontends/admin-portal/src/pages/OrdersPage.tsx`).
+
 
 ### Order Service: Implications
 
 - Cash and card experiences diverge, and PENDING orders stall if services reboot, blocking settlement and downstream loyalty/inventory sync.
-- Ops teams lack the endpoints needed for voids, partial returns, or order history auditing.
+- Ops teams now audit orders through the Orders workspace, which surfaces search, receipt previews, and return initiation; deeper analytics exports are still pending.
 
 ## Checkout Speed & Offline-first Integrity
 
@@ -29,10 +42,10 @@ This document aggregates the gaps we have identified while reviewing the current
 
 - POS keeps an offline queue in localStorage and retries submits when connectivity returns (`frontends/pos-app/src/OrderContext.tsx:23`, `frontends/pos-app/src/OrderContext.tsx:386`).
 - Order records now carry payment method, persisted line items, and optional idempotency metadata to safeguard retries (`services/order-service/src/order_handlers.rs:69`, `services/order-service/src/order_handlers.rs:160`, `services/order-service/migrations/2003_add_order_items_and_idempotency.sql:1`).
+- Offline queue now derives deterministic device-scoped `idempotency_key` values for queued orders, reusing them across retries (`frontends/pos-app/src/OrderContext.tsx:599`, `frontends/pos-app/src/OrderContext.tsx:937`).
 
 ### Checkout Speed & Offline-first: Confirmed Gaps / Risks
 
-- Offline queue still generates submissions without deterministic `idempotency_key` values; frontend work remains to leverage the backend guard (`frontends/pos-app/src/OrderContext.tsx:386`, `services/order-service/src/order_handlers.rs:160`).
 - Item-level data is stored server-side but UI reconciliation and receipt flows still rely on cached payloads (`frontends/pos-app/src/components/pos/ProductGrid.tsx:9`).
 
 ### Checkout Speed & Offline-first: Implications
@@ -63,14 +76,13 @@ This document aggregates the gaps we have identified while reviewing the current
 
 ### Admin Portal & Management: Current Implementation
 
-- React admin portal routes expose dashboard, product, user, and settings screens without per-route guards (`frontends/admin-portal/src/App.tsx:14`).
+- React admin portal routes wrap protected screens with `RequireAuth` and `RequireRoles`, enforcing role-based access for dashboard, orders, users, returns, and settings (`frontends/admin-portal/src/App.tsx:14`, `frontends/admin-portal/src/AuthContext.tsx:370`).
 - Product management page handles list/create/update/toggle flows and fetches per-product audit histories while attaching tenant headers on every call (`frontends/admin-portal/src/pages/ProductListPage.tsx:93`, `frontends/admin-portal/src/pages/ProductListPage.tsx:240`, `frontends/admin-portal/src/pages/ProductListPage.tsx:171`).
 - Users view pulls role/tenant catalogs and submits new user records via the auth service but exposes only a simple create form driven by static fallback roles (`frontends/admin-portal/src/pages/UsersPage.tsx:23`, `frontends/admin-portal/src/pages/UsersPage.tsx:146`, `frontends/admin-portal/src/pages/UsersPage.tsx:249`).
 - Settings view lets super admins create tenants, mint integration keys, and clear offline order queues by forwarding the selected tenant in headers (`frontends/admin-portal/src/pages/SettingsPage.tsx:220`, `frontends/admin-portal/src/pages/SettingsPage.tsx:232`, `frontends/admin-portal/src/pages/SettingsPage.tsx:329`).
 
 ### Admin Portal & Management: Confirmed Gaps / Risks
 
-- No client-side RBAC guard: all navigation renders for any logged-in user and components rely on ad hoc conditional renders, so mid-tier roles can reach privileged forms (`frontends/admin-portal/src/App.tsx:14`, `frontends/admin-portal/src/pages/UsersPage.tsx:79`).
 - User management stops at single user creation; there are no edit, deactivate, password reset, or audit flows for existing accounts (`frontends/admin-portal/src/pages/UsersPage.tsx:264`).
 - Analytics dashboard is limited to a single-day summary; there are no historical filters, cohort views, or tenant switching for HQ oversight (`frontends/admin-portal/src/pages/DashboardPage.tsx:57`, `frontends/admin-portal/src/pages/DashboardPage.tsx:141`).
 - Inventory oversight is absent entirely; the portal ships no low-stock, replenishment, or cost pages despite product CRUD (`frontends/admin-portal/src/App.tsx:14`).
@@ -144,7 +156,6 @@ This document aggregates the gaps we have identified while reviewing the current
 - Queue flush only validates items client-side; there is no server reconciliation to catch price changes or depleted inventory before resubmitting (`frontends/pos-app/src/OrderContext.tsx:388`).
 - Multi-device conflicts are unhandled�if two registers sell the last unit while offline, the second sale is accepted without stock awareness (`frontends/pos-app/src/hooks/useProducts.ts:104`).
 - Error handling after failed syncs is limited to banner text; there is no duplicate detection, operator resolution workflow, or escalation hints (`frontends/pos-app/src/components/pos/OfflineBanner.tsx:8`).
-- Idempotency relies on temp IDs in localStorage, but requests sent after reconnect lack idempotency keys, risking duplicate orders if the network flaps mid-submit (`frontends/pos-app/src/OrderContext.tsx:337`).
 - Sync telemetry stops at console warnings; there is no centralized log of retries, failures, or queue depth for ops to monitor (`frontends/pos-app/src/OrderContext.tsx:451`).
 
 ### Offline Sync: Implications

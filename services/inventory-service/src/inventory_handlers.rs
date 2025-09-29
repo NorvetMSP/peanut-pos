@@ -4,7 +4,10 @@ use axum::{
     http::{HeaderMap, StatusCode},
     Json,
 };
-use common_auth::AuthContext;
+use common_auth::{
+    ensure_role, tenant_id_from_request, AuthContext, ROLE_ADMIN, ROLE_CASHIER, ROLE_MANAGER,
+    ROLE_SUPER_ADMIN,
+};
 use serde::Serialize;
 use sqlx::query_as;
 use uuid::Uuid;
@@ -12,59 +15,8 @@ use uuid::Uuid;
 pub(crate) const LIST_INVENTORY_SQL: &str =
     "SELECT product_id, tenant_id, quantity, threshold FROM inventory WHERE tenant_id = $1";
 
-pub(crate) const INVENTORY_VIEW_ROLES: &[&str] = &["super_admin", "admin", "manager", "cashier"];
-
-pub(crate) fn tenant_id_from_request(
-    headers: &HeaderMap,
-    auth: &AuthContext,
-) -> Result<Uuid, (StatusCode, String)> {
-    let header_value = headers
-        .get("X-Tenant-ID")
-        .ok_or((
-            StatusCode::BAD_REQUEST,
-            "Missing X-Tenant-ID header".to_string(),
-        ))?
-        .to_str()
-        .map_err(|_| {
-            (
-                StatusCode::BAD_REQUEST,
-                "Invalid X-Tenant-ID header".to_string(),
-            )
-        })?
-        .trim();
-    let tenant_id = Uuid::parse_str(header_value).map_err(|_| {
-        (
-            StatusCode::BAD_REQUEST,
-            "Invalid X-Tenant-ID header".to_string(),
-        )
-    })?;
-    if tenant_id != auth.claims.tenant_id {
-        return Err((
-            StatusCode::FORBIDDEN,
-            "Authenticated tenant does not match X-Tenant-ID header".to_string(),
-        ));
-    }
-    Ok(tenant_id)
-}
-
-pub(crate) fn ensure_role(
-    auth: &AuthContext,
-    allowed: &[&str],
-) -> Result<(), (StatusCode, String)> {
-    let has_role = auth
-        .claims
-        .roles
-        .iter()
-        .any(|role| allowed.iter().any(|required| role == required));
-    if has_role {
-        Ok(())
-    } else {
-        Err((
-            StatusCode::FORBIDDEN,
-            format!("Insufficient role. Required one of: {}", allowed.join(", ")),
-        ))
-    }
-}
+pub(crate) const INVENTORY_VIEW_ROLES: &[&str] =
+    &[ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_MANAGER, ROLE_CASHIER];
 
 #[derive(Debug, sqlx::FromRow, Serialize)]
 pub struct InventoryRecord {

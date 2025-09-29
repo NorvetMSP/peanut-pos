@@ -6,12 +6,12 @@ use axum::{
     extract::FromRef,
     http::{
         header::{ACCEPT, CONTENT_TYPE},
-        HeaderName, HeaderValue, Method, StatusCode,
+        HeaderName, HeaderValue, Method,
     },
     routing::get,
     Router,
 };
-use common_auth::{AuthContext, JwtConfig, JwtVerifier};
+use common_auth::{JwtConfig, JwtVerifier};
 use futures_util::StreamExt;
 use rdkafka::consumer::{Consumer, StreamConsumer};
 use rdkafka::producer::{FutureProducer, FutureRecord};
@@ -296,58 +296,6 @@ async fn main() -> anyhow::Result<()> {
     let listener = TcpListener::bind(addr).await?;
     axum::serve(listener, app.into_make_service()).await?;
     Ok(())
-}
-
-pub(crate) fn ensure_role(
-    auth: &AuthContext,
-    allowed: &[&str],
-) -> Result<(), (StatusCode, String)> {
-    let has_role = auth
-        .claims
-        .roles
-        .iter()
-        .any(|role| allowed.iter().any(|required| role == required));
-    if has_role {
-        Ok(())
-    } else {
-        Err((
-            StatusCode::FORBIDDEN,
-            format!("Insufficient role. Required one of: {}", allowed.join(", ")),
-        ))
-    }
-}
-
-pub(crate) fn tenant_id_from_request(
-    headers: &axum::http::HeaderMap,
-    auth: &AuthContext,
-) -> Result<Uuid, (StatusCode, String)> {
-    let header_value = headers
-        .get("X-Tenant-ID")
-        .ok_or((
-            StatusCode::BAD_REQUEST,
-            "Missing X-Tenant-ID header".to_string(),
-        ))?
-        .to_str()
-        .map_err(|_| {
-            (
-                StatusCode::BAD_REQUEST,
-                "Invalid X-Tenant-ID header".to_string(),
-            )
-        })?
-        .trim();
-    let tenant_id = Uuid::parse_str(header_value).map_err(|_| {
-        (
-            StatusCode::BAD_REQUEST,
-            "Invalid X-Tenant-ID header".to_string(),
-        )
-    })?;
-    if tenant_id != auth.claims.tenant_id {
-        return Err((
-            StatusCode::FORBIDDEN,
-            "Authenticated tenant does not match X-Tenant-ID header".to_string(),
-        ));
-    }
-    Ok(tenant_id)
 }
 
 async fn build_jwt_verifier_from_env() -> anyhow::Result<Arc<JwtVerifier>> {

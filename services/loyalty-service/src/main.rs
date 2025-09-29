@@ -8,7 +8,10 @@ use axum::{
     routing::get,
     Router,
 };
-use common_auth::{AuthContext, JwtConfig, JwtVerifier};
+use common_auth::{
+    ensure_role, tenant_id_from_request, AuthContext, JwtConfig, JwtVerifier, ROLE_ADMIN,
+    ROLE_CASHIER, ROLE_MANAGER, ROLE_SUPER_ADMIN,
+};
 use futures::StreamExt;
 use rdkafka::consumer::{Consumer, StreamConsumer};
 use rdkafka::producer::{FutureProducer, FutureRecord};
@@ -48,7 +51,7 @@ impl FromRef<AppState> for Arc<JwtVerifier> {
     }
 }
 
-const LOYALTY_VIEW_ROLES: &[&str] = &["super_admin", "admin", "manager", "cashier"];
+const LOYALTY_VIEW_ROLES: &[&str] = &[ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_MANAGER, ROLE_CASHIER];
 
 async fn get_points(
     State(state): State<AppState>,
@@ -88,58 +91,6 @@ async fn get_points(
     })?;
 
     Ok(points.to_string())
-}
-
-fn ensure_role(
-    auth: &AuthContext,
-    allowed: &[&str],
-) -> Result<(), (axum::http::StatusCode, String)> {
-    let has_role = auth
-        .claims
-        .roles
-        .iter()
-        .any(|role| allowed.iter().any(|required| role == required));
-    if has_role {
-        Ok(())
-    } else {
-        Err((
-            axum::http::StatusCode::FORBIDDEN,
-            format!("Insufficient role. Required one of: {}", allowed.join(", ")),
-        ))
-    }
-}
-
-fn tenant_id_from_request(
-    headers: &axum::http::HeaderMap,
-    auth: &AuthContext,
-) -> Result<Uuid, (axum::http::StatusCode, String)> {
-    let header_value = headers
-        .get("X-Tenant-ID")
-        .ok_or((
-            axum::http::StatusCode::BAD_REQUEST,
-            "Missing X-Tenant-ID header".to_string(),
-        ))?
-        .to_str()
-        .map_err(|_| {
-            (
-                axum::http::StatusCode::BAD_REQUEST,
-                "Invalid X-Tenant-ID header".to_string(),
-            )
-        })?
-        .trim();
-    let tenant_id = Uuid::parse_str(header_value).map_err(|_| {
-        (
-            axum::http::StatusCode::BAD_REQUEST,
-            "Invalid X-Tenant-ID header".to_string(),
-        )
-    })?;
-    if tenant_id != auth.claims.tenant_id {
-        return Err((
-            axum::http::StatusCode::FORBIDDEN,
-            "Authenticated tenant does not match X-Tenant-ID header".to_string(),
-        ));
-    }
-    Ok(tenant_id)
 }
 
 #[tokio::main]
