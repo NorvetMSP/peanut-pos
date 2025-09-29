@@ -44,6 +44,19 @@ type RoleOption = { value: string; label: string };
 
 type TenantOption = { value: string; label: string };
 
+type AuditEvent = {
+  timestamp: string;
+  action: string;
+  actor?: string;
+  details?: string;
+};
+
+const generateTempPassword = (): string => {
+  const letters = Math.random().toString(36).slice(2, 8);
+  const digits = Math.floor(Math.random() * 900 + 100);
+  return `${letters}${digits}!A`;
+};
+
 const normalizeUser = (entry: unknown): ServiceUser | null => {
   if (!entry || typeof entry !== "object") return null;
   const candidate = entry as Record<string, unknown>;
@@ -52,8 +65,38 @@ const normalizeUser = (entry: unknown): ServiceUser | null => {
   const email = typeof candidate.email === "string" ? candidate.email : null;
   const role = typeof candidate.role === "string" ? candidate.role : null;
   if (!id || !name || !email || !role) return null;
-  return { id, name, email, role };
+
+  const isActive =
+    typeof candidate.is_active === "boolean" ? candidate.is_active : true;
+  const createdAt =
+    typeof candidate.created_at === "string" ? candidate.created_at : "";
+  const updatedAt =
+    typeof candidate.updated_at === "string" ? candidate.updated_at : "";
+  const lastResetRaw = candidate.last_password_reset;
+  const lastReset =
+    typeof lastResetRaw === "string"
+      ? lastResetRaw
+      : lastResetRaw === null
+      ? null
+      : null;
+  const forceReset =
+    typeof candidate.force_password_reset === "boolean"
+      ? candidate.force_password_reset
+      : false;
+
+  return {
+    id,
+    name,
+    email,
+    role,
+    is_active: isActive,
+    created_at: createdAt,
+    updated_at: updatedAt,
+    last_password_reset: lastReset,
+    force_password_reset: forceReset,
+  };
 };
+
 
 const UsersPageContent: React.FC = () => {
   const { isLoggedIn, currentUser, token } = useAuth();
@@ -74,6 +117,20 @@ const UsersPageContent: React.FC = () => {
     password: "",
     role: DEFAULT_ROLE,
   });
+  const [selectedUser, setSelectedUser] = useState<ServiceUser | null>(null);
+  const [editModalOpen, setEditModalOpen] = useState(false);
+  const [editForm, setEditForm] = useState<{ name: string; role: string }>({
+    name: "",
+    role: DEFAULT_ROLE,
+  });
+  const [resetModalOpen, setResetModalOpen] = useState(false);
+  const [resetPasswordValue, setResetPasswordValue] = useState("");
+  const [auditModalOpen, setAuditModalOpen] = useState(false);
+  const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
+  const [auditLoading, setAuditLoading] = useState(false);
+  const [auditError, setAuditError] = useState<string | null>(null);
+  const [actionInProgress, setActionInProgress] = useState(false);
+
   const [tenantOptions, setTenantOptions] = useState<TenantOption[]>([]);
   const [tenantsLoading, setTenantsLoading] = useState(false);
   const tenantId = currentUser?.tenant_id
@@ -347,12 +404,226 @@ const UsersPageContent: React.FC = () => {
     setForm({ name: "", email: "", password: "", role: defaultRoleValue });
   };
 
+  const closeModals = () => {
+    setEditModalOpen(false);
+    setResetModalOpen(false);
+    setAuditModalOpen(false);
+    setSelectedUser(null);
+    setResetPasswordValue("");
+    setAuditEvents([]);
+    setAuditError(null);
+  };
+
+  const openEditModal = (user: ServiceUser) => {
+    setSelectedUser(user);
+    setEditForm({ name: user.name, role: user.role });
+    setEditModalOpen(true);
+    setResetModalOpen(false);
+    setAuditModalOpen(false);
+    setSuccessMessage(null);
+  };
+
+  const handleEditInputChange = (field: keyof typeof editForm, value: string) => {
+    setEditForm((prev) => ({ ...prev, [field]: value }));
+  };
+
+  const handleEditSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!selectedUser) return;
+    if (!ensureTenantContext()) return;
+
+    const trimmedName = editForm.name.trim();
+    if (!trimmedName) {
+      setError("Name must not be empty.");
+      return;
+    }
+
+    setActionInProgress(true);
+    setError(null);
+    try {
+      const response = await fetch(`${AUTH_SERVICE_URL}/users/${selectedUser.id}`, {
+        method: "PUT",
+        headers: buildHeaders(true),
+        body: JSON.stringify({ name: trimmedName, role: editForm.role }),
+      });
+      if (!response.ok) {
+        throw new Error(`Update user failed (${response.status})`);
+      }
+      await fetchUsers();
+      setSuccessMessage(`User ${selectedUser.email} updated.`);
+      closeModals();
+    } catch (err) {
+      console.error("Unable to update user", err);
+      setError("Unable to update user. Please try again.");
+    } finally {
+      setActionInProgress(false);
+    }
+  };
+
+  const handleToggleActive = async (user: ServiceUser) => {
+    if (!ensureTenantContext()) return;
+    const targetStatus = !user.is_active;
+    const actionLabel = targetStatus ? "reactivate" : "deactivate";
+    if (!window.confirm(`Are you sure you want to ${actionLabel} ${user.email}?`)) {
+      return;
+    }
+
+    setActionInProgress(true);
+    setError(null);
+    try {
+      const response = await fetch(`${AUTH_SERVICE_URL}/users/${user.id}`, {
+        method: "PUT",
+        headers: buildHeaders(true),
+        body: JSON.stringify({ is_active: targetStatus }),
+      });
+      if (!response.ok) {
+        throw new Error(`Toggle user failed (${response.status})`);
+      }
+      await fetchUsers();
+      setSuccessMessage(
+        targetStatus
+          ? `${user.email} has been reactivated.`
+          : `${user.email} has been deactivated.`,
+      );
+    } catch (err) {
+      console.error("Unable to toggle user status", err);
+      setError("Unable to update user status. Please try again.");
+    } finally {
+      setActionInProgress(false);
+    }
+  };
+
+  const openResetModal = (user: ServiceUser) => {
+    setSelectedUser(user);
+    setResetPasswordValue(generateTempPassword());
+    setResetModalOpen(true);
+    setEditModalOpen(false);
+    setAuditModalOpen(false);
+    setSuccessMessage(null);
+  };
+
+  const handleResetSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!selectedUser) return;
+    if (!ensureTenantContext()) return;
+
+    const trimmed = resetPasswordValue.trim();
+    if (trimmed.length < 8) {
+      setError("Temporary password must be at least 8 characters.");
+      return;
+    }
+
+    setActionInProgress(true);
+    setError(null);
+    try {
+      const response = await fetch(
+        `${AUTH_SERVICE_URL}/users/${selectedUser.id}/reset-password`,
+        {
+          method: "POST",
+          headers: buildHeaders(true),
+          body: JSON.stringify({ password: trimmed }),
+        },
+      );
+      if (!response.ok) {
+        throw new Error(`Reset password failed (${response.status})`);
+      }
+      await fetchUsers();
+      setSuccessMessage(`Temporary password issued for ${selectedUser.email}.`);
+      closeModals();
+    } catch (err) {
+      console.error("Unable to reset password", err);
+      setError("Unable to reset password. Please try again.");
+    } finally {
+      setActionInProgress(false);
+    }
+  };
+
+  const handleGeneratePassword = () => {
+    setResetPasswordValue(generateTempPassword());
+  };
+
+  const formatDisplayDate = (value?: string | null): string => {
+    if (!value) return "--";
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return value;
+    return date.toLocaleString();
+  };
+
+  const openAuditModal = async (user: ServiceUser) => {
+    setSelectedUser(user);
+    setAuditModalOpen(true);
+    setEditModalOpen(false);
+    setResetModalOpen(false);
+    setAuditLoading(true);
+    setAuditError(null);
+    try {
+      const response = await fetch(`${AUTH_SERVICE_URL}/users/${user.id}/audit`, {
+        headers: buildHeaders(),
+      });
+      if (response.status === 204) {
+        setAuditEvents([]);
+        setAuditLoading(false);
+        return;
+      }
+      if (response.status === 404) {
+        setAuditEvents([]);
+        setAuditError("No audit history available yet.");
+        setAuditLoading(false);
+        return;
+      }
+      if (!response.ok) {
+        throw new Error(`Fetch audit failed (${response.status})`);
+      }
+      const payload = (await response.json()) as unknown;
+      let events: AuditEvent[] = [];
+      if (Array.isArray(payload)) {
+        events = payload
+          .map((entry) => {
+            if (!entry || typeof entry !== "object") return null;
+            const candidate = entry as Record<string, unknown>;
+            const timestamp =
+              typeof candidate.timestamp === "string"
+                ? candidate.timestamp
+                : null;
+            const action =
+              typeof candidate.action === "string" ? candidate.action : null;
+            if (!timestamp || !action) return null;
+            const actor =
+              typeof candidate.actor === "string" ? candidate.actor : undefined;
+            const details =
+              typeof candidate.details === "string"
+                ? candidate.details
+                : undefined;
+            return { timestamp, action, actor, details };
+          })
+          .filter((item): item is AuditEvent => item !== null);
+        events.sort(
+          (a, b) =>
+            new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime(),
+        );
+      }
+      setAuditEvents(events);
+    } catch (err) {
+      console.error("Unable to load audit history", err);
+      setAuditEvents([]);
+      setAuditError("Unable to load audit history.");
+    } finally {
+      setAuditLoading(false);
+    }
+  };
+
   const sortedUsers = useMemo(() => {
-    return [...users].sort((a, b) => a.name.localeCompare(b.name));
+    return [...users].sort((a, b) => {
+      if (a.is_active !== b.is_active) {
+        return a.is_active ? -1 : 1;
+      }
+      return a.name.localeCompare(b.name);
+    });
   }, [users]);
 
   return (
-    <div
+    <>
+      <div
       className="min-h-screen bg-gray-100 dark:bg-gray-900 flex flex-col"
       style={{
         fontFamily: "Raleway, sans-serif",
@@ -555,13 +826,22 @@ const UsersPageContent: React.FC = () => {
                     <th className="px-4 py-2 text-left text-xs font-semibold uppercase tracking-wider text-gray-600 dark:text-gray-300">
                       Role
                     </th>
+                    <th className="px-4 py-2 text-left text-xs font-semibold uppercase tracking-wider text-gray-600 dark:text-gray-300">
+                      Status
+                    </th>
+                    <th className="px-4 py-2 text-left text-xs font-semibold uppercase tracking-wider text-gray-600 dark:text-gray-300">
+                      Last Updated
+                    </th>
+                    <th className="px-4 py-2 text-right text-xs font-semibold uppercase tracking-wider text-gray-600 dark:text-gray-300">
+                      Actions
+                    </th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-200 dark:divide-gray-700">
                   {sortedUsers.length === 0 ? (
                     <tr>
                       <td
-                        colSpan={3}
+                        colSpan={6}
                         className="px-4 py-6 text-center text-sm text-gray-500 dark:text-gray-300"
                       >
                         {isLoading
@@ -571,7 +851,10 @@ const UsersPageContent: React.FC = () => {
                     </tr>
                   ) : (
                     sortedUsers.map((user) => (
-                      <tr key={user.id} className="bg-white dark:bg-gray-800">
+                      <tr
+                        key={user.id}
+                        className={`bg-white dark:bg-gray-800 ${user.is_active ? '' : 'opacity-60'}`}
+                      >
                         <td className="px-4 py-2 text-sm text-gray-900 dark:text-gray-100">
                           {user.name}
                         </td>
@@ -580,6 +863,56 @@ const UsersPageContent: React.FC = () => {
                         </td>
                         <td className="px-4 py-2 text-sm text-gray-700 dark:text-gray-200">
                           {roleLabel(user.role)}
+                        </td>
+                        <td className="px-4 py-2 text-sm">
+                          <span
+                            className={`inline-flex items-center rounded-full px-2 py-1 text-xs font-semibold ${
+                              user.is_active
+                                ? 'bg-green-100 text-green-800'
+                                : 'bg-gray-200 text-gray-600'
+                            }`}
+                          >
+                            {user.is_active ? 'Active' : 'Inactive'}
+                          </span>
+                        </td>
+                        <td className="px-4 py-2 text-sm text-gray-600 dark:text-gray-300">
+                          {formatDisplayDate(user.updated_at)}
+                        </td>
+                        <td className="px-4 py-2 text-sm text-right">
+                          <div className="flex flex-wrap justify-end gap-2">
+                            <button
+                              type="button"
+                              className="text-sm text-indigo-600 hover:underline disabled:opacity-50"
+                              onClick={() => openEditModal(user)}
+                              disabled={actionInProgress}
+                            >
+                              Edit
+                            </button>
+                            <button
+                              type="button"
+                              className="text-sm text-indigo-600 hover:underline disabled:opacity-50"
+                              onClick={() => void handleToggleActive(user)}
+                              disabled={actionInProgress}
+                            >
+                              {user.is_active ? 'Deactivate' : 'Activate'}
+                            </button>
+                            <button
+                              type="button"
+                              className="text-sm text-indigo-600 hover:underline disabled:opacity-50"
+                              onClick={() => openResetModal(user)}
+                              disabled={actionInProgress}
+                            >
+                              Reset Password
+                            </button>
+                            <button
+                              type="button"
+                              className="text-sm text-indigo-600 hover:underline disabled:opacity-50"
+                              onClick={() => void openAuditModal(user)}
+                              disabled={auditLoading && selectedUser?.id === user.id}
+                            >
+                              View Audit
+                            </button>
+                          </div>
                         </td>
                       </tr>
                     ))
@@ -601,8 +934,184 @@ const UsersPageContent: React.FC = () => {
         </div>
       </div>
     </div>
+      {editModalOpen && selectedUser && (
+        <Modal title={`Edit ${selectedUser.name}`} onClose={closeModals}>
+          <form className="space-y-4" onSubmit={(event) => { void handleEditSubmit(event); }}>
+            <div className="flex flex-col">
+              <label className="text-sm font-medium text-gray-700 dark:text-gray-300">
+                Full Name
+              </label>
+              <input
+                type="text"
+                value={editForm.name}
+                onChange={(event) =>
+                  handleEditInputChange("name", event.target.value)
+                }
+                className="mt-1 rounded-md border border-gray-300 px-3 py-2 text-gray-900 focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary"
+                required
+              />
+            </div>
+            <div className="flex flex-col">
+              <label className="text-sm font-medium text-gray-700 dark:text-gray-300">
+                Role
+              </label>
+              <select
+                value={editForm.role}
+                onChange={(event) =>
+                  handleEditInputChange("role", event.target.value)
+                }
+                className="mt-1 rounded-md border border-gray-300 px-3 py-2 text-gray-900 focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary"
+                disabled={roleOptions.length === 0}
+              >
+                {roleOptions.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                className="px-4 py-2 rounded bg-gray-200 text-gray-800 dark:bg-gray-700 dark:text-gray-200"
+                onClick={closeModals}
+                disabled={actionInProgress}
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                className="px-4 py-2 rounded bg-indigo-600 text-white disabled:opacity-50"
+                disabled={actionInProgress}
+              >
+                {actionInProgress ? "Saving..." : "Save Changes"}
+              </button>
+            </div>
+          </form>
+        </Modal>
+      )}
+      {resetModalOpen && selectedUser && (
+        <Modal
+          title={`Reset Password for ${selectedUser.email}`}
+          onClose={closeModals}
+        >
+          <p className="text-sm text-gray-600 dark:text-gray-300">
+            Generate a new temporary password. The user will be prompted to change
+            it on next sign-in.
+          </p>
+          <form className="space-y-4" onSubmit={(event) => { void handleResetSubmit(event); }}>
+            <div className="flex flex-col">
+              <label className="text-sm font-medium text-gray-700 dark:text-gray-300">
+                Temporary Password
+              </label>
+              <div className="mt-1 flex gap-2">
+                <input
+                  type="text"
+                  value={resetPasswordValue}
+                  onChange={(event) => setResetPasswordValue(event.target.value)}
+                  className="flex-1 rounded-md border border-gray-300 px-3 py-2 text-gray-900 focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary"
+                  required
+                  minLength={8}
+                />
+                <button
+                  type="button"
+                  className="px-3 py-2 rounded bg-gray-200 text-gray-800 dark:bg-gray-700 dark:text-gray-200"
+                  onClick={handleGeneratePassword}
+                >
+                  Regenerate
+                </button>
+              </div>
+            </div>
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                className="px-4 py-2 rounded bg-gray-200 text-gray-800 dark:bg-gray-700 dark:text-gray-200"
+                onClick={closeModals}
+                disabled={actionInProgress}
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                className="px-4 py-2 rounded bg-indigo-600 text-white disabled:opacity-50"
+                disabled={actionInProgress}
+              >
+                {actionInProgress ? "Resetting..." : "Reset Password"}
+              </button>
+            </div>
+          </form>
+        </Modal>
+      )}
+      {auditModalOpen && selectedUser && (
+        <Modal
+          title={`Audit History for ${selectedUser.email}`}
+          onClose={closeModals}
+        >
+          {auditLoading ? (
+            <p className="text-sm text-gray-600 dark:text-gray-300">Loading...</p>
+          ) : auditError ? (
+            <p className="text-sm text-red-600 dark:text-red-400">{auditError}</p>
+          ) : auditEvents.length === 0 ? (
+            <p className="text-sm text-gray-600 dark:text-gray-300">
+              No audit events recorded for this user yet.
+            </p>
+          ) : (
+            <ul className="space-y-3 max-h-72 overflow-y-auto pr-1">
+              {auditEvents.map((event, index) => (
+                <li
+                  key={`${event.timestamp}-${event.action}-${index}`}
+                  className="rounded border border-gray-200 dark:border-gray-700 p-3"
+                >
+                  <p className="text-sm font-semibold text-gray-800 dark:text-gray-100">
+                    {event.action}
+                  </p>
+                  <p className="text-xs text-gray-600 dark:text-gray-300">
+                    {formatDisplayDate(event.timestamp)}
+                  </p>
+                  {event.actor && (
+                    <p className="text-xs text-gray-600 dark:text-gray-300">
+                      Actor: {event.actor}
+                    </p>
+                  )}
+                  {event.details && (
+                    <p className="mt-1 text-sm text-gray-700 dark:text-gray-200">
+                      {event.details}
+                    </p>
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
+        </Modal>
+      )}
+    </>
   );
 };
+
+type ModalProps = {
+  title: string;
+  onClose: () => void;
+  children: React.ReactNode;
+};
+
+const Modal: React.FC<ModalProps> = ({ title, onClose, children }) => (
+  <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4">
+    <div className="w-full max-w-lg rounded-lg bg-white dark:bg-gray-800 p-6 shadow-xl">
+      <div className="mb-4 flex items-center justify-between">
+        <h4 className="text-lg font-semibold text-gray-900 dark:text-gray-100">{title}</h4>
+        <button
+          type="button"
+          aria-label="Close dialog"
+          className="text-xl text-gray-500 hover:text-gray-700"
+          onClick={onClose}
+        >
+          {"\u00d7"}
+        </button>
+      </div>
+      <div className="space-y-4">{children}</div>
+    </div>
+  </div>
+);
 
 const UsersPage: React.FC = () => {
   const canManageUsers = useHasAnyRole(ADMIN_ROLES);
@@ -617,3 +1126,6 @@ const UsersPage: React.FC = () => {
 };
 
 export default UsersPage;
+
+
+
