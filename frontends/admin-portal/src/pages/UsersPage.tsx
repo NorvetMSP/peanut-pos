@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { useAuth, useHasAnyRole } from "../AuthContext";
+import { useAuth } from "../AuthContext";
+import { useHasAnyRole } from "../hooks/useRoleAccess";
 import { resolveServiceUrl } from "../utils/env";
 import AccessDenied from "../components/AccessDenied";
 import {
