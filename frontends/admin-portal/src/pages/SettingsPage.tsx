@@ -705,6 +705,8 @@ const SettingsPageContent: React.FC = () => {
   );
 };
 
-export default withRoleGuard(SettingsPageContent, SUPER_ADMIN_ROLES, {
+const SettingsPage = withRoleGuard(SettingsPageContent, SUPER_ADMIN_ROLES, {
   message: "Super admin role required to manage platform settings.",
 });
+
+export default SettingsPage;
