@@ -30,10 +30,10 @@ This document aggregates the gaps we have identified while reviewing the current
 
 - POS keeps an offline queue in localStorage and retries submits when connectivity returns (`frontends/pos-app/src/OrderContext.tsx:23`, `frontends/pos-app/src/OrderContext.tsx:386`).
 - Order records now carry payment method, persisted line items, and optional idempotency metadata to safeguard retries (`services/order-service/src/order_handlers.rs:69`, `services/order-service/src/order_handlers.rs:160`, `services/order-service/migrations/2003_add_order_items_and_idempotency.sql:1`).
+- Offline queue now derives deterministic device-scoped `idempotency_key` values for queued orders, reusing them across retries (`frontends/pos-app/src/OrderContext.tsx:599`, `frontends/pos-app/src/OrderContext.tsx:937`).
 
 ### Checkout Speed & Offline-first: Confirmed Gaps / Risks
 
-- Offline queue still generates submissions without deterministic `idempotency_key` values; frontend work remains to leverage the backend guard (`frontends/pos-app/src/OrderContext.tsx:386`, `services/order-service/src/order_handlers.rs:160`).
 - Item-level data is stored server-side but UI reconciliation and receipt flows still rely on cached payloads (`frontends/pos-app/src/components/pos/ProductGrid.tsx:9`).
 
 ### Checkout Speed & Offline-first: Implications
