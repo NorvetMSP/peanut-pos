@@ -5,7 +5,8 @@ import { resolveServiceUrl } from '../utils/env';
 import './AdminSectionModern.css';
 
 const PRODUCT_SERVICE_URL = resolveServiceUrl('VITE_PRODUCT_SERVICE_URL', 'http://localhost:8081');
-const DEFAULT_IMAGE_PLACEHOLDER = 'https://images.fineartamerica.com/images/artworkimages/mediumlarge/1/super-nova-rina-kaff.jpg"';
+const DEFAULT_IMAGE_PLACEHOLDER =
+  'https://images.fineartamerica.com/images/artworkimages/mediumlarge/1/super-nova-rina-kaff.jpg';
 
 type ServiceProduct = {
   id: string;
