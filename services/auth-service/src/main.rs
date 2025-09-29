@@ -7,7 +7,7 @@ use axum::{
         HeaderName, HeaderValue, Method, StatusCode,
     },
     response::Response,
-    routing::{get, post},
+    routing::{get, patch, post},
     Json, Router,
 };
 use common_auth::{JwtConfig, JwtVerifier};
@@ -34,6 +34,7 @@ use auth_service::tenant_handlers::{
 use auth_service::tokens::{JwkKey, TokenConfig, TokenSigner};
 use auth_service::user_handlers::{
     create_user, list_roles, list_users, login_user, logout_user, refresh_session,
+    reset_user_password, update_user,
 };
 
 async fn health() -> &'static str {
@@ -132,6 +133,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/mfa/enroll", post(begin_mfa_enrollment))
         .route("/mfa/verify", post(verify_mfa_enrollment))
         .route("/users", post(create_user).get(list_users))
+        .route("/users/:user_id", patch(update_user))
+        .route("/users/:user_id/reset-password", post(reset_user_password))
         .route("/roles", get(list_roles))
         .route("/tenants", post(create_tenant).get(list_tenants))
         .route(

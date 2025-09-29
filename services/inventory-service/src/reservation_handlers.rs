@@ -1,17 +1,19 @@
-use crate::inventory_handlers::{ensure_role, tenant_id_from_request};
 use crate::{AppState, DEFAULT_THRESHOLD};
 use axum::extract::{Path, State};
 use axum::{
     http::{HeaderMap, StatusCode},
     Json,
 };
-use common_auth::AuthContext;
+use common_auth::{
+    ensure_role, tenant_id_from_request, AuthContext, ROLE_ADMIN, ROLE_CASHIER, ROLE_MANAGER,
+    ROLE_SUPER_ADMIN,
+};
 use serde::{Deserialize, Serialize};
 use sqlx::query_as; // Ensure sqlx::query_as macro is imported
 use std::collections::HashMap;
 use uuid::Uuid;
 
-const RESERVATION_ROLES: &[&str] = &["super_admin", "admin", "manager", "cashier"];
+const RESERVATION_ROLES: &[&str] = &[ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_MANAGER, ROLE_CASHIER];
 
 #[derive(Debug, Deserialize)]
 pub struct ReservationItemPayload {

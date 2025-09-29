@@ -4,7 +4,9 @@ use axum::{
     http::{HeaderMap, StatusCode},
     Json,
 };
-use common_auth::AuthContext;
+use common_auth::{
+    ensure_role, tenant_id_from_request, AuthContext, ROLE_ADMIN, ROLE_MANAGER, ROLE_SUPER_ADMIN,
+};
 
 use serde::Serialize;
 use sqlx::Row;
@@ -28,15 +30,15 @@ pub struct ForecastResult {
     next_day_sales: f64,
 }
 
-const ANALYTICS_VIEW_ROLES: &[&str] = &["super_admin", "admin", "manager"];
+const ANALYTICS_VIEW_ROLES: &[&str] = &[ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_MANAGER];
 
 pub async fn get_summary(
     State(state): State<AppState>,
     auth: AuthContext,
     headers: HeaderMap,
 ) -> Result<Json<Summary>, (StatusCode, String)> {
-    crate::ensure_role(&auth, ANALYTICS_VIEW_ROLES)?;
-    let tenant_id = crate::tenant_id_from_request(&headers, &auth)?;
+    ensure_role(&auth, ANALYTICS_VIEW_ROLES)?;
+    let tenant_id = tenant_id_from_request(&headers, &auth)?;
 
     let rec = sqlx::query(
         "SELECT order_count, total_sales FROM daily_sales \
@@ -99,8 +101,8 @@ pub async fn get_forecast(
     auth: AuthContext,
     headers: HeaderMap,
 ) -> Result<Json<ForecastResult>, (StatusCode, String)> {
-    crate::ensure_role(&auth, ANALYTICS_VIEW_ROLES)?;
-    let tenant_id = crate::tenant_id_from_request(&headers, &auth)?;
+    ensure_role(&auth, ANALYTICS_VIEW_ROLES)?;
+    let tenant_id = tenant_id_from_request(&headers, &auth)?;
 
     let rows = sqlx::query_scalar::<_, Option<f64>>(
         "SELECT total_sales FROM daily_sales \
@@ -137,8 +139,8 @@ pub async fn get_anomalies(
     auth: AuthContext,
     headers: HeaderMap,
 ) -> Result<Json<Vec<String>>, (StatusCode, String)> {
-    crate::ensure_role(&auth, ANALYTICS_VIEW_ROLES)?;
-    let tenant_id = crate::tenant_id_from_request(&headers, &auth)?;
+    ensure_role(&auth, ANALYTICS_VIEW_ROLES)?;
+    let tenant_id = tenant_id_from_request(&headers, &auth)?;
 
     let avg_refund = sqlx::query_scalar::<_, Option<f64>>(
         "SELECT AVG(refund_amount) FROM daily_sales \

@@ -1,4 +1,4 @@
-﻿use std::io;
+use std::io;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
@@ -15,8 +15,10 @@ mod support;
 
 use support::{seed_test_user, SeededUser, TestDatabase};
 
-const DEV_PRIVATE_KEY: &str =
-    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/jwt-dev.pem"));
+const DEV_PRIVATE_KEY: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/jwt-dev.pem"
+));
 const DEV_PUBLIC_KEY: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/fixtures/jwt-dev.pub.pem"

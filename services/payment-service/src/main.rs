@@ -3,23 +3,22 @@ use axum::{
     extract::FromRef,
     http::{
         header::{ACCEPT, CONTENT_TYPE},
-        HeaderMap, HeaderName, HeaderValue, Method, StatusCode,
+        HeaderName, HeaderValue, Method,
     },
     routing::{get, post},
     Router,
 };
-use common_auth::{AuthContext, JwtConfig, JwtVerifier};
+use common_auth::{JwtConfig, JwtVerifier, ROLE_ADMIN, ROLE_CASHIER, ROLE_SUPER_ADMIN};
 use std::{env, net::SocketAddr, sync::Arc, time::Duration};
 use tokio::net::TcpListener;
 use tokio::time::{interval, MissedTickBehavior};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tracing::{debug, info, warn};
-use uuid::Uuid;
 
 mod payment_handlers;
 use payment_handlers::{process_card_payment, void_card_payment};
 
-const PAYMENT_ROLES: &[&str] = &["super_admin", "admin", "cashier"];
+const PAYMENT_ROLES: &[&str] = &[ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_CASHIER];
 
 #[derive(Clone)]
 struct AppState {
@@ -139,56 +138,4 @@ fn spawn_jwks_refresh(verifier: Arc<JwtVerifier>) {
             }
         }
     });
-}
-
-pub(crate) fn ensure_role(
-    auth: &AuthContext,
-    allowed: &[&str],
-) -> Result<(), (StatusCode, String)> {
-    let has_role = auth
-        .claims
-        .roles
-        .iter()
-        .any(|role| allowed.iter().any(|required| role == required));
-    if has_role {
-        Ok(())
-    } else {
-        Err((
-            StatusCode::FORBIDDEN,
-            format!("Insufficient role. Required one of: {}", allowed.join(", ")),
-        ))
-    }
-}
-
-pub(crate) fn tenant_id_from_request(
-    headers: &HeaderMap,
-    auth: &AuthContext,
-) -> Result<Uuid, (StatusCode, String)> {
-    let header_value = headers
-        .get("X-Tenant-ID")
-        .ok_or((
-            StatusCode::BAD_REQUEST,
-            "Missing X-Tenant-ID header".to_string(),
-        ))?
-        .to_str()
-        .map_err(|_| {
-            (
-                StatusCode::BAD_REQUEST,
-                "Invalid X-Tenant-ID header".to_string(),
-            )
-        })?
-        .trim();
-    let tenant_id = Uuid::parse_str(header_value).map_err(|_| {
-        (
-            StatusCode::BAD_REQUEST,
-            "Invalid X-Tenant-ID header".to_string(),
-        )
-    })?;
-    if tenant_id != auth.claims.tenant_id {
-        return Err((
-            StatusCode::FORBIDDEN,
-            "Authenticated tenant does not match X-Tenant-ID header".to_string(),
-        ));
-    }
-    Ok(tenant_id)
 }

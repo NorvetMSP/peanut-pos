@@ -9,7 +9,10 @@ use axum::{
     Json, Router,
 };
 use chrono::{DateTime, Utc};
-use common_auth::{AuthContext, JwtConfig, JwtVerifier};
+use common_auth::{
+    ensure_role, tenant_id_from_request, AuthContext, JwtConfig, JwtVerifier, ROLE_ADMIN,
+    ROLE_CASHIER, ROLE_MANAGER, ROLE_SUPER_ADMIN,
+};
 use common_crypto::{decrypt_field, deterministic_hash, encrypt_field, CryptoError, MasterKey};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -27,9 +30,9 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
-const CUSTOMER_WRITE_ROLES: &[&str] = &["super_admin", "admin", "manager", "cashier"];
-const CUSTOMER_VIEW_ROLES: &[&str] = &["super_admin", "admin", "manager", "cashier"];
-const GDPR_MANAGE_ROLES: &[&str] = &["super_admin", "admin"];
+const CUSTOMER_WRITE_ROLES: &[&str] = &[ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_MANAGER, ROLE_CASHIER];
+const CUSTOMER_VIEW_ROLES: &[&str] = &[ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_MANAGER, ROLE_CASHIER];
+const GDPR_MANAGE_ROLES: &[&str] = &[ROLE_SUPER_ADMIN, ROLE_ADMIN];
 const GDPR_DELETED_NAME: &str = "[deleted]";
 
 #[derive(Clone)]
@@ -763,40 +766,6 @@ fn internal_err(err: sqlx::Error) -> (StatusCode, String) {
     )
 }
 
-fn ensure_role(auth: &AuthContext, allowed: &[&str]) -> ApiResult<()> {
-    let has_role = auth
-        .claims
-        .roles
-        .iter()
-        .any(|role| allowed.iter().any(|required| role == required));
-    if has_role {
-        Ok(())
-    } else {
-        Err((
-            StatusCode::FORBIDDEN,
-            format!("Insufficient role. Required one of: {}", allowed.join(", ")),
-        ))
-    }
-}
-
-fn tenant_id_from_request(headers: &HeaderMap, auth: &AuthContext) -> ApiResult<Uuid> {
-    let header_value = headers
-        .get("X-Tenant-ID")
-        .ok_or((StatusCode::BAD_REQUEST, "Missing X-Tenant-ID".into()))?
-        .to_str()
-        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid X-Tenant-ID".into()))?
-        .trim();
-    let tenant_id = Uuid::parse_str(header_value)
-        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid X-Tenant-ID".into()))?;
-    if tenant_id != auth.claims.tenant_id {
-        return Err((
-            StatusCode::FORBIDDEN,
-            "Authenticated tenant does not match X-Tenant-ID header".into(),
-        ));
-    }
-    Ok(tenant_id)
-}
-
 async fn build_jwt_verifier_from_env() -> anyhow::Result<Arc<JwtVerifier>> {
     let issuer = env::var("JWT_ISSUER").context("JWT_ISSUER must be set")?;
     let audience = env::var("JWT_AUDIENCE").context("JWT_AUDIENCE must be set")?;
@@ -826,7 +795,6 @@ async fn build_jwt_verifier_from_env() -> anyhow::Result<Arc<JwtVerifier>> {
     info!("JWT verifier initialised");
     Ok(Arc::new(verifier))
 }
-
 fn spawn_jwks_refresh(verifier: Arc<JwtVerifier>) {
     let Some(fetcher) = verifier.jwks_fetcher() else {
         return;

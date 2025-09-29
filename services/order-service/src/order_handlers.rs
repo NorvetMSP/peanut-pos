@@ -5,7 +5,10 @@ use axum::{
     Json,
 };
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
-use common_auth::AuthContext;
+use common_auth::{
+    ensure_role, tenant_id_from_request, AuthContext, ROLE_ADMIN, ROLE_CASHIER, ROLE_MANAGER,
+    ROLE_SUPER_ADMIN,
+};
 use rdkafka::producer::FutureRecord;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -16,59 +19,10 @@ use uuid::Uuid;
 
 use crate::AppState;
 
-const ORDER_WRITE_ROLES: &[&str] = &["super_admin", "admin", "manager", "cashier"];
-const ORDER_REFUND_ROLES: &[&str] = &["super_admin", "admin", "manager"];
-const ORDER_VOID_ROLES: &[&str] = &["super_admin", "admin", "manager"];
-const ORDER_VIEW_ROLES: &[&str] = &["super_admin", "admin", "manager", "cashier"];
-
-fn ensure_role(auth: &AuthContext, allowed: &[&str]) -> Result<(), (StatusCode, String)> {
-    let has_role = auth
-        .claims
-        .roles
-        .iter()
-        .any(|role| allowed.iter().any(|required| role == required));
-    if has_role {
-        Ok(())
-    } else {
-        Err((
-            StatusCode::FORBIDDEN,
-            format!("Insufficient role. Required one of: {}", allowed.join(", ")),
-        ))
-    }
-}
-
-fn tenant_id_from_request(
-    headers: &HeaderMap,
-    auth: &AuthContext,
-) -> Result<Uuid, (StatusCode, String)> {
-    let header_value = headers
-        .get("X-Tenant-ID")
-        .ok_or((
-            StatusCode::BAD_REQUEST,
-            "Missing X-Tenant-ID header".to_string(),
-        ))?
-        .to_str()
-        .map_err(|_| {
-            (
-                StatusCode::BAD_REQUEST,
-                "Invalid X-Tenant-ID header".to_string(),
-            )
-        })?
-        .trim();
-    let tenant_id = Uuid::parse_str(header_value).map_err(|_| {
-        (
-            StatusCode::BAD_REQUEST,
-            "Invalid X-Tenant-ID header".to_string(),
-        )
-    })?;
-    if tenant_id != auth.claims.tenant_id {
-        return Err((
-            StatusCode::FORBIDDEN,
-            "Authenticated tenant does not match X-Tenant-ID header".to_string(),
-        ));
-    }
-    Ok(tenant_id)
-}
+const ORDER_WRITE_ROLES: &[&str] = &[ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_MANAGER, ROLE_CASHIER];
+const ORDER_REFUND_ROLES: &[&str] = &[ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_MANAGER];
+const ORDER_VOID_ROLES: &[&str] = &[ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_MANAGER];
+const ORDER_VIEW_ROLES: &[&str] = &[ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_MANAGER, ROLE_CASHIER];
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct OrderItem {
