@@ -44,7 +44,9 @@ use crate::metrics::GatewayMetrics;
 use crate::rate_limiter::RateLimiter;
 use crate::usage::UsageTracker;
 
-use integration_handlers::{handle_external_order, process_payment, void_payment};
+use integration_handlers::{
+    handle_external_order, process_payment, void_payment, ForwardedAuthHeader,
+};
 use webhook_handlers::handle_coinbase_webhook;
 
 /// Shared application state
@@ -328,6 +330,10 @@ async fn auth_middleware(
     next: Next,
 ) -> Result<Response, StatusCode> {
     let headers = request.headers();
+    let raw_auth_header = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.to_string());
     let bearer = headers
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
@@ -421,6 +427,11 @@ async fn auth_middleware(
     }
 
     request.extensions_mut().insert(tenant_id);
+    if let Some(header_value) = raw_auth_header.clone() {
+        request
+            .extensions_mut()
+            .insert(ForwardedAuthHeader(header_value));
+    }
     if let Some(claims) = claims_opt {
         request.extensions_mut().insert(claims);
     }

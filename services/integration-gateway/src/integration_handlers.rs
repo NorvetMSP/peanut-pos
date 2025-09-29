@@ -13,6 +13,9 @@ use crate::{
     AppState,
 };
 
+#[derive(Clone)]
+pub struct ForwardedAuthHeader(pub String);
+
 // Payment request/response types
 #[derive(Deserialize, Serialize)]
 pub struct PaymentRequest {
@@ -49,6 +52,7 @@ struct PaymentServiceResponse {
 pub async fn process_payment(
     State(state): State<AppState>,
     Extension(tenant_id): Extension<Uuid>,
+    forwarded_auth: Option<Extension<ForwardedAuthHeader>>,
     Json(req): Json<PaymentRequest>,
 ) -> Result<Json<PaymentResult>, (StatusCode, String)> {
     let order_id = Uuid::parse_str(&req.order_id)
@@ -206,12 +210,15 @@ pub async fn process_payment(
         let pay_svc_url = std::env::var("PAYMENT_SERVICE_URL")
             .unwrap_or_else(|_| "http://localhost:8086".to_string());
         let client = Client::new();
-        let pay_resp = match client
-            .post(format!("{}/payments", pay_svc_url))
-            .json(&req)
-            .send()
-            .await
-        {
+        let mut pay_request = client
+            .post(format!("{}/payments", pay_svc_url.trim_end_matches('/')))
+            .header("Content-Type", "application/json")
+            .header("X-Tenant-ID", tenant_id.to_string())
+            .json(&req);
+        if let Some(Extension(auth_header)) = forwarded_auth.as_ref() {
+            pay_request = pay_request.header("Authorization", auth_header.0.as_str());
+        }
+        let pay_resp = match pay_request.send().await {
             Ok(resp) => resp,
             Err(err) => {
                 let reason = format!("Payment service error: {err}");
@@ -281,6 +288,7 @@ pub async fn process_payment(
 pub async fn void_payment(
     State(state): State<AppState>,
     Extension(tenant_id): Extension<Uuid>,
+    forwarded_auth: Option<Extension<ForwardedAuthHeader>>,
     Json(req): Json<PaymentVoidRequest>,
 ) -> Result<Json<PaymentResult>, (StatusCode, String)> {
     let order_id = Uuid::parse_str(&req.order_id)
@@ -290,15 +298,21 @@ pub async fn void_payment(
         let pay_svc_url = std::env::var("PAYMENT_SERVICE_URL")
             .unwrap_or_else(|_| "http://localhost:8086".to_string());
         let client = Client::new();
-        let pay_resp = client
-            .post(format!("{}/payments/void", pay_svc_url))
-            .json(&req)
-            .send()
-            .await
-            .map_err(|err| {
-                let reason = format!("Payment service error: {err}");
-                (StatusCode::BAD_GATEWAY, reason)
-            })?;
+        let mut pay_request = client
+            .post(format!(
+                "{}/payments/void",
+                pay_svc_url.trim_end_matches('/')
+            ))
+            .header("Content-Type", "application/json")
+            .header("X-Tenant-ID", tenant_id.to_string())
+            .json(&req);
+        if let Some(Extension(auth_header)) = forwarded_auth.as_ref() {
+            pay_request = pay_request.header("Authorization", auth_header.0.as_str());
+        }
+        let pay_resp = pay_request.send().await.map_err(|err| {
+            let reason = format!("Payment service error: {err}");
+            (StatusCode::BAD_GATEWAY, reason)
+        })?;
         if !pay_resp.status().is_success() {
             let status = pay_resp.status();
             let reason = format!("Payment void declined (status {status})");

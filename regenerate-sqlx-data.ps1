@@ -103,7 +103,15 @@ Write-Host "Using DATABASE_URL = $DatabaseUrl"
 if ($ResetDatabase) {
     Write-Host "Resetting database..."
     try {
-        Invoke-Tool -Command "sqlx" -Arguments @("database", "drop", "-y", "-f") -ErrorContext "sqlx database drop"
+        $uri = [System.Uri]$DatabaseUrl
+        $dbName = $uri.AbsolutePath.TrimStart('/')
+        if ([string]::IsNullOrWhiteSpace($dbName)) { throw 'Database name missing from DATABASE_URL' }
+        $userInfo = $uri.UserInfo
+        $dbHost = $uri.Host
+        $port = if ($uri.Port -gt 0) { $uri.Port } else { 5432 }
+        $adminUrl = "postgres://{0}@{1}:{2}/postgres" -f $userInfo, $dbHost, $port
+        $dropSql = "DROP DATABASE IF EXISTS ""$dbName"" WITH (FORCE);"
+        Invoke-Tool -Command "psql" -Arguments @('-d', $adminUrl, '-c', $dropSql) -ErrorContext 'psql drop database'
     } catch {
         Write-Warning $_.Exception.Message
     }
