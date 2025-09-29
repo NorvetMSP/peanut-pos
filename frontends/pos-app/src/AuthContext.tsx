@@ -71,6 +71,51 @@ const AuthContext = createContext<AuthContextValue | undefined>(undefined);
 
 const isBrowser = typeof window !== 'undefined';
 const isOnline = () => (typeof navigator !== 'undefined' ? navigator.onLine : true);
+const SESSION_STORAGE_KEY = 'session';
+
+const isStoredSession = (value: unknown): value is StoredSession => {
+  if (typeof value !== 'object' || value === null) return false;
+  const candidate = value as Record<string, unknown>;
+  return (
+    typeof candidate.token === 'string' &&
+    typeof candidate.user === 'object' &&
+    candidate.user !== null &&
+    typeof candidate.timestamp === 'number' &&
+    Number.isFinite(candidate.timestamp)
+  );
+};
+
+const readStoredSession = (): StoredSession | null => {
+  if (!isBrowser) return null;
+  try {
+    const raw = window.localStorage.getItem(SESSION_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as unknown;
+    if (isStoredSession(parsed)) {
+      return parsed;
+    }
+    window.localStorage.removeItem(SESSION_STORAGE_KEY);
+    return null;
+  } catch (err) {
+    console.warn('Unable to parse stored session', err);
+    window.localStorage.removeItem(SESSION_STORAGE_KEY);
+    return null;
+  }
+};
+
+const persistSession = (value: StoredSession | null): void => {
+  if (!isBrowser) return;
+  try {
+    if (value) {
+      window.localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(value));
+    } else {
+      window.localStorage.removeItem(SESSION_STORAGE_KEY);
+    }
+  } catch (err) {
+    console.warn('Unable to persist session', err);
+  }
+};
+
 
 interface LoginErrorPayload {
   code?: string;
@@ -90,7 +135,7 @@ const isLoginResponse = (value: unknown): value is LoginResponse => {
 };
 
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [session, setSession] = useState<StoredSession | null>(null);
+  const [session, setSession] = useState<StoredSession | null>(() => readStoredSession());
   const [loginError, setLoginError] = useState<string | null>(null);
   const [isAuthenticating, setIsAuthenticating] = useState(false);
   const [requiresManager, setRequiresManager] = useState(false);
@@ -105,6 +150,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const applySession = useCallback((value: StoredSession | null) => {
     setSession(value);
+    sessionRef.current = value;
+    persistSession(value);
   }, []);
 
   const clearLoginError = useCallback(() => {
@@ -122,11 +169,38 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     let cancelled = false;
 
     const hydrateSession = async () => {
+      const stored = readStoredSession();
+
+      if (!cancelled) {
+        if (stored) {
+          if (!sessionRef.current || sessionRef.current.token !== stored.token) {
+            applySession(stored);
+          }
+          setLoginError(null);
+          setRequiresManager(false);
+          setLockedUntil(null);
+          resetMfaState();
+        } else if (sessionRef.current) {
+          applySession(null);
+        }
+      }
+
+      if (!isOnline() || !stored) {
+        return;
+      }
+
       try {
-        const response = await fetch(SESSION_ENDPOINT, {
+        const response = (await fetch(SESSION_ENDPOINT, {
           method: 'GET',
           credentials: 'include',
-        });
+        })) as Response | undefined;
+
+        if (!response) {
+          if (!cancelled) {
+            console.warn('Invalid session response from auth service');
+          }
+          return;
+        }
 
         if (!response.ok) {
           if (!cancelled) {
@@ -230,11 +304,23 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     clearLoginError();
 
     if (!isOnline()) {
-      setIsAuthenticating(false);
+      const cachedSession = sessionRef.current ?? readStoredSession();
+      if (cachedSession) {
+        const refreshed: StoredSession = { ...cachedSession, timestamp: Date.now() };
+        applySession(refreshed);
+        setLoginError(null);
+        setRequiresManager(false);
+        setLockedUntil(null);
+        resetMfaState();
+        setIsAuthenticating(false);
+        return true;
+      }
+
       setRequiresManager(false);
       setLockedUntil(null);
       resetMfaState();
-      setLoginError('Login requires a network connection. Please reconnect and try again.');
+      setLoginError('Login requires connection');
+      setIsAuthenticating(false);
       return false;
     }
 
@@ -383,6 +469,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   return <AuthContext.Provider value={contextValue}>{children}</AuthContext.Provider>;
 };
 
+// eslint-disable-next-line react-refresh/only-export-components
 export const useAuth = () => {
   const ctx = useContext(AuthContext);
   if (!ctx) throw new Error('useAuth must be used within AuthProvider');

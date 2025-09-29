@@ -243,11 +243,12 @@ const SalesPage: React.FC = () => {
           setCatalogIndex({});
         }
       } finally {
-        if (!isMounted) return;
-        if (isBackground) {
-          setIsRefreshing(false);
-        } else {
-          setIsLoadingProducts(false);
+        if (isMounted) {
+          if (isBackground) {
+            setIsRefreshing(false);
+          } else {
+            setIsLoadingProducts(false);
+          }
         }
       }
     };

@@ -13,3 +13,7 @@ jwt-dev.pem
 jwt-dev.pub.pem
 vault-data/
 
+# Allow tracking of specific fixture files in services/auth-service/tests/fixtures
+!services/auth-service/tests/fixtures/jwt-dev.pem
+!services/auth-service/tests/fixtures/jwt-dev.pub.pem
+

@@ -25,10 +25,7 @@ export const useSubmitOrder = (): UseSubmitOrderResult => {
     lastSubmitRef.current = now;
 
     try {
-      const result = await submitOrder(order);
-      return result;
-    } catch (err) {
-      throw err;
+      return await submitOrder(order);
     } finally {
       submittingRef.current = false;
       setSubmitting(false);

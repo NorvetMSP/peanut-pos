@@ -9,12 +9,12 @@ use serde::Serialize;
 use sqlx::query_as;
 use uuid::Uuid;
 
-const LIST_INVENTORY_SQL: &str =
+pub(crate) const LIST_INVENTORY_SQL: &str =
     "SELECT product_id, tenant_id, quantity, threshold FROM inventory WHERE tenant_id = $1";
 
-const INVENTORY_VIEW_ROLES: &[&str] = &["super_admin", "admin", "manager", "cashier"];
+pub(crate) const INVENTORY_VIEW_ROLES: &[&str] = &["super_admin", "admin", "manager", "cashier"];
 
-fn tenant_id_from_request(
+pub(crate) fn tenant_id_from_request(
     headers: &HeaderMap,
     auth: &AuthContext,
 ) -> Result<Uuid, (StatusCode, String)> {
@@ -47,7 +47,10 @@ fn tenant_id_from_request(
     Ok(tenant_id)
 }
 
-fn ensure_role(auth: &AuthContext, allowed: &[&str]) -> Result<(), (StatusCode, String)> {
+pub(crate) fn ensure_role(
+    auth: &AuthContext,
+    allowed: &[&str],
+) -> Result<(), (StatusCode, String)> {
     let has_role = auth
         .claims
         .roles

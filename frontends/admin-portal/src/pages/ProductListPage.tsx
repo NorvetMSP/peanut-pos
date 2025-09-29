@@ -5,7 +5,8 @@ import { resolveServiceUrl } from '../utils/env';
 import './AdminSectionModern.css';
 
 const PRODUCT_SERVICE_URL = resolveServiceUrl('VITE_PRODUCT_SERVICE_URL', 'http://localhost:8081');
-const DEFAULT_IMAGE_PLACEHOLDER = 'https://images.fineartamerica.com/images/artworkimages/mediumlarge/1/super-nova-rina-kaff.jpg"';
+const DEFAULT_IMAGE_PLACEHOLDER =
+  'https://images.fineartamerica.com/images/artworkimages/mediumlarge/1/super-nova-rina-kaff.jpg';
 
 type ServiceProduct = {
   id: string;
@@ -62,6 +63,52 @@ const normalizeProduct = (input: unknown): ServiceProduct | null => {
     image,
   };
 };
+
+type AuditEntriesContainer = {
+  entries?: unknown;
+};
+
+const isAuditEntriesContainer = (value: unknown): value is AuditEntriesContainer =>
+  typeof value === 'object' && value !== null && 'entries' in value;
+
+const isProductAuditEntry = (entry: ProductAuditEntry | null): entry is ProductAuditEntry => entry !== null;
+
+// Helper to normalize a single audit entry
+function normalizeAuditEntry(entry: unknown): ProductAuditEntry | null {
+  if (!entry || typeof entry !== 'object') return null;
+  const candidate = entry as Record<string, unknown>;
+  const id = candidate.id;
+  const action = candidate.action;
+  const createdAt = candidate.created_at;
+  if (typeof id !== 'string' || typeof action !== 'string' || typeof createdAt !== 'string') return null;
+
+  const actorId = typeof candidate.actor_id === 'string' ? candidate.actor_id : null;
+  const actorName = typeof candidate.actor_name === 'string' ? candidate.actor_name : null;
+  const actorEmail = typeof candidate.actor_email === 'string' ? candidate.actor_email : null;
+  const changes = 'changes' in candidate ? candidate.changes : undefined;
+
+  return {
+    id,
+    action,
+    created_at: createdAt,
+    actor_id: actorId,
+    actor_name: actorName,
+    actor_email: actorEmail,
+    changes: changes ?? {},
+  };
+}
+
+// Helper to normalize audit entries from API response
+function normalizeAuditEntries(input: unknown): ProductAuditEntry[] {
+  if (!input) return [];
+  if (Array.isArray(input)) {
+    return input.map(normalizeAuditEntry).filter(isProductAuditEntry);
+  }
+  if (isAuditEntriesContainer(input) && Array.isArray(input.entries)) {
+    return input.entries.map(normalizeAuditEntry).filter(isProductAuditEntry);
+  }
+  return [];
+}
 
 const ProductListPage: React.FC = () => {
   const { isLoggedIn, currentUser, token } = useAuth();
@@ -136,57 +183,6 @@ const ProductListPage: React.FC = () => {
     }
   }, [buildHeaders, ensureTenantContext]);
 
-  // Helper to normalize audit entries from API response
-  function normalizeAuditEntries(input: unknown): ProductAuditEntry[] {
-    const hasEntriesArray = (value: unknown): value is { entries: unknown[] } => {
-      if (typeof value !== 'object' || value === null) return false;
-      if (!('entries' in value)) return false;
-      const { entries } = value as { entries: unknown };
-      return Array.isArray(entries);
-    };
-
-    if (!input) return [];
-    if (Array.isArray(input)) {
-      return input
-        .map(normalizeAuditEntry)
-        .filter((entry): entry is ProductAuditEntry => entry !== null);
-    }
-    if (hasEntriesArray(input)) {
-      return input.entries
-        .map(normalizeAuditEntry)
-        .filter((entry): entry is ProductAuditEntry => entry !== null);
-    }
-    return [];
-  }
-
-  // Helper to normalize a single audit entry
-  function normalizeAuditEntry(entry: unknown): ProductAuditEntry | null {
-    if (typeof entry !== 'object' || entry === null) return null;
-
-    const candidate = entry as Record<string, unknown>;
-    const id = candidate.id;
-    const action = candidate.action;
-    const createdAt = candidate.created_at;
-
-    if (typeof id !== 'string' || typeof action !== 'string' || typeof createdAt !== 'string') {
-      return null;
-    }
-
-    const actorId = candidate.actor_id;
-    const actorName = candidate.actor_name;
-    const actorEmail = candidate.actor_email;
-    const changes = candidate.changes;
-
-    return {
-      id,
-      action,
-      created_at: createdAt,
-      actor_id: typeof actorId === 'string' ? actorId : null,
-      actor_name: typeof actorName === 'string' ? actorName : null,
-      actor_email: typeof actorEmail === 'string' ? actorEmail : null,
-      changes: changes === undefined || changes === null ? {} : changes,
-    };
-  }
 
   const fetchProductAudit = useCallback(
     async (productId: string, force = false): Promise<void> => {
@@ -417,16 +413,19 @@ const ProductListPage: React.FC = () => {
       if (response.status === 204) {
         setProducts(prev => prev.filter(item => item.id !== product.id));
         setAuditLogByProduct(prev => {
-          const { [product.id]: _unused, ...rest } = prev;
-          return rest;
+          const next = { ...prev };
+          delete next[product.id];
+          return next;
         });
         setAuditLoadingByProduct(prev => {
-          const { [product.id]: _unused, ...rest } = prev;
-          return rest;
+          const next = { ...prev };
+          delete next[product.id];
+          return next;
         });
         setAuditErrorByProduct(prev => {
-          const { [product.id]: _unused, ...rest } = prev;
-          return rest;
+          const next = { ...prev };
+          delete next[product.id];
+          return next;
         });
         if (editingProductId === product.id) {
           resetEditState();
@@ -578,8 +577,6 @@ const ProductListPage: React.FC = () => {
                     const auditEntries = auditLogByProduct[prod.id] ?? [];
                     const auditLoading = auditLoadingByProduct[prod.id];
                     const auditError = auditErrorByProduct[prod.id];
-                    const showHistory = isEditing || historyProductId === prod.id;
-
                     if (isEditing) {
                       return (
                         <React.Fragment key={prod.id}>

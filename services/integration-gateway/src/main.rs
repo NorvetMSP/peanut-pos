@@ -44,7 +44,7 @@ use crate::metrics::GatewayMetrics;
 use crate::rate_limiter::RateLimiter;
 use crate::usage::UsageTracker;
 
-use integration_handlers::{handle_external_order, process_payment};
+use integration_handlers::{handle_external_order, process_payment, void_payment};
 use webhook_handlers::handle_coinbase_webhook;
 
 /// Shared application state
@@ -293,6 +293,7 @@ async fn main() -> anyhow::Result<()> {
     let auth_state = state.clone();
     let protected_api = Router::new()
         .route("/payments", post(process_payment))
+        .route("/payments/void", post(void_payment))
         .route("/external/order", post(handle_external_order))
         .route("/webhooks/coinbase", post(handle_coinbase_webhook))
         .layer(middleware::from_fn(move |request, next| {

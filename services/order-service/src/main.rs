@@ -13,11 +13,11 @@ use futures_util::StreamExt;
 use rdkafka::consumer::{Consumer, StreamConsumer};
 use rdkafka::producer::{FutureProducer, FutureRecord};
 use rdkafka::Message;
+use reqwest::Client;
 use sqlx::PgPool;
-use std::collections::HashMap;
 use std::env;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::time::{interval, MissedTickBehavior};
@@ -26,14 +26,17 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 mod order_handlers;
-use order_handlers::{clear_offline_orders, create_order, list_orders, refund_order, OrderItem};
+use order_handlers::{
+    clear_offline_orders, create_order, get_order, list_orders, refund_order, void_order,
+};
 
 #[derive(Clone)]
 pub struct AppState {
     pub db: PgPool,
     pub kafka_producer: FutureProducer,
-    pub pending_orders: Option<Arc<Mutex<HashMap<Uuid, (Vec<OrderItem>, Option<Uuid>, bool)>>>>,
     pub jwt_verifier: Arc<JwtVerifier>,
+    pub http_client: Client,
+    pub inventory_base_url: String,
 }
 
 impl FromRef<AppState> for Arc<JwtVerifier> {
@@ -57,6 +60,22 @@ struct PaymentFailedEvent {
     pub reason: String,
 }
 
+#[derive(sqlx::FromRow)]
+struct OrderFinancialSummary {
+    total: Option<f64>,
+    customer_id: Option<Uuid>,
+    offline: bool,
+    payment_method: String,
+}
+
+#[derive(sqlx::FromRow)]
+struct OrderItemFinancialRow {
+    product_id: Uuid,
+    quantity: i32,
+    unit_price: f64,
+    line_total: f64,
+}
+
 async fn health() -> &'static str {
     "ok"
 }
@@ -76,17 +95,19 @@ async fn main() -> anyhow::Result<()> {
         .create()
         .expect("failed to create kafka producer");
 
-    let pending_orders: Arc<Mutex<HashMap<Uuid, (Vec<OrderItem>, Option<Uuid>, bool)>>> =
-        Arc::new(Mutex::new(HashMap::new()));
-
     let jwt_verifier = build_jwt_verifier_from_env().await?;
     spawn_jwks_refresh(jwt_verifier.clone());
+
+    let http_client = Client::new();
+    let inventory_base_url =
+        env::var("INVENTORY_SERVICE_URL").unwrap_or_else(|_| "http://localhost:8087".to_string());
 
     let state = AppState {
         db: db.clone(),
         kafka_producer: kafka_producer.clone(),
-        pending_orders: Some(pending_orders.clone()),
         jwt_verifier,
+        http_client: http_client.clone(),
+        inventory_base_url: inventory_base_url.clone(),
     };
 
     let allowed_origins = [
@@ -127,14 +148,16 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/healthz", get(health))
         .route("/orders", post(create_order).get(list_orders))
+        .route("/orders/:order_id", get(get_order))
         .route("/orders/offline/clear", post(clear_offline_orders))
+        .route("/orders/:order_id/void", post(void_order))
         .route("/orders/refund", post(refund_order))
         .with_state(state.clone())
         .layer(cors);
 
     let db_pool = db.clone();
     let producer = kafka_producer.clone();
-    let pending_orders_consumer = pending_orders.clone();
+
     tokio::spawn(async move {
         let consumer: StreamConsumer = rdkafka::ClientConfig::new()
             .set(
@@ -155,91 +178,253 @@ async fn main() -> anyhow::Result<()> {
                     if let Some(Ok(payload)) = m.payload_view::<str>() {
                         match topic {
                             "payment.completed" => {
-                                if let Ok(evt) =
-                                    serde_json::from_str::<PaymentCompletedEvent>(payload)
-                                {
-                                    let _ = sqlx::query(
-                                        "UPDATE orders SET status = 'COMPLETED' WHERE id =  AND tenant_id =  AND status <> 'REFUNDED'",
-                                    )
-                                    .bind(evt.order_id)
-                                    .bind(evt.tenant_id)
-                                    .execute(&db_pool)
-                                    .await;
-
-                                    let maybe_data = {
-                                        let mut map = pending_orders_consumer.lock().unwrap();
-                                        map.remove(&evt.order_id)
-                                    };
-
-                                    if let Some((items, cust_opt, offline)) = maybe_data {
-                                        let order_event = serde_json::json!({
-                                            "order_id": evt.order_id,
-                                            "tenant_id": evt.tenant_id,
-                                            "items": items,
-                                            "total": evt.amount,
-                                            "customer_id": cust_opt,
-                                            "offline": offline
-                                        });
-                                        if let Err(err) = producer
-                                            .send(
-                                                FutureRecord::to("order.completed")
-                                                    .payload(&order_event.to_string())
-                                                    .key(&evt.tenant_id.to_string()),
-                                                Duration::from_secs(0),
-                                            )
-                                            .await
+                                match serde_json::from_str::<PaymentCompletedEvent>(payload) {
+                                    Ok(evt) => {
+                                        if let Err(err) = sqlx::query(
+                                            "UPDATE orders SET status = 'COMPLETED' WHERE id = $1 AND tenant_id = $2 AND status = 'PENDING'",
+                                        )
+                                        .bind(evt.order_id)
+                                        .bind(evt.tenant_id)
+                                        .execute(&db_pool)
+                                        .await
                                         {
                                             tracing::error!(
-                                                "Failed to send order.completed: {:?}",
-                                                err
-                                            );
-                                        } else {
-                                            tracing::info!(
-                                                "Order {} marked COMPLETED (payment confirmed)",
-                                                evt.order_id
+                                                ?err,
+                                                order_id = %evt.order_id,
+                                                tenant_id = %evt.tenant_id,
+                                                "Failed to update order status on payment completion"
                                             );
                                         }
-                                    }
-                                } else {
-                                    tracing::error!("Failed to parse PaymentCompletedEvent");
-                                }
-                            }
-                            "payment.failed" => {
-                                if let Ok(evt) = serde_json::from_str::<PaymentFailedEvent>(payload)
-                                {
-                                    match sqlx::query(
-                                        "UPDATE orders SET status = 'NOT_ACCEPTED' WHERE id =  AND tenant_id =  AND status = 'PENDING'",
-                                    )
-                                    .bind(evt.order_id)
-                                    .bind(evt.tenant_id)
-                                    .execute(&db_pool)
-                                    .await
-                                    {
-                                        Ok(result) => {
-                                            if result.rows_affected() == 0 {
+
+                                        match sqlx::query_as::<_, OrderFinancialSummary>(
+                                            "SELECT total::FLOAT8 as total, customer_id, offline, payment_method FROM orders WHERE id = $1 AND tenant_id = $2",
+                                        )
+                                        .bind(evt.order_id)
+                                        .bind(evt.tenant_id)
+                                        .fetch_optional(&db_pool)
+                                        .await
+                                        {
+                                            Ok(Some(order_row)) => {
+                                                match sqlx::query_as::<_, OrderItemFinancialRow>(
+                                                    "SELECT product_id, quantity, unit_price::FLOAT8 as unit_price, line_total::FLOAT8 as line_total FROM order_items WHERE order_id = $1",
+                                                )
+                                                .bind(evt.order_id)
+                                                .fetch_all(&db_pool)
+                                                .await
+                                                {
+                                                    Ok(item_rows) => {
+                                                        let event_items: Vec<serde_json::Value> = item_rows
+                                                            .into_iter()
+                                                            .map(|row| {
+                                                                serde_json::json!({
+                                                                    "product_id": row.product_id,
+                                                                    "quantity": row.quantity,
+                                                                    "unit_price": row.unit_price,
+                                                                    "line_total": row.line_total,
+                                                                })
+                                                            })
+                                                            .collect();
+
+                                                        let event = serde_json::json!({
+                                                            "order_id": evt.order_id,
+                                                            "tenant_id": evt.tenant_id,
+                                                            "items": event_items,
+                                                            "total": order_row.total,
+                                                            "customer_id": order_row.customer_id,
+                                                            "offline": order_row.offline,
+                                                            "payment_method": order_row.payment_method,
+                                                        });
+
+                                                        if let Err(err) = producer
+                                                            .send(
+                                                                FutureRecord::to("order.completed")
+                                                                    .payload(&event.to_string())
+                                                                    .key(&evt.tenant_id.to_string()),
+                                                                Duration::from_secs(0),
+                                                            )
+                                                            .await
+                                                        {
+                                                            tracing::error!(
+                                                                ?err,
+                                                                order_id = %evt.order_id,
+                                                                tenant_id = %evt.tenant_id,
+                                                                "Failed to publish order.completed after payment confirmation"
+                                                            );
+                                                        } else {
+                                                            tracing::info!(
+                                                                order_id = %evt.order_id,
+                                                                tenant_id = %evt.tenant_id,
+                                                                "Order marked COMPLETED after payment confirmation"
+                                                            );
+                                                        }
+                                                    }
+                                                    Err(err) => {
+                                                        tracing::error!(
+                                                            ?err,
+                                                            order_id = %evt.order_id,
+                                                            tenant_id = %evt.tenant_id,
+                                                            "Failed to load order items for payment completion"
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                            Ok(None) => {
                                                 tracing::warn!(
                                                     order_id = %evt.order_id,
                                                     tenant_id = %evt.tenant_id,
-                                                    method = evt.method.as_str(),
-                                                    reason = %evt.reason,
-                                                    "Payment failure received but order not updated"
+                                                    "Payment completion received for unknown order"
                                                 );
-                                            } else {
-                                                tracing::warn!(
+                                            }
+                                            Err(err) => {
+                                                tracing::error!(
+                                                    ?err,
                                                     order_id = %evt.order_id,
                                                     tenant_id = %evt.tenant_id,
-                                                    method = evt.method.as_str(),
-                                                    reason = %evt.reason,
-                                                    "Order marked NOT_ACCEPTED due to payment failure"
+                                                    "Failed to load order for payment completion"
                                                 );
                                             }
                                         }
-                                        Err(err) => {
-                                            tracing::error!(?err, "Failed to update order for payment failure");
+                                    }
+                                    Err(err) => {
+                                        tracing::error!(
+                                            ?err,
+                                            "Failed to parse PaymentCompletedEvent"
+                                        );
+                                    }
+                                }
+                            }
+                            "payment.failed" => {
+                                match serde_json::from_str::<PaymentFailedEvent>(payload) {
+                                    Ok(evt) => {
+                                        match sqlx::query(
+                                            "UPDATE orders SET status = 'NOT_ACCEPTED' WHERE id = $1 AND tenant_id = $2 AND status = 'PENDING'",
+                                        )
+                                        .bind(evt.order_id)
+                                        .bind(evt.tenant_id)
+                                        .execute(&db_pool)
+                                        .await
+                                        {
+                                            Ok(result) => {
+                                                if result.rows_affected() == 0 {
+                                                    tracing::warn!(
+                                                        order_id = %evt.order_id,
+                                                        tenant_id = %evt.tenant_id,
+                                                        method = evt.method.as_str(),
+                                                        reason = %evt.reason,
+                                                        "Payment failure received but order already processed"
+                                                    );
+                                                } else {
+                                                    tracing::warn!(
+                                                        order_id = %evt.order_id,
+                                                        tenant_id = %evt.tenant_id,
+                                                        method = evt.method.as_str(),
+                                                        reason = %evt.reason,
+                                                        "Order marked NOT_ACCEPTED due to payment failure"
+                                                    );
+
+                                                    match sqlx::query_as::<_, OrderFinancialSummary>(
+                                                        "SELECT total::FLOAT8 as total, customer_id, offline, payment_method FROM orders WHERE id = $1 AND tenant_id = $2",
+                                                    )
+                                                    .bind(evt.order_id)
+                                                    .bind(evt.tenant_id)
+                                                    .fetch_optional(&db_pool)
+                                                    .await
+                                                    {
+                                                        Ok(Some(order_row)) => {
+                                                            match sqlx::query_as::<_, OrderItemFinancialRow>(
+                                                                "SELECT product_id, quantity, unit_price::FLOAT8 as unit_price, line_total::FLOAT8 as line_total FROM order_items WHERE order_id = $1",
+                                                            )
+                                                            .bind(evt.order_id)
+                                                            .fetch_all(&db_pool)
+                                                            .await
+                                                            {
+                                                                Ok(item_rows) => {
+                                                                    let event_items: Vec<serde_json::Value> = item_rows
+                                                                        .into_iter()
+                                                                        .map(|row| {
+                                                                            serde_json::json!({
+                                                                                "product_id": row.product_id,
+                                                                                "quantity": row.quantity,
+                                                                                "unit_price": row.unit_price,
+                                                                                "line_total": row.line_total,
+                                                                            })
+                                                                        })
+                                                                        .collect();
+
+                                                                    let void_reason = if evt.reason.is_empty() {
+                                                                        Some(String::from("payment_failed"))
+                                                                    } else {
+                                                                        Some(format!("payment_failed: {}", evt.reason))
+                                                                    };
+                                                                    let void_event = serde_json::json!({
+                                                                        "order_id": evt.order_id,
+                                                                        "tenant_id": evt.tenant_id,
+                                                                        "items": event_items,
+                                                                        "total": order_row.total.unwrap_or(0.0),
+                                                                        "customer_id": order_row.customer_id,
+                                                                        "offline": order_row.offline,
+                                                                        "payment_method": order_row.payment_method,
+                                                                        "reason": void_reason,
+                                                                    });
+
+                                                                    if let Err(err) = producer
+                                                                        .send(
+                                                                            FutureRecord::to("order.voided")
+                                                                                .payload(&void_event.to_string())
+                                                                                .key(&evt.tenant_id.to_string()),
+                                                                            Duration::from_secs(0),
+                                                                        )
+                                                                        .await
+                                                                    {
+                                                                        tracing::error!(
+                                                                            ?err,
+                                                                            order_id = %evt.order_id,
+                                                                            tenant_id = %evt.tenant_id,
+                                                                            "Failed to emit order.voided after payment failure"
+                                                                        );
+                                                                    }
+                                                                }
+                                                                Err(err) => {
+                                                                    tracing::error!(
+                                                                        ?err,
+                                                                        order_id = %evt.order_id,
+                                                                        tenant_id = %evt.tenant_id,
+                                                                        "Failed to load order items after payment failure"
+                                                                    );
+                                                                }
+                                                            }
+                                                        }
+                                                        Ok(None) => {
+                                                            tracing::error!(
+                                                                order_id = %evt.order_id,
+                                                                tenant_id = %evt.tenant_id,
+                                                                "Order missing when preparing void event after payment failure"
+                                                            );
+                                                        }
+                                                        Err(err) => {
+                                                            tracing::error!(
+                                                                ?err,
+                                                                order_id = %evt.order_id,
+                                                                tenant_id = %evt.tenant_id,
+                                                                "Failed to fetch order snapshot after payment failure"
+                                                            );
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            Err(err) => {
+                                                tracing::error!(
+                                                    ?err,
+                                                    order_id = %evt.order_id,
+                                                    tenant_id = %evt.tenant_id,
+                                                    "Failed to update order for payment failure"
+                                                );
+                                            }
                                         }
                                     }
-                                } else {
-                                    tracing::error!("Failed to parse PaymentFailedEvent");
+                                    Err(err) => {
+                                        tracing::error!(?err, "Failed to parse PaymentFailedEvent");
+                                    }
                                 }
                             }
                             _ => {}
