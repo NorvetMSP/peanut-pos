@@ -184,7 +184,6 @@ const ProductListPage: React.FC = () => {
   }, [buildHeaders, ensureTenantContext]);
 
 
-
   const fetchProductAudit = useCallback(
     async (productId: string, force = false): Promise<void> => {
       if (!ensureTenantContext()) return;
