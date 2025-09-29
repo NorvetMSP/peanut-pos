@@ -1,7 +1,6 @@
 
 # NovaPOS Admin Portal – Enhanced Order Search, Receipts, and Returns Implementation
 
-
 ## 1. Deep Order Search Functionality
 
 To empower admins with advanced order lookup, we will extend the Orders page and backend to support multi-criteria filtering, pagination, and sorting[1]. On the frontend, we add filter controls in `frontends/admin-portal/src/pages/OrdersPage.tsx` for the following criteria:
@@ -33,13 +32,11 @@ const OrdersPage: React.FC = () => {
 };
 ```
 
-
 export default OrdersPage;
 
 In this snippet, we gather filter inputs and on any change, refetch the orders (using fetch with the appropriate query parameters and tenant header). The backend will expose a matching `GET /orders` endpoint to accept these filters and query the database. The table displays key order info and provides action buttons per order: “View Receipt” (opens a receipt modal) and “Return” (navigates to the returns workflow for that order).
 
 On the backend (Rust Order Service), we implement a handler (e.g. `search_orders`) to query orders with the given filters. The handler ensures multi-tenant scope by including the tenant ID in the WHERE clause of every query[2]. It also enforces RBAC: only users with roles allowed to view orders (admin, manager, etc.) can use this broad search. We use SQLx to construct a parameterized SQL query, adding conditions only for provided filters. For partial matches (customer name/email), we use SQL ILIKE with wildcards. Sorting and pagination are applied via `ORDER BY ... LIMIT ... OFFSET`.
-
 
 Key aspects in the Rust implementation:
 
@@ -56,7 +53,7 @@ Below is a simplified Rust handler showing how filters are applied and tenant is
 ```rust
 // services/order-service/src/order_handlers.rs (excerpt)
 use actix_web::{web, HttpResponse};
-use uuid::Uuid;
+use uuid::Uuid; // Uuid type from the uuid crate
 use sqlx::PgPool;
 use crate::auth::{User, Role};  // hypothetical user/role context
 use crate::errors::AppError;
@@ -86,8 +83,8 @@ async fn get_order_detail(user: User, order_id: Uuid, pool: &PgPool) -> Result<O
     // Ensure the order belongs to the same tenant
     let order = sqlx::query_as!(
         OrderDetail,
-        "SELECT id, store_id, customer_name, customer_email, total, status, payment_method, created_at 
-         FROM orders 
+        "SELECT id, store_id, customer_name, customer_email, total, status, payment_method, created_at
+         FROM orders
          WHERE id = $1 AND tenant_id = $2",
         order_id, user.tenant_id
     )
@@ -99,8 +96,8 @@ async fn get_order_detail(user: User, order_id: Uuid, pool: &PgPool) -> Result<O
     // Fetch line items for the order
     let items = sqlx::query_as!(
         OrderItem,
-        "SELECT product_id, product_name, quantity, unit_price, COALESCE(returned_quantity, 0) as returned_quantity 
-         FROM order_items 
+        "SELECT product_id, product_name, quantity, unit_price, COALESCE(returned_quantity, 0) as returned_quantity
+         FROM order_items
          WHERE order_id = $1",
         order_detail.id
     )
@@ -109,34 +106,34 @@ async fn get_order_detail(user: User, order_id: Uuid, pool: &PgPool) -> Result<O
     Ok(order_detail)
 }
 
-pub async fn get_order_receipt(user: User, path: web::Path<Uuid>, pool: web::Data<PgPool>) 
-    -> Result<HttpResponse, AppError> 
+pub async fn get_order_receipt(user: User, path: web::Path<Uuid>, pool: web::Data<PgPool>)
+    -> Result<HttpResponse, AppError>
 {
     let order_id = path.into_inner();
     let detail = get_order_detail(user, order_id, pool.get_ref()).await?;  // full order + items
-    // Assemble receipt HTML (using simple string formatting for demo)
-    let mut html = String::new();
+    // Assemble receipt Markdown (using simple string formatting for demo)
+    let mut markdown = String::new();
 
-  // Markdown replacement for HTML receipt
-  html += &format!("## Receipt – Order {}\n", detail.id);
-  html += &format!("**Date:** {}  ", detail.created_at.format("%Y-%m-%d %H:%M:%S"));
-  html += &format!("**Store:** {}\n", detail.store_id);
-  if let Some(name) = &detail.customer_name {
-    html += &format!("**Customer:** {} ({})\n", name, detail.customer_email.clone().unwrap_or_default());
-  }
-  html += "| Item | Qty | Price | Total |\n|---|---|---|---|\n";
-  for item in &detail.items {
-    let line_total = &item.unit_price * BigDecimal::from(item.quantity);
-    html += &format!("| {} | {} | ${} | ${} |\n", item.product_name, item.quantity, item.unit_price, line_total);
-  }
-  html += &format!("\n**Grand Total:** ${}\n", detail.total);
-  html += &format!("**Payment Method:** {}{}\n",
-           detail.payment_method,
-           if detail.status == "REFUNDED" { " (REFUNDED)" } else { "" });
-  html += "\n_Thank you for your business!_\n";
-  return Ok(HttpResponse::Ok()
-    .content_type("text/markdown")
-    .body(html));
+    // Markdown receipt
+    markdown += &format!("## Receipt – Order `{}`\n", detail.id);
+    markdown += &format!("**Date:** {}\n", detail.created_at.format("%Y-%m-%d %H:%M:%S"));
+    markdown += &format!("**Store:** `{}`\n", detail.store_id);
+    if let Some(name) = &detail.customer_name {
+        markdown += &format!("**Customer:** {} ({})\n", name, detail.customer_email.clone().unwrap_or_default());
+    }
+    markdown += "| Item | Qty | Price | Total |\n|---|---|---|---|\n";
+    for item in &detail.items {
+        let line_total = &item.unit_price * BigDecimal::from(item.quantity);
+        markdown += &format!("| {} | {} | ${} | ${} |\n", item.product_name, item.quantity, item.unit_price, line_total);
+    }
+    markdown += &format!("\n**Grand Total:** ${}\n", detail.total);
+    markdown += &format!("**Payment Method:** {}{}\n",
+        detail.payment_method,
+        if detail.status == "REFUNDED" { " (REFUNDED)" } else { "" });
+    markdown += "\n_Thank you for your business!_\n";
+    return Ok(HttpResponse::Ok()
+        .content_type("text/markdown")
+        .body(markdown));
 }
 In this snippet, OrderDetail is a struct representing an order with an items: Vec<OrderItem> field; we populate it by first querying the orders table and then the order_items. The HTML assembly is rudimentary – in a real app, you’d likely use a proper template or PDF generator, and include store details like address or logo. The tenant check ensures an admin from one tenant cannot fetch another tenant’s order receipt. RBAC-wise, if a lower role (like basic cashier) should not access receipts via this admin API, we’d ensure only admin roles call this (or simply rely on the fact that only Admin Portal (for managers/admins) uses this route).
 Note on data: Because we persist each line item’s price at time of purchase[3], the receipt accurately reflects the transaction as it occurred (even if product prices change later). The receipt shows if an order was refunded by checking status, but a more advanced version might list returned items separately.
@@ -167,7 +164,7 @@ const ReturnsPage: React.FC = () => {
   const [order, setOrder] = useState<OrderDetail | null>(null);
   const [returnQty, setReturnQty] = useState<{ [productId: string]: number }>({});
   const [reason, setReason] = useState('');
-  const tenantId = /* current tenant ID from context */;
+  const tenantId = /*current tenant ID from context*/;
 
   // Fetch order details if an orderId was provided initially
   useEffect(() => {
@@ -185,7 +182,7 @@ const ReturnsPage: React.FC = () => {
     });
     if (res.ok) {
       const data = await res.json();
-      setOrder(data); 
+      setOrder(data);
       // Initialize returnQty state for each item to 0
       const quantities: { [id: string]: number } = {};
       data.items.forEach((item: any) => { quantities[item.product_id] = 0; });
@@ -251,8 +248,7 @@ const ReturnsPage: React.FC = () => {
   }, [tenantId]);
 
   return (
-    <div>
-      <h1>Returns Dashboard</h1>
+    # Returns Dashboard
 
       {/* Order lookup form */}
       <div className="return-lookup">
@@ -356,10 +352,11 @@ CREATE TABLE return_items (
 );
 This allows recording each return event separately from the original order. The orders.status field will be updated to REFUNDED or PARTIAL_REFUNDED accordingly[6].
 Endpoints:
+
 - GET /api/returns: List return records, possibly filterable by date, store, etc., similar to order search. This will join order_returns with orders and perhaps users (for processed_by name) to return a summary of each return (date, order_id, amount, reason, processed_by). We skip the detailed code for brevity; it would be analogous to search_orders but on the order_returns table with filters.
 - POST /api/orders/{id}/refund: Process a return/refund for the given order. This is the core of the returns workflow and includes multiple steps to ensure consistency:
 Refund Processing Steps[5]:
-- Role check: Confirm the user’s role is authorized for refunds (e.g. in ORDER_REFUND_ROLES like manager/admin)[4].
+- Role check: Confirm the user’s role is authorized for refunds [e.g. in ORDER_REFUND_ROLES like manager/admin](4).
 - Load Order (Lock): Fetch the order by ID for that tenant and lock it (FOR UPDATE) within a database transaction. Verify the order exists and is eligible (e.g., not already fully refunded or voided).
 - Validate Items: For each item requested to return, ensure it exists in the order and that the return quantity ≤ (original quantity – already returned quantity). If any violation, abort with a 400 Bad Request.
 - Calculate refund amount: Sum up the refund amounts (we can calculate per item as unit_price * return_quantity).
@@ -367,8 +364,8 @@ Refund Processing Steps[5]:
 - Update Order Status: Determine if the order is now fully refunded (all items returned) or partially – set orders.status to REFUNDED or PARTIAL_REFUNDED accordingly[6].
 - Trigger Payment Refund: If the payment method was non-cash (e.g. Credit Card or Crypto), call the Payment Service to actually issue the refund to the customer’s card/account. This could be a REST call to the Payment microservice or an internal Kafka event. For security, we use the service’s authentication (e.g. a service JWT or API key) when calling this internal API[7]. We perform this before committing the transaction – if the payment gateway returns failure, we roll back all DB changes and return an error so the UI knows the refund didn’t complete. (If the payment service is asynchronous, we might mark as pending, but here we assume synchronous stub for simplicity.)
 - Commit Transaction: Once the payment refund is confirmed (or if it was a cash refund which doesn’t require external processing), commit the database transaction so all changes persist atomically.
-- Emit Events: Publish an order.completed event with negative item quantities and negative total representing the refund[7]. The Inventory Service, already listening to order events, will interpret negative quantities as stock being added back (restock)[7]. Similarly, the Loyalty Service will deduct points for the refunded amount (since a negative total leads to negative loyalty points) – this behavior was already designed in the system. We also could emit a dedicated order.refunded event, but reusing the existing event type with negative values keeps services simple.
-- Audit Logging: Log the return action via the Audit Service. For example, emit an audit.log event or call an audit endpoint with details (order ID, user, reason, amount)[5]. This ensures an immutable record of who performed the return and why, visible in audit trails.
+- Emit Events: Publish an order.completed event with negative item quantities and negative total representing the refund[7]. The Inventory Service, already listening to order events, will interpret negative quantities as stock being added back [restock](7). Similarly, the Loyalty Service will deduct points for the refunded amount (since a negative total leads to negative loyalty points) – this behavior was already designed in the system. We also could emit a dedicated order.refunded event, but reusing the existing event type with negative values keeps services simple.
+- Audit Logging: Log the return action via the Audit Service. For example, emit an audit.log event or call an audit endpoint with details [order ID, user, reason, amount](5). This ensures an immutable record of who performed the return and why, visible in audit trails.
 Below is the Rust handler for refunding an order (partial/full return). It puts together the above steps:
 // services/order-service/src/order_handlers.rs (refund endpoint)
 use bigdecimal::BigDecimal;
@@ -378,20 +375,23 @@ use crate::auth::{User, ORDER_REFUND_ROLES};
 use crate::errors::AppError;
 use serde::Deserialize;
 
-#[derive(Deserialize)]
+# [derive(Deserialize)]
+
 struct RefundItem {
     product_id: Uuid,
     quantity: i32,
     refund_amount: BigDecimal  // client can send calculated refund, or compute server-side
 }
-#[derive(Deserialize)]
+
+# [derive(Deserialize)]
+
 struct RefundRequest {
     items: Vec<RefundItem>,
     reason: String
 }
 
-pub async fn refund_order(user: User, path: web::Path<Uuid>, req: web::Json<RefundRequest>, pool: web::Data<PgPool>) 
-    -> Result<HttpResponse, AppError> 
+pub async fn refund_order(user: User, path: web::Path<Uuid>, req: web::Json<RefundRequest>, pool: web::Data<PgPool>)
+    -> Result<HttpResponse, AppError>
 {
     let order_id = path.into_inner();
     // RBAC: only allow authorized roles to process returns
@@ -420,7 +420,7 @@ pub async fn refund_order(user: User, path: web::Path<Uuid>, req: web::Json<Refu
     }
     // Fetch all order items for validation
     let order_items = sqlx::query!(
-        "SELECT product_id, quantity, COALESCE(returned_quantity, 0) as returned_qty, unit_price 
+        "SELECT product_id, quantity, COALESCE(returned_quantity, 0) as returned_qty, unit_price
          FROM order_items WHERE order_id = $1",
         order_id
     )
@@ -446,7 +446,7 @@ pub async fn refund_order(user: User, path: web::Path<Uuid>, req: web::Json<Refu
     // Insert a record for this return
     let return_id = Uuid::new_v4();
     sqlx::query!(
-        "INSERT INTO order_returns (id, order_id, refund_reason, processed_by) 
+        "INSERT INTO order_returns (id, order_id, refund_reason, processed_by)
          VALUES ($1, $2, $3, $4)",
         return_id, order_id, req.reason, user.id
     )
@@ -454,14 +454,14 @@ pub async fn refund_order(user: User, path: web::Path<Uuid>, req: web::Json<Refu
     // Insert each returned item and update order_items returned_quantity
     for item in &req.items {
         sqlx::query!(
-            "INSERT INTO return_items (return_id, product_id, quantity, refund_amount) 
+            "INSERT INTO return_items (return_id, product_id, quantity, refund_amount)
              VALUES ($1, $2, $3, $4)",
             return_id, item.product_id, item.quantity, item.refund_amount
         )
         .execute(&mut tx).await.map_err(|e| AppError::Internal(e.to_string()))?;
         sqlx::query!(
-            "UPDATE order_items 
-             SET returned_quantity = COALESCE(returned_quantity, 0) + $3 
+            "UPDATE order_items
+             SET returned_quantity = COALESCE(returned_quantity, 0) + $3
              WHERE order_id = $1 AND product_id = $2",
             order_id, item.product_id, item.quantity
         )
@@ -469,7 +469,7 @@ pub async fn refund_order(user: User, path: web::Path<Uuid>, req: web::Json<Refu
     }
     // Update order status to PARTIAL_REFUNDED or REFUNDED based on remaining items
     let totals = sqlx::query!(
-        "SELECT SUM(quantity) as total_qty, SUM(COALESCE(returned_quantity,0)) as total_returned 
+        "SELECT SUM(quantity) as total_qty, SUM(COALESCE(returned_quantity,0)) as total_returned
          FROM order_items WHERE order_id = $1",
         order_id
     )
@@ -513,23 +513,27 @@ pub async fn refund_order(user: User, path: web::Path<Uuid>, req: web::Json<Refu
     audit_producer.send("audit.log", &audit_event).await;
     // Return success response with new status and refund details
     Ok(HttpResponse::Ok().json({
-        "return_id": return_id, 
-        "status": new_status, 
-        "refunded_amount": total_refund 
+        "return_id": return_id,
+        "status": new_status,
+        "refunded_amount": total_refund
     }))
 }
 In this code, we perform all the critical steps described:
+
 - Transaction & Locking: Using FOR UPDATE on the order row ensures no concurrent process can modify the order while we process the return. This prevents race conditions (e.g., two return requests on the same order).
 - Validation: We ensure the requested return quantities don’t exceed what’s available. This uses the persisted returned_quantity field to account for any prior returns[5].
-- Database Updates: We record the return in order_returns and detail each item in return_items. We update each affected order_items.returned_quantity. Then we update the main order’s status to PARTIAL_REFUNDED or REFUNDED (if all items are returned)[6].
+- Database Updates: We record the return in order_returns and detail each item in return_items. We update each affected order_items.returned_quantity. Then we update the main order’s status to PARTIAL_REFUNDED or REFUNDED [if all items are returned](6).
 - Payment Refund: We call a helper call_payment_service_refund (pseudo-code) – this would perform the inter-service call. In a real system, this might send an HTTPS request to Payment Service’s refund endpoint with the payment identifier or order info. Since Payment Service is a stub in NovaPOS, we simulate a success. We ensure that if this call fails, we rollback the DB transaction so no return is recorded unless the money is actually refunded to the customer.
-- Events: By sending an order.completed event with negative quantities, the Inventory Service will add stock back for those products (it subtracts a negative, effectively adding)[7]. The Loyalty Service will subtract points (since it sees a negative order total) – this approach was designed in the existing system to handle returns automatically[7]. We reuse existing event types so that Inventory and Loyalty logic remains unchanged for handling returns.
+- Events: By sending an order.completed event with negative quantities, the Inventory Service will add stock back for those products [it subtracts a negative, effectively adding](7). The Loyalty Service will subtract points (since it sees a negative order total) – this approach was designed in the existing system to handle returns automatically[7]. We reuse existing event types so that Inventory and Loyalty logic remains unchanged for handling returns.
 - Audit: We emit an audit log event. The Audit Service (if subscribed or via an API) will record who (user.id) performed the refund and when. This is important for compliance and tracing issues[5].
 - Response: The API responds with confirmation including the return_id, new order status, and refunded amount. The front-end can use this to update UI (and possibly print a return receipt if needed).
 Security & RBAC: The backend double-checks that the user performing the refund has an appropriate role (has_any_role(ORDER_REFUND_ROLES) which might be defined as roles like ["super_admin", "admin", "manager"] as noted in the design[8]). This prevents unauthorized users from invoking refunds even if they discovered the endpoint.
 Multi-Tenancy: Every query includes a tenant filter (tenant_id = ...) or uses data that was already scoped by tenant (the order record fetched ensured matching tenant). We also pass the tenant_id into the event payloads (so downstream services know which tenant’s inventory to adjust, etc.).
 With this implementation, NovaPOS Admin Portal gains a robust returns management tool. Staff can find past returns for reference and initiate new ones in a controlled, audited manner. These changes fill the identified MVP gaps for deep order search, receipt access, and return handling[1], greatly improving operational capabilities while following the project’s architecture and security conventions.
 References:
+[4]: <https://your-link-for-4> "Reference 4 placeholder"
+[7]: <https://your-link-for-7> "Reference 7 placeholder"
+[10]: <https://your-link-for-10> "Reference 10 placeholder"
 - NovaPOS MVP Gaps Analysis – noted lack of admin order search, receipts, and returns UI[1].
 - Persisting order line items enables generating detailed receipts and handling returns[3][9].
 - Returns design from NovaPOS plan – partial returns, negative inventory updates, RBAC for returns[7][4][10].

@@ -683,6 +683,10 @@ $env:SECURITY_ALERT_TOPIC = "security.alerts.v1"
 $env:SECURITY_ALERT_WEBHOOK_URL = ""
 $env:SECURITY_ALERT_WEBHOOK_BEARER = ""
 $env:REDIS_URL = "redis://localhost:6379/0"
+# Order-service prereq: set INVENTORY_SERVICE_URL so the gateway/order sync hits the internal host instead of localhost
+# Compose example -> under order-service.environment add:
+#   - INVENTORY_SERVICE_URL=http://inventory-service:8087
+# Without this the POS queue stays offline with "Failed to contact inventory-service" errors.
 
 docker compose up -d redis postgres kafka
 docker compose up -d --build integration-gateway
