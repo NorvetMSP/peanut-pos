@@ -94,6 +94,6 @@ pub fn tenant_id_from_request(headers: &HeaderMap, auth: &AuthContext) -> Result
 
             Ok(requested)
         }
-        None => Ok(claims_tenant),
+        None => Err(GuardError::MissingTenantHeader),
     }
 }
