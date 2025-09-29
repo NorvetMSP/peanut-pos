@@ -350,18 +350,6 @@ export const useAuth = () => {
   return ctx;
 };
 
-// eslint-disable-next-line react-refresh/only-export-components
-export const useRoleList = (): readonly string[] => {
-  const { roles } = useAuth();
-  return roles;
-};
-
-// eslint-disable-next-line react-refresh/only-export-components
-export const useHasAnyRole = (allowed: readonly string[]): boolean => {
-  const { hasAnyRole: hasRoleAccess } = useAuth();
-  return hasRoleAccess(allowed);
-};
-
 interface RequireRolesProps {
   roles: readonly string[];
   children: React.ReactNode;

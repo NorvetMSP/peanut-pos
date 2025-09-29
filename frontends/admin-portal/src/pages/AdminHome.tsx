@@ -1,6 +1,7 @@
 import React from "react";
 import { useNavigate, useLocation } from "react-router-dom";
-import { useAuth, useHasAnyRole } from "../AuthContext";
+import { useAuth } from "../AuthContext";
+import { useHasAnyRole } from "../hooks/useRoleAccess";
 import {
   ADMIN_ROLES,
   MANAGER_ROLES,

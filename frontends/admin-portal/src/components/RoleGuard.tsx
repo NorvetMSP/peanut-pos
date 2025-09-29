@@ -1,5 +1,5 @@
 ﻿import React from "react";
-import { useHasAnyRole } from "../AuthContext";
+import { useHasAnyRole } from "../hooks/useRoleAccess";
 import AccessDenied from "./AccessDenied";
 
 interface RoleGuardOptions {
