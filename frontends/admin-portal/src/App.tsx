@@ -4,6 +4,8 @@ import DashboardPage from './pages/DashboardPage';
 import ProductListPage from './pages/ProductListPage';
 import UsersPage from './pages/UsersPage';
 import SettingsPage from './pages/SettingsPage';
+import OrdersPage from './pages/OrdersPage';
+import ReturnsPage from './pages/ReturnsPage';
 import AdminHome from './pages/AdminHome';
 
 function App() {
@@ -18,6 +20,8 @@ function App() {
       {/* Protected routes: only accessible after login */}
       <Route path="/dashboard" element={<DashboardPage />} />
       <Route path="/products" element={<ProductListPage />} />
+      <Route path="/orders" element={<OrdersPage />} />
+      <Route path="/returns" element={<ReturnsPage />} />
       <Route path="/users" element={<UsersPage />} />
       <Route path="/settings" element={<SettingsPage />} />
 
@@ -28,3 +32,7 @@ function App() {
 }
 
 export default App;
+
+
+
+

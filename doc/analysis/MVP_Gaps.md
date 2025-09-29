@@ -14,9 +14,10 @@ This document aggregates the gaps we have identified while reviewing the current
 - Managers can void in-flight orders via `POST /orders/:id/void`, which marks the sale `VOIDED` and emits an `order.voided` event for downstream cleanup (`services/order-service/src/order_handlers.rs:308`, `services/order-service/src/main.rs:131`).
 - Card/crypto payments remain `PENDING` until Kafka confirmation; the consumer applies parameterised status updates and rehydrates payloads from storage instead of an in-memory cache (`services/order-service/src/main.rs:150`, `services/order-service/src/main.rs:170`).
 
+- Admin portal now exposes an Orders workspace with deep filters, receipt previews, and return initiation (`frontends/admin-portal/src/pages/OrdersPage.tsx`, `frontends/admin-portal/src/pages/ReturnsPage.tsx`).
 ### Order Service: Confirmed Gaps / Risks
 
-- Operational tooling gaps persist: admin surfaces still lack deep order search, receipts, or return dashboards despite richer APIs (`services/order-service/src/order_handlers.rs:1017`, `frontends/admin-portal/src/pages/OrdersPage.tsx`).
+
 
 ### Order Service: Implications
 

@@ -41,6 +41,11 @@ const AdminHome: React.FC = () => {
             <div className="admin-home-card-desc">Manage your product catalog and pricing.</div>
             <button className="admin-home-card-btn" type="button">Go to Products</button>
           </div>
+          <div className="admin-home-card" onClick={handleNavigate('/orders')}>
+            <div className="admin-home-card-title">Orders</div>
+            <div className="admin-home-card-desc">Search orders, receipts, and returns.</div>
+            <button className="admin-home-card-btn" type="button">Go to Orders</button>
+          </div>
           <div className="admin-home-card" onClick={handleNavigate('/users')}>
             <div className="admin-home-card-title">Users</div>
             <div className="admin-home-card-desc">View and manage user accounts and roles.</div>
@@ -68,3 +73,4 @@ const AdminHome: React.FC = () => {
 };
 
 export default AdminHome;
+

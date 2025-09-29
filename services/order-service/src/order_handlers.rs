@@ -1,8 +1,10 @@
 use axum::extract::{Path, Query, State};
 use axum::{
-    http::{HeaderMap, StatusCode},
+    http::{header::CONTENT_TYPE, HeaderMap, HeaderValue, StatusCode},
+    response::{IntoResponse, Response},
     Json,
 };
+use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use common_auth::AuthContext;
 use rdkafka::producer::FutureRecord;
 use reqwest::Client;
@@ -71,6 +73,8 @@ fn tenant_id_from_request(
 #[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct OrderItem {
     pub product_id: Uuid,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub product_name: Option<String>,
     pub quantity: i32,
     pub unit_price: f64,
     pub line_total: f64,
@@ -82,6 +86,9 @@ pub struct NewOrder {
     pub payment_method: String,
     pub total: f64,
     pub customer_id: Option<String>,
+    pub customer_name: Option<String>,
+    pub customer_email: Option<String>,
+    pub store_id: Option<Uuid>,
     pub offline: Option<bool>,
     pub idempotency_key: Option<String>,
 }
@@ -93,6 +100,13 @@ pub struct Order {
     pub total: f64,
     pub status: String,
     pub customer_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub customer_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub customer_email: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub store_id: Option<Uuid>,
+    pub created_at: DateTime<Utc>,
     pub offline: bool,
     pub payment_method: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -138,11 +152,40 @@ pub struct ListOrdersParams {
     pub order_id: Option<Uuid>,
     pub payment_method: Option<String>,
     pub q: Option<String>,
+    pub store_id: Option<Uuid>,
+    pub customer: Option<String>,
+    pub start_date: Option<NaiveDate>,
+    pub end_date: Option<NaiveDate>,
+    pub sort: Option<String>,
+    pub direction: Option<String>,
 }
 
+#[derive(Deserialize, Default)]
+pub struct ListReturnsParams {
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+    pub order_id: Option<Uuid>,
+    pub store_id: Option<Uuid>,
+    pub start_date: Option<NaiveDate>,
+    pub end_date: Option<NaiveDate>,
+}
+
+#[derive(Serialize, Debug, sqlx::FromRow)]
+pub struct ReturnSummary {
+    pub id: Uuid,
+    pub order_id: Uuid,
+    pub total: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub created_at: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub store_id: Option<Uuid>,
+}
 #[derive(Serialize, Debug)]
 pub struct OrderLineItem {
     pub product_id: Uuid,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub product_name: Option<String>,
     pub quantity: i32,
     pub unit_price: f64,
     pub line_total: f64,
@@ -352,13 +395,14 @@ async fn insert_order_items(
     items: &[OrderItem],
 ) -> Result<(), (StatusCode, String)> {
     for item in items {
-        sqlx::query("INSERT INTO order_items (id, order_id, product_id, quantity, unit_price, line_total) VALUES ($1, $2, $3, $4, $5, $6)")
+        sqlx::query("INSERT INTO order_items (id, order_id, product_id, quantity, unit_price, line_total, product_name) VALUES ($1, $2, $3, $4, $5, $6, $7)")
         .bind(Uuid::new_v4())
         .bind(order_id)
         .bind(item.product_id)
         .bind(item.quantity)
         .bind(item.unit_price)
         .bind(item.line_total)
+        .bind(item.product_name.as_deref())
         .execute(&mut *tx)
         .await
         .map_err(|e| {
@@ -401,7 +445,7 @@ pub async fn create_order(
 
     if let Some(ref key) = idempotency_key {
         if let Some(existing) = sqlx::query_as::<_, Order>(
-            "SELECT id, tenant_id, total::FLOAT8 AS total, status, customer_id, offline, payment_method, idempotency_key FROM orders WHERE tenant_id = $1 AND idempotency_key = $2"
+            "SELECT id, tenant_id, total::FLOAT8 AS total, status, customer_id, customer_name, customer_email, store_id, created_at, offline, payment_method, idempotency_key FROM orders WHERE tenant_id = $1 AND idempotency_key = $2"
         )
         .bind(tenant_id)
         .bind(key)
@@ -469,6 +513,22 @@ pub async fn create_order(
         }
     });
 
+    let customer_name = new_order
+        .customer_name
+        .as_ref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string());
+
+    let customer_email = new_order
+        .customer_email
+        .as_ref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_lowercase());
+
+    let store_id = new_order.store_id;
+
     let mut tx = match state.db.begin().await {
         Ok(tx) => tx,
         Err(e) => {
@@ -491,15 +551,18 @@ pub async fn create_order(
     };
 
     let order = match sqlx::query_as::<_, Order>(
-        "INSERT INTO orders (id, tenant_id, total, status, customer_id, offline, payment_method, idempotency_key)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-         RETURNING id, tenant_id, total::FLOAT8 AS total, status, customer_id, offline, payment_method, idempotency_key"
+        "INSERT INTO orders (id, tenant_id, total, status, customer_id, customer_name, customer_email, store_id, offline, payment_method, idempotency_key)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+         RETURNING id, tenant_id, total::FLOAT8 AS total, status, customer_id, customer_name, customer_email, store_id, created_at, offline, payment_method, idempotency_key"
     )
     .bind(order_id)
     .bind(tenant_id)
     .bind(new_order.total)
     .bind(status)
     .bind(customer_uuid)
+    .bind(customer_name.as_deref())
+    .bind(customer_email.as_deref())
+    .bind(store_id)
     .bind(offline_flag)
     .bind(&payment_method)
     .bind(idempotency_key.as_deref())
@@ -657,7 +720,7 @@ pub async fn void_order(
 
     let updated_order = sqlx::query_as::<_, Order>(
         "UPDATE orders SET status = 'VOIDED', void_reason = $3 WHERE id = $1 AND tenant_id = $2 AND status = 'PENDING'
-         RETURNING id, tenant_id, total::FLOAT8 AS total, status, customer_id, offline, payment_method, idempotency_key",
+         RETURNING id, tenant_id, total::FLOAT8 AS total, status, customer_id, customer_name, customer_email, store_id, created_at, offline, payment_method, idempotency_key",
     )
     .bind(order_id)
     .bind(tenant_id)
@@ -997,7 +1060,7 @@ pub async fn refund_order(
 
     let updated_order = sqlx::query_as::<_, Order>(
         "UPDATE orders SET status = $3 WHERE id = $1 AND tenant_id = $2
-         RETURNING id, tenant_id, total::FLOAT8 AS total, status, customer_id, offline, payment_method, idempotency_key"
+         RETURNING id, tenant_id, total::FLOAT8 AS total, status, customer_id, customer_name, customer_email, store_id, created_at, offline, payment_method, idempotency_key"
     )
     .bind(req.order_id)
     .bind(tenant_id)
@@ -1069,8 +1132,26 @@ pub async fn list_orders(
     let limit = params.limit.unwrap_or(50).clamp(1, 200);
     let offset = params.offset.unwrap_or(0).max(0);
 
+    let sort_field = match params.sort.as_deref() {
+        Some("total") => "total",
+        Some("status") => "status",
+        Some("payment_method") => "payment_method",
+        Some("customer") | Some("customer_name") => "customer_name",
+        Some("customer_email") => "customer_email",
+        Some("store_id") => "store_id",
+        Some("created_at") => "created_at",
+        _ => "created_at",
+    };
+
+    let sort_direction = match params.direction.as_ref() {
+        Some(dir) if dir.eq_ignore_ascii_case("asc") || dir.eq_ignore_ascii_case("ascending") => {
+            "ASC"
+        }
+        _ => "DESC",
+    };
+
     let mut builder = QueryBuilder::new(
-        "SELECT id, tenant_id, total::FLOAT8 AS total, status, customer_id, offline, payment_method, idempotency_key FROM orders WHERE tenant_id = "
+        "SELECT id, tenant_id, total::FLOAT8 AS total, status, customer_id, customer_name, customer_email, store_id, created_at, offline, payment_method, idempotency_key FROM orders WHERE tenant_id = "
     );
     builder.push_bind(tenant_id);
 
@@ -1094,6 +1175,11 @@ pub async fn list_orders(
         builder.push_bind(customer_id);
     }
 
+    if let Some(store_id) = params.store_id {
+        builder.push(" AND store_id = ");
+        builder.push_bind(store_id);
+    }
+
     if let Some(payment_method) = params
         .payment_method
         .as_ref()
@@ -1102,6 +1188,36 @@ pub async fn list_orders(
     {
         builder.push(" AND payment_method = ");
         builder.push_bind(payment_method.to_lowercase());
+    }
+
+    if let Some(customer_term) = params
+        .customer
+        .as_ref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        let pattern = format!("%{}%", customer_term);
+        builder.push(" AND (COALESCE(customer_name, ') ILIKE ");
+        builder.push_bind(pattern.clone());
+        builder.push(" OR COALESCE(customer_email, ') ILIKE ");
+        builder.push_bind(pattern);
+        builder.push(")");
+    }
+
+    if let Some(start_date) = params.start_date {
+        if let Some(start_dt) = start_date.and_hms_opt(0, 0, 0) {
+            let start_dt = Utc.from_utc_datetime(&start_dt);
+            builder.push(" AND created_at >= ");
+            builder.push_bind(start_dt);
+        }
+    }
+
+    if let Some(end_date) = params.end_date {
+        if let Some(end_dt) = end_date.and_hms_opt(23, 59, 59) {
+            let end_dt = Utc.from_utc_datetime(&end_dt);
+            builder.push(" AND created_at <= ");
+            builder.push_bind(end_dt);
+        }
     }
 
     if let Some(term) = params
@@ -1118,7 +1234,10 @@ pub async fn list_orders(
         builder.push(")");
     }
 
-    builder.push(" ORDER BY created_at DESC");
+    builder.push(" ORDER BY ");
+    builder.push(sort_field);
+    builder.push(" ");
+    builder.push(sort_direction);
     builder.push(" LIMIT ");
     builder.push_bind(limit);
     builder.push(" OFFSET ");
@@ -1138,17 +1257,78 @@ pub async fn list_orders(
     Ok(Json(orders))
 }
 
-pub async fn get_order(
+pub async fn list_returns(
     State(state): State<AppState>,
     auth: AuthContext,
-    Path(order_id): Path<Uuid>,
     headers: HeaderMap,
-) -> Result<Json<OrderDetail>, (StatusCode, String)> {
+    Query(params): Query<ListReturnsParams>,
+) -> Result<Json<Vec<ReturnSummary>>, (StatusCode, String)> {
     ensure_role(&auth, ORDER_VIEW_ROLES)?;
     let tenant_id = tenant_id_from_request(&headers, &auth)?;
 
+    let limit = params.limit.unwrap_or(50).clamp(1, 200);
+    let offset = params.offset.unwrap_or(0).max(0);
+
+    let mut builder = QueryBuilder::new(
+        "SELECT r.id, r.order_id, r.total::FLOAT8 AS total, r.reason, r.created_at, o.store_id \
+         FROM order_returns r \
+         JOIN orders o ON o.id = r.order_id \
+         WHERE r.tenant_id = ",
+    );
+    builder.push_bind(tenant_id);
+
+    if let Some(order_id) = params.order_id {
+        builder.push(" AND r.order_id = ");
+        builder.push_bind(order_id);
+    }
+
+    if let Some(store_id) = params.store_id {
+        builder.push(" AND o.store_id = ");
+        builder.push_bind(store_id);
+    }
+
+    if let Some(start_date) = params.start_date {
+        if let Some(start_dt) = start_date.and_hms_opt(0, 0, 0) {
+            let start_dt = Utc.from_utc_datetime(&start_dt);
+            builder.push(" AND r.created_at >= ");
+            builder.push_bind(start_dt);
+        }
+    }
+
+    if let Some(end_date) = params.end_date {
+        if let Some(end_dt) = end_date.and_hms_opt(23, 59, 59) {
+            let end_dt = Utc.from_utc_datetime(&end_dt);
+            builder.push(" AND r.created_at <= ");
+            builder.push_bind(end_dt);
+        }
+    }
+
+    builder.push(" ORDER BY r.created_at DESC");
+    builder.push(" LIMIT ");
+    builder.push_bind(limit);
+    builder.push(" OFFSET ");
+    builder.push_bind(offset);
+
+    let returns = builder
+        .build_query_as::<ReturnSummary>()
+        .fetch_all(&state.db)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Database error: {}", e),
+            )
+        })?;
+
+    Ok(Json(returns))
+}
+async fn fetch_order_detail(
+    state: &AppState,
+    tenant_id: Uuid,
+    order_id: Uuid,
+) -> Result<OrderDetail, (StatusCode, String)> {
     let order = sqlx::query_as::<_, Order>(
-        "SELECT id, tenant_id, total::FLOAT8 AS total, status, customer_id, offline, payment_method, idempotency_key FROM orders WHERE id = $1 AND tenant_id = $2",
+        "SELECT id, tenant_id, total::FLOAT8 AS total, status, customer_id, customer_name, customer_email, store_id, created_at, offline, payment_method, idempotency_key FROM orders WHERE id = $1 AND tenant_id = $2",
     )
     .bind(order_id)
     .bind(tenant_id)
@@ -1163,7 +1343,7 @@ pub async fn get_order(
     .ok_or((StatusCode::NOT_FOUND, "Order not found".to_string()))?;
 
     let item_rows = sqlx::query(
-        "SELECT product_id, quantity, returned_quantity, unit_price::FLOAT8 AS unit_price, line_total::FLOAT8 AS line_total FROM order_items WHERE order_id = $1 ORDER BY created_at"
+        "SELECT product_id, product_name, quantity, returned_quantity, unit_price::FLOAT8 AS unit_price, line_total::FLOAT8 AS line_total FROM order_items WHERE order_id = $1 ORDER BY created_at"
     )
     .bind(order_id)
     .fetch_all(&state.db)
@@ -1182,6 +1362,12 @@ pub async fn get_order(
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     format!("Failed to read order item product: {}", e),
+                )
+            })?;
+            let product_name: Option<String> = row.try_get("product_name").map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to read order item product name: {}", e),
                 )
             })?;
             let quantity: i32 = row.try_get("quantity").map_err(|e| {
@@ -1205,6 +1391,7 @@ pub async fn get_order(
             })?;
             Ok(OrderLineItem {
                 product_id,
+                product_name,
                 quantity,
                 unit_price,
                 line_total,
@@ -1213,9 +1400,90 @@ pub async fn get_order(
         })
         .collect::<Result<Vec<_>, (StatusCode, String)>>()?;
 
-    Ok(Json(OrderDetail { order, items }))
+    Ok(OrderDetail { order, items })
 }
 
+pub async fn get_order(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path(order_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<OrderDetail>, (StatusCode, String)> {
+    ensure_role(&auth, ORDER_VIEW_ROLES)?;
+    let tenant_id = tenant_id_from_request(&headers, &auth)?;
+    let detail = fetch_order_detail(&state, tenant_id, order_id).await?;
+    Ok(Json(detail))
+}
+pub async fn get_order_receipt(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path(order_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Response, (StatusCode, String)> {
+    ensure_role(&auth, ORDER_VIEW_ROLES)?;
+    let tenant_id = tenant_id_from_request(&headers, &auth)?;
+    let detail = fetch_order_detail(&state, tenant_id, order_id).await?;
+
+    let mut body = String::new();
+    body.push_str("# Receipt - Order ");
+    body.push_str(&detail.order.id.to_string());
+    body.push('\n');
+
+    body.push_str("**Date:** ");
+    body.push_str(&detail.order.created_at.to_rfc3339());
+    body.push('\n');
+
+    if let Some(store_id) = detail.order.store_id {
+        body.push_str("**Store:** ");
+        body.push_str(&store_id.to_string());
+        body.push('\n');
+    }
+
+    if detail.order.customer_name.is_some() || detail.order.customer_email.is_some() {
+        body.push_str("**Customer:** ");
+        if let Some(name) = detail.order.customer_name.as_ref() {
+            body.push_str(name);
+        }
+        if let Some(email) = detail.order.customer_email.as_ref() {
+            if detail.order.customer_name.is_some() {
+                body.push_str(" (");
+                body.push_str(email);
+                body.push(')');
+            } else {
+                body.push_str(email);
+            }
+        }
+        body.push('\n');
+    }
+
+    body.push('\n');
+    body.push_str("| Item | Qty | Price | Total |\n| --- | ---: | ---: | ---: |\n");
+    for item in &detail.items {
+        let name = item.product_name.as_deref().unwrap_or("Item");
+        body.push_str(&format!(
+            "| {} | {} | ${:.2} | ${:.2} |\n",
+            name, item.quantity, item.unit_price, item.line_total
+        ));
+    }
+
+    body.push('\n');
+    body.push_str(&format!("**Grand Total:** ${:.2}\n", detail.order.total));
+    body.push_str(&format!(
+        "**Payment Method:** {}\n",
+        detail.order.payment_method
+    ));
+    body.push_str(&format!("**Status:** {}\n", detail.order.status));
+    body.push('\n');
+    body.push_str("_Thank you for your business!_\n");
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        CONTENT_TYPE,
+        HeaderValue::from_static("text/markdown; charset=utf-8"),
+    );
+
+    Ok((StatusCode::OK, headers, body).into_response())
+}
 pub async fn clear_offline_orders(
     State(state): State<AppState>,
     auth: AuthContext,
