@@ -32,7 +32,9 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('services/**/Cargo.toml') }}-${{ hashFiles('services/Cargo.lock') }}
 
       - name: Build (workspace)
+        working-directory: services
         run: cargo build --workspace --locked
 
       - name: Test (workspace)
+        working-directory: services
         run: cargo test --workspace --locked
