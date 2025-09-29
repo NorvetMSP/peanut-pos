@@ -37,17 +37,6 @@ type UserFormState = {
   role: string;
 };
 
-type UserEditState = {
-  name: string;
-  role: string;
-  is_active: boolean;
-};
-
-type PasswordResetState = {
-  password: string;
-  confirm: string;
-};
-
 const DEFAULT_ROLE = ROLE_CASHIER;
 
 type RoleOption = { value: string; label: string };

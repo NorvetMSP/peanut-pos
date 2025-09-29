@@ -523,6 +523,8 @@ const OrdersPageContent: React.FC = () => {
   );
 };
 
-export default withRoleGuard(OrdersPageContent, MANAGER_ROLES, {
+const OrdersPage = withRoleGuard(OrdersPageContent, MANAGER_ROLES, {
   message: "Manager or administrator role required to review orders.",
 });
+
+export default OrdersPage;

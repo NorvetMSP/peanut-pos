@@ -1122,6 +1122,8 @@ const ProductListPageContent: React.FC = () => {
   );
 };
 
-export default withRoleGuard(ProductListPageContent, MANAGER_ROLES, {
+const ProductListPage = withRoleGuard(ProductListPageContent, MANAGER_ROLES, {
   message: "Manager or administrator role required to manage products.",
 });
+
+export default ProductListPage;

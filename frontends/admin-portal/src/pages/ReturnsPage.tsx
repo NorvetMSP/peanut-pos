@@ -656,6 +656,8 @@ const ReturnsPageContent: React.FC = () => {
   );
 };
 
-export default withRoleGuard(ReturnsPageContent, MANAGER_ROLES, {
+const ReturnsPage = withRoleGuard(ReturnsPageContent, MANAGER_ROLES, {
   message: "Manager or administrator role required to process returns.",
 });
+
+export default ReturnsPage;

@@ -332,6 +332,8 @@ const DashboardPageContent: React.FC = () => {
   );
 };
 
-export default withRoleGuard(DashboardPageContent, MANAGER_ROLES, {
+const DashboardPage = withRoleGuard(DashboardPageContent, MANAGER_ROLES, {
   message: "Manager or administrator role required to view analytics.",
 });
+
+export default DashboardPage;

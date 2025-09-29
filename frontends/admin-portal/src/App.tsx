@@ -1,3 +1,4 @@
+import type { ReactElement } from "react";
 import { Routes, Route, Navigate } from "react-router-dom";
 import LoginPage from "./pages/LoginPage";
 import DashboardPage from "./pages/DashboardPage";
@@ -10,7 +11,13 @@ import AdminHome from "./pages/AdminHome";
 import { RequireAuth, RequireRoles } from "./AuthContext";
 import { MANAGER_ROLES, ADMIN_ROLES, SUPER_ADMIN_ROLES } from "./rbac";
 
-const PROTECTED_ROUTES = [
+type ProtectedRoute = {
+  path: string;
+  element: ReactElement;
+  roles?: readonly string[];
+};
+
+const PROTECTED_ROUTES: readonly ProtectedRoute[] = [
   { path: "/home", element: <AdminHome /> },
   { path: "/dashboard", element: <DashboardPage />, roles: MANAGER_ROLES },
   { path: "/products", element: <ProductListPage />, roles: MANAGER_ROLES },
