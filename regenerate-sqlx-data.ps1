@@ -117,7 +117,7 @@ foreach ($svc in $Services) {
   if (Test-Path sqlx-data.json) { Remove-Item sqlx-data.json -Force }
   try {
     # Assume bin name == service folder; adjust if any differs.
-    cargo sqlx prepare -- --bin $svc
+    cargo sqlx prepare -- --all-targets
     if (-not (Test-Path sqlx-data.json)) { throw "sqlx-data.json not produced" }
   } catch {
     Write-Warning "[prepare] $svc failed: $($_.Exception.Message)"
