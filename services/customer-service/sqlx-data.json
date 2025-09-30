@@ -87,6 +87,89 @@
     },
     "query": "\n        SELECT\n            id,\n            tenant_id,\n            name,\n            email,\n            phone,\n            email_encrypted,\n            phone_encrypted,\n            email_hash,\n            phone_hash,\n            pii_key_version,\n            pii_encrypted_at,\n            created_at\n        FROM customers\n        WHERE tenant_id = $1 AND id = $2\n        "
   },
+  "2bccbe4f1e77bfe7f99461aec3f7c1a18201ea756f9265c028221535c610f8d8": {
+    "describe": {
+      "columns": [],
+      "nullable": [],
+      "parameters": {
+        "Left": [
+          "Uuid",
+          "Uuid",
+          "Int4",
+          "Bytea"
+        ]
+      }
+    },
+    "query": "INSERT INTO tenant_data_keys (id, tenant_id, key_version, encrypted_key, active)\n             VALUES ($1, $2, $3, $4, TRUE)"
+  },
+  "4a2659dc65bda9367545cdd3e2e03bd33d99c065faeb5ba1be180afb2b624512": {
+    "describe": {
+      "columns": [
+        {
+          "name": "email_encrypted",
+          "ordinal": 0,
+          "type_info": "Bytea"
+        },
+        {
+          "name": "phone_encrypted",
+          "ordinal": 1,
+          "type_info": "Bytea"
+        },
+        {
+          "name": "email_hash",
+          "ordinal": 2,
+          "type_info": "Bytea"
+        },
+        {
+          "name": "phone_hash",
+          "ordinal": 3,
+          "type_info": "Bytea"
+        },
+        {
+          "name": "pii_key_version",
+          "ordinal": 4,
+          "type_info": "Int4"
+        }
+      ],
+      "nullable": [
+        true,
+        true,
+        true,
+        true,
+        true
+      ],
+      "parameters": {
+        "Left": [
+          "Uuid"
+        ]
+      }
+    },
+    "query": "SELECT email_encrypted, phone_encrypted, email_hash, phone_hash, pii_key_version\n             FROM customers\n             WHERE id = $1"
+  },
+  "53b44636f542bfc67d14270faa4443e09acf35e8efb0c3f9a931e9621c5fdfa4": {
+    "describe": {
+      "columns": [],
+      "nullable": [],
+      "parameters": {
+        "Left": [
+          "Uuid"
+        ]
+      }
+    },
+    "query": "DELETE FROM customers WHERE id = $1"
+  },
+  "60ac2ac6d5f1551eabdef032d6dc1256c7c209b3187c55f0f91472b65a3b9e75": {
+    "describe": {
+      "columns": [],
+      "nullable": [],
+      "parameters": {
+        "Left": [
+          "Uuid"
+        ]
+      }
+    },
+    "query": "DELETE FROM tenant_data_keys WHERE tenant_id = $1"
+  },
   "94538961bb8f332ca88f820f38094914c9964b0d574e47d1222da8fde4c0830c": {
     "describe": {
       "columns": [
