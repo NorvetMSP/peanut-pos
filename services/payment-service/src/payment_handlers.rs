@@ -7,7 +7,7 @@ use axum::{
 use common_auth::{ensure_role, tenant_id_from_request, AuthContext};
 use serde::{Deserialize, Serialize};
 use bigdecimal::BigDecimal;
-use common_money::normalize_scale;
+use common_money::{normalize_scale, Money};
 use std::time::Duration;
 use tokio::time::sleep;
 
@@ -49,7 +49,8 @@ pub async fn process_card_payment(
     ensure_role(&auth, PAYMENT_ROLES)?;
     let _tenant_id = tenant_id_from_request(&headers, &auth)?;
 
-    println!("Valor stub: processing card payment for Order {} amount={} (normalized={})", req.order_id, req.amount, normalize_scale(&req.amount));
+    let amount_money = Money::new(req.amount.clone());
+    println!("Valor stub: processing card payment for Order {} amount={} (normalized={})", req.order_id, req.amount, amount_money);
     sleep(Duration::from_secs(2)).await;
     let approval_code = format!(
         "VAL-APPROVED-{}",
@@ -72,7 +73,8 @@ pub async fn void_card_payment(
     ensure_role(&auth, PAYMENT_ROLES)?;
     let _tenant_id = tenant_id_from_request(&headers, &auth)?;
 
-    println!("Valor stub: voiding payment for Order {} amount={} (normalized={}) reason={:?}", req.order_id, req.amount, normalize_scale(&req.amount), req.reason);
+    let amount_money = Money::new(req.amount.clone());
+    println!("Valor stub: voiding payment for Order {} amount={} (normalized={}) reason={:?}", req.order_id, req.amount, amount_money, req.reason);
     sleep(Duration::from_secs(1)).await;
     let approval_code = format!("VAL-VOID-{}", &req.order_id[..8.min(req.order_id.len())]);
     println!("Valor stub: payment voided, code={}", approval_code);

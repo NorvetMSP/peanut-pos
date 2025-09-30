@@ -12,7 +12,7 @@ use rdkafka::producer::FutureRecord;
 use serde::ser::{SerializeStruct, Serializer};
 use serde::{Deserialize, Serialize};
 use bigdecimal::BigDecimal;
-use common_money::normalize_scale;
+use common_money::{normalize_scale, Money};
 use serde_json::{json, Value};
 use sqlx::{query, query_as, PgPool};
 use std::{env, time::Duration};
@@ -22,7 +22,7 @@ const INVENTORY_DEFAULT_THRESHOLD: i32 = 5;
 #[derive(Deserialize)]
 pub struct UpdateProduct {
     pub name: String,
-    pub price: BigDecimal,
+    pub price: BigDecimal, // accept raw for backward compatibility; wrapped into Money
     pub description: String,
     pub active: bool,
     #[serde(default)]
@@ -140,7 +140,7 @@ impl Serialize for Product {
         state.serialize_field("id", &self.id)?;
         state.serialize_field("tenant_id", &self.tenant_id)?;
         state.serialize_field("name", &self.name)?;
-    state.serialize_field("price", &normalize_scale(&self.price))?;
+    state.serialize_field("price", &self.price.inner())?;
         state.serialize_field("description", &self.description)?;
         state.serialize_field("image", &self.image)?;
         state.serialize_field("image_url", &self.image)?;
@@ -195,7 +195,7 @@ pub async fn update_product(
 #[derive(Deserialize)]
 pub struct NewProduct {
     pub name: String,
-    pub price: BigDecimal,
+    pub price: BigDecimal, // accept raw then normalize via Money
     pub description: Option<String>,
     #[serde(default)]
     pub image: Option<String>,
@@ -206,7 +206,7 @@ pub struct Product {
     pub id: Uuid,
     pub tenant_id: Uuid,
     pub name: String,
-    pub price: BigDecimal,
+    pub price: Money,
     pub description: String,
     pub image: String,
     pub active: bool,

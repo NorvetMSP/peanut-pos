@@ -1,33 +1,31 @@
 use uuid::Uuid;
 use bigdecimal::BigDecimal;
+use common_money::{Money, normalize_scale};
 
-// If direct import fails due to visibility, redefine a minimal mirror struct for serde test
 #[derive(serde::Deserialize, serde::Serialize, Debug)]
-struct TestOrderItem {
+struct TestOrderItemMoney {
     pub product_id: Uuid,
     pub product_name: Option<String>,
     pub quantity: i32,
-    pub unit_price: BigDecimal,
-    pub line_total: BigDecimal,
+    pub unit_price: Money,
+    pub line_total: Money,
 }
 
 #[test]
-fn test_bigdecimal_order_item_roundtrip() {
-    let json = r#"{
+fn test_money_order_item_roundtrip_half_up() {
+    // 12.345 * 2 => unit_price rounds to 12.35, line_total computed externally should round accordingly
+    let unit_price_raw = BigDecimal::parse_bytes(b"12.345", 10).unwrap();
+    let line_total_raw = &unit_price_raw * BigDecimal::from(2); // 24.69 (already 2 decimals after rounding each? we round aggregate)
+    let json = serde_json::json!({
         "product_id": "00000000-0000-0000-0000-000000000001",
         "product_name": "Test Product",
         "quantity": 2,
-        "unit_price": "12.34",
-        "line_total": "24.68"
-    }"#;
-
-    let item: TestOrderItem = serde_json::from_str(json).expect("deserialize");
-    assert_eq!(item.quantity, 2);
-    assert_eq!(item.unit_price.to_string(), "12.34");
-    assert_eq!(item.line_total.to_string(), "24.68");
-
+        "unit_price": unit_price_raw.to_string(),
+        "line_total": line_total_raw.to_string()
+    }).to_string();
+    let item: TestOrderItemMoney = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(item.unit_price.inner().to_string(), "12.35");
+    assert_eq!(item.line_total.inner().to_string(), normalize_scale(&line_total_raw).to_string());
     let back = serde_json::to_string(&item).expect("serialize");
-    // Ensure numbers preserved as strings with same scale representation
-    assert!(back.contains("12.34"));
-    assert!(back.contains("24.68"));
+    assert!(back.contains("12.35"));
 }

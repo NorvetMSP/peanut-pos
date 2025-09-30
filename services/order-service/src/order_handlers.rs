@@ -13,7 +13,7 @@ use rdkafka::producer::FutureRecord;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use bigdecimal::BigDecimal;
-use common_money::{nearly_equal, normalize_scale};
+use common_money::{nearly_equal, Money};
 // Removed unused FromStr import after BigDecimal migration
 use sqlx::{Postgres, QueryBuilder, Row, Transaction};
 use std::collections::HashMap;
@@ -33,15 +33,15 @@ pub struct OrderItem {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub product_name: Option<String>,
     pub quantity: i32,
-    pub unit_price: BigDecimal,
-    pub line_total: BigDecimal,
+    pub unit_price: Money,
+    pub line_total: Money,
 }
 
 #[derive(Deserialize, Debug)]
 pub struct NewOrder {
     pub items: Vec<OrderItem>,
     pub payment_method: String,
-    pub total: BigDecimal,
+    pub total: BigDecimal, // accept raw, wrap later
     pub customer_id: Option<String>,
     pub customer_name: Option<String>,
     pub customer_email: Option<String>,
@@ -54,7 +54,7 @@ pub struct NewOrder {
 pub struct Order {
     pub id: Uuid,
     pub tenant_id: Uuid,
-    pub total: BigDecimal,
+    pub total: Money,
     pub status: String,
     pub customer_id: Option<Uuid>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -127,11 +127,11 @@ pub struct ListReturnsParams {
     pub end_date: Option<NaiveDate>,
 }
 
-#[derive(Serialize, Debug, sqlx::FromRow)]
+#[derive(Serialize, Debug)]
 pub struct ReturnSummary {
     pub id: Uuid,
     pub order_id: Uuid,
-    pub total: BigDecimal,
+    pub total: Money,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     pub created_at: DateTime<Utc>,
@@ -144,8 +144,8 @@ pub struct OrderLineItem {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub product_name: Option<String>,
     pub quantity: i32,
-    pub unit_price: BigDecimal,
-    pub line_total: BigDecimal,
+    pub unit_price: Money,
+    pub line_total: Money,
     pub returned_quantity: i32,
 }
 
@@ -359,8 +359,8 @@ async fn insert_order_items(
             order_id,
             item.product_id,
             item.quantity,
-            item.unit_price,
-            item.line_total,
+            item.unit_price.inner(),
+            item.line_total.inner(),
             item.product_name.as_deref()
         )
         .execute(&mut *tx)
@@ -425,7 +425,7 @@ pub async fn create_order(
     let total_from_items: BigDecimal = new_order
         .items
         .iter()
-        .fold(BigDecimal::from(0), |acc, item| acc + item.line_total.clone());
+    .fold(BigDecimal::from(0), |acc, item| acc + BigDecimal::from(item.line_total.clone())) ;
     if !nearly_equal(&total_from_items, &new_order.total, 1) {
         tracing::warn!(
             tenant_id = %tenant_id,
@@ -1275,8 +1275,8 @@ pub async fn list_returns(
     builder.push(" OFFSET ");
     builder.push_bind(offset);
 
-    let returns = builder
-        .build_query_as::<ReturnSummary>()
+    let raw_rows = builder
+        .build()
         .fetch_all(&state.db)
         .await
         .map_err(|e| {
@@ -1285,6 +1285,17 @@ pub async fn list_returns(
                 format!("Database error: {}", e),
             )
         })?;
+
+    let mut returns: Vec<ReturnSummary> = Vec::with_capacity(raw_rows.len());
+    for row in raw_rows {
+        let id: Uuid = row.try_get("id").map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to read return id: {e}")))?;
+        let order_id: Uuid = row.try_get("order_id").map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to read return order_id: {e}")))?;
+        let total: BigDecimal = row.try_get("total").map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to read return total: {e}")))?;
+        let reason: Option<String> = row.try_get("reason").ok();
+        let created_at: DateTime<Utc> = row.try_get("created_at").map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to read return created_at: {e}")))?;
+        let store_id: Option<Uuid> = row.try_get("store_id").ok();
+        returns.push(ReturnSummary { id, order_id, total: Money::new(total), reason, created_at, store_id });
+    }
 
     Ok(Json(returns))
 }
@@ -1359,8 +1370,8 @@ async fn fetch_order_detail(
                 product_id,
                 product_name,
                 quantity,
-                unit_price,
-                line_total,
+                unit_price: Money::new(unit_price),
+                line_total: Money::new(line_total),
                 returned_quantity,
             })
         })

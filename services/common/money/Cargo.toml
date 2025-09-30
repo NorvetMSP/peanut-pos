@@ -10,3 +10,4 @@ path = "src/lib.rs"
 bigdecimal = { version = "0.3", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 thiserror = "1"
+sqlx = { version = "0.6", default-features = false, features = ["runtime-tokio-native-tls", "macros", "postgres", "bigdecimal"] }
