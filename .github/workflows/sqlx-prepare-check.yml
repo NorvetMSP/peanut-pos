@@ -1,0 +1,71 @@
+name: SQLx Offline Metadata Check
+
+on:
+  pull_request:
+    paths:
+      - 'services/**'
+      - '.github/workflows/sqlx-prepare-check.yml'
+  push:
+    branches: [ main ]
+    paths:
+      - 'services/**'
+      - '.github/workflows/sqlx-prepare-check.yml'
+
+jobs:
+  sqlx-prepare:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: novapos
+          POSTGRES_PASSWORD: novapos
+          POSTGRES_DB: novapos
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U novapos" \
+          --health-interval 5s \
+          --health-timeout 5s \
+          --health-retries 20
+    env:
+      DATABASE_URL: postgres://novapos:novapos@localhost:5432/novapos
+      SQLX_OFFLINE: 'true'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('services/**/Cargo.toml') }}
+
+      - name: Install sqlx-cli
+        run: cargo install sqlx-cli --no-default-features --features native-tls,postgres
+
+      - name: Run migrations (all services)
+        run: |
+          pwsh ./regenerate-sqlx-data.ps1 -SkipPrepare -AutoResetOnChecksum
+
+      - name: Check sqlx prepare drift
+        run: |
+          set -e
+          # Capture current state
+          git add services/*/sqlx-data.json
+          git diff --cached --quiet || (echo "Unexpected pre-existing changes to sqlx-data.json" && git diff --cached && exit 1)
+          # Run prepare in check mode (simulate by regenerating and diffing)
+          pwsh ./regenerate-sqlx-data.ps1
+          # Stage and diff again
+          git add services/*/sqlx-data.json
+          if ! git diff --cached --quiet; then
+            echo 'ERROR: sqlx-data.json out of date. Run ./regenerate-sqlx-data.ps1 locally and commit.'
+            git diff --cached
+            exit 1
+          fi
+          echo 'sqlx offline metadata up-to-date.'
