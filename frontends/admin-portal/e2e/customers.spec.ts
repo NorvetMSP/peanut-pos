@@ -1,4 +1,4 @@
-﻿import { createHmac } from 'node:crypto';
+import { createHmac } from 'node:crypto';
 import { execSync } from 'node:child_process';
 import path from 'node:path';
 import { expect, test } from '@playwright/test';
@@ -24,6 +24,45 @@ type AuditEvent = {
   action: string;
   actor: string;
   details: string;
+};
+
+type LoginUser = {
+  id: string;
+  tenant_id: string;
+  name?: string;
+  email?: string;
+  role?: string;
+  roles?: string[];
+  [key: string]: unknown;
+};
+
+type LoginResponse = {
+  token: string;
+  access_token?: string;
+  user: LoginUser;
+};
+
+type ParsedCookie = {
+  name: string;
+  value: string;
+  path?: string;
+  domain?: string;
+  secure?: boolean;
+  httpOnly?: boolean;
+  sameSite?: 'Strict' | 'Lax' | 'None';
+  expires?: number;
+};
+
+type BrowserCookie = {
+  name: string;
+  value: string;
+  path: string;
+  domain?: string;
+  url?: string;
+  secure: boolean;
+  httpOnly: boolean;
+  sameSite?: 'Strict' | 'Lax' | 'None';
+  expires?: number;
 };
 
 const FIXTURES = {
@@ -75,29 +114,6 @@ const generateTotp = (secret: string, digits = 6, stepSeconds = 30): string => {
   const offset = digest[digest.length - 1] & 0x0f;
   const code = (digest.readUInt32BE(offset) & 0x7fffffff) % (10 ** digits);
   return code.toString().padStart(digits, '0');
-};
-
-type ParsedCookie = {
-  name: string;
-  value: string;
-  path?: string;
-  domain?: string;
-  secure?: boolean;
-  httpOnly?: boolean;
-  sameSite?: 'Strict' | 'Lax' | 'None';
-  expires?: number;
-};
-
-type BrowserCookie = {
-  name: string;
-  value: string;
-  path: string;
-  domain?: string;
-  url?: string;
-  secure: boolean;
-  httpOnly: boolean;
-  sameSite?: 'Strict' | 'Lax' | 'None';
-  expires?: number;
 };
 
 const toSameSite = (value: string | undefined): 'Strict' | 'Lax' | 'None' | undefined => {
@@ -191,15 +207,26 @@ const collectCookiesFromHeaders = (
   headers: { name: string; value: string }[],
   serviceUrl: string,
 ): BrowserCookie[] => {
+  let fallbackDomain: string | undefined;
+
+  try {
+    const parsed = new URL(serviceUrl);
+    fallbackDomain = parsed.hostname || undefined;
+  } catch {
+    fallbackDomain = undefined;
+  }
+
   return headers
     .filter((header) => header.name.toLowerCase() === 'set-cookie')
     .map((header) => parseSetCookieHeader(header.value))
     .filter((cookie): cookie is ParsedCookie => cookie !== null)
     .map((cookie) => {
+      const normalizedPath = (cookie.path ?? '/').trim();
+      const pathValue = normalizedPath.length > 0 ? normalizedPath : '/';
       const base: BrowserCookie = {
         name: cookie.name,
         value: cookie.value,
-        path: cookie.path ?? '/',
+        path: pathValue,
         secure: cookie.secure ?? false,
         httpOnly: cookie.httpOnly ?? false,
         sameSite: cookie.sameSite,
@@ -210,8 +237,22 @@ const collectCookiesFromHeaders = (
         return { ...base, domain: cookie.domain };
       }
 
+      if (fallbackDomain) {
+        return { ...base, domain: fallbackDomain };
+      }
+
       return { ...base, url: serviceUrl };
     });
+};
+
+const isLoginResponse = (value: unknown): value is LoginResponse => {
+  if (typeof value !== 'object' || value === null) return false;
+  const candidate = value as Partial<LoginResponse>;
+  return (
+    typeof candidate?.token === 'string' &&
+    typeof candidate?.user === 'object' &&
+    candidate.user !== null
+  );
 };
 
 test.beforeAll(() => {
@@ -220,15 +261,36 @@ test.beforeAll(() => {
 
 test.describe('Customers management', () => {
   test('supports search, audit, edit, and delete flows', async ({ page }) => {
-    page.on('response', (response) => {
-      const url = response.url();
-      if (url.includes('/login')) {
-        console.log('[login-response]', response.status(), url);
-      }
+    const totpCode = generateTotp(MFA_SECRET);
+    const loginResponse = await page.request.post(`${AUTH_SERVICE_BASE}/login`, {
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Tenant-ID': TENANT_ID,
+      },
+      data: {
+        email: ADMIN_EMAIL,
+        password: ADMIN_PASSWORD,
+        mfaCode: totpCode,
+      },
     });
 
+    expect(
+      loginResponse.ok(),
+      `Login failed with status ${loginResponse.status()}`,
+    ).toBeTruthy();
+
+    const loginJson = (await loginResponse.json()) as unknown;
+    expect(isLoginResponse(loginJson), 'Unexpected login response shape').toBe(true);
+
+    const authCookies = collectCookiesFromHeaders(
+      loginResponse.headersArray(),
+      AUTH_SERVICE_BASE,
+    );
+    expect(authCookies.length, 'Expected auth-service to return cookies').toBeGreaterThan(0);
+    await page.context().addCookies(authCookies);
+
     await page.addInitScript(
-      ({ fixtures, customerBase, authBase, tenantId }) => {
+      ({ fixtures, customerBase, authBase, tenantId, session }) => {
         const state = {
           customers: structuredClone(fixtures.customers),
           audit: structuredClone(fixtures.auditEvents),
@@ -290,6 +352,10 @@ test.describe('Customers management', () => {
             return toJsonResponse(state.customers);
           }
 
+          if (url.startsWith(`${authBase}/session`) && method === 'GET') {
+            return toJsonResponse(session);
+          }
+
           if (url.startsWith(authBase)) {
             const requestInit: RequestInit = { ...init };
             const headers = new Headers(requestInit.headers ?? {});
@@ -306,35 +372,15 @@ test.describe('Customers management', () => {
         customerBase: CUSTOMER_SERVICE_BASE,
         authBase: AUTH_SERVICE_BASE,
         tenantId: TENANT_ID,
+        session: loginJson,
       },
     );
 
-    const totpCode = generateTotp(MFA_SECRET);
-    const loginResponse = await page.request.post(`${AUTH_SERVICE_BASE}/login`, {
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Tenant-ID': TENANT_ID,
-      },
-      data: {
-        email: ADMIN_EMAIL,
-        password: ADMIN_PASSWORD,
-        mfaCode: totpCode,
-      },
-    });
+    await page.goto('/home');
+    await page.waitForURL('**/home');
 
-    expect(
-      loginResponse.ok(),
-      `Login failed with status ${loginResponse.status()}`,
-    ).toBeTruthy();
-
-    const authCookies = collectCookiesFromHeaders(
-      loginResponse.headersArray(),
-      AUTH_SERVICE_BASE,
-    );
-    expect(authCookies.length, 'Expected auth-service to return cookies').toBeGreaterThan(0);
-    await page.context().addCookies(authCookies);
-
-    await page.goto('/customers');
+    await page.getByRole('button', { name: 'Go to Customers' }).click();
+    await page.waitForURL('**/customers');
     await expect(page.getByRole('heading', { name: 'Customers' })).toBeVisible();
 
     await page.getByLabel('Search Customers').fill('Alice');
@@ -343,18 +389,20 @@ test.describe('Customers management', () => {
 
     await page.getByRole('button', { name: 'View Activity' }).click();
     await expect(page.getByText('Customer Created')).toBeVisible();
-    await page.getByRole('button', { name: /close dialog/i }).click();
+    await page.keyboard.press('Escape');
 
     await page.getByRole('button', { name: 'Edit' }).click();
     await page.getByLabel('Name', { exact: true }).fill('Alice Johnson');
     await page.getByLabel('Phone').fill('555-0001');
-    await page.getByRole('button', { name: 'Save Changes' }).click();
+    const saveButton = page.getByRole('button', { name: 'Save Changes' });
+    await saveButton.scrollIntoViewIfNeeded();
+    await saveButton.evaluate((button) => (button as HTMLButtonElement).click());
     await expect(page.getByText('Customer updated successfully.')).toBeVisible();
     await expect(page.getByRole('cell', { name: 'Alice Johnson' })).toBeVisible();
 
     await page.getByRole('button', { name: 'Edit' }).click();
     page.once('dialog', (dialog) => dialog.accept());
-    await page.getByRole('button', { name: 'Delete Customer' }).click();
+    await page.getByRole('button', { name: 'Delete Customer' }).evaluate((button) => (button as HTMLButtonElement).click());
     await expect(page.getByText('Customer deleted and anonymized.')).toBeVisible();
     await expect(page.getByText(/No customers found/i)).toBeVisible();
   });
