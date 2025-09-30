@@ -1,3 +1,166 @@
 {
-  "db": "PostgreSQL"
+  "db": "PostgreSQL",
+  "01e21b1ae51e03e760044b7901baa0419deb247ffe08cf831e8d280ab3c9e466": {
+    "describe": {
+      "columns": [
+        {
+          "name": "id",
+          "ordinal": 0,
+          "type_info": "Uuid"
+        },
+        {
+          "name": "tenant_id",
+          "ordinal": 1,
+          "type_info": "Uuid"
+        },
+        {
+          "name": "name",
+          "ordinal": 2,
+          "type_info": "Text"
+        },
+        {
+          "name": "email",
+          "ordinal": 3,
+          "type_info": "Text"
+        },
+        {
+          "name": "phone",
+          "ordinal": 4,
+          "type_info": "Text"
+        },
+        {
+          "name": "email_encrypted",
+          "ordinal": 5,
+          "type_info": "Bytea"
+        },
+        {
+          "name": "phone_encrypted",
+          "ordinal": 6,
+          "type_info": "Bytea"
+        },
+        {
+          "name": "email_hash",
+          "ordinal": 7,
+          "type_info": "Bytea"
+        },
+        {
+          "name": "phone_hash",
+          "ordinal": 8,
+          "type_info": "Bytea"
+        },
+        {
+          "name": "pii_key_version",
+          "ordinal": 9,
+          "type_info": "Int4"
+        },
+        {
+          "name": "pii_encrypted_at",
+          "ordinal": 10,
+          "type_info": "Timestamptz"
+        },
+        {
+          "name": "created_at",
+          "ordinal": 11,
+          "type_info": "Timestamptz"
+        }
+      ],
+      "nullable": [
+        false,
+        false,
+        false,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ],
+      "parameters": {
+        "Left": [
+          "Uuid",
+          "Uuid"
+        ]
+      }
+    },
+    "query": "\n        SELECT\n            id,\n            tenant_id,\n            name,\n            email,\n            phone,\n            email_encrypted,\n            phone_encrypted,\n            email_hash,\n            phone_hash,\n            pii_key_version,\n            pii_encrypted_at,\n            created_at\n        FROM customers\n        WHERE tenant_id = $1 AND id = $2\n        "
+  },
+  "94538961bb8f332ca88f820f38094914c9964b0d574e47d1222da8fde4c0830c": {
+    "describe": {
+      "columns": [
+        {
+          "name": "id",
+          "ordinal": 0,
+          "type_info": "Uuid"
+        },
+        {
+          "name": "tenant_id",
+          "ordinal": 1,
+          "type_info": "Uuid"
+        },
+        {
+          "name": "name",
+          "ordinal": 2,
+          "type_info": "Text"
+        },
+        {
+          "name": "email",
+          "ordinal": 3,
+          "type_info": "Text"
+        },
+        {
+          "name": "phone",
+          "ordinal": 4,
+          "type_info": "Text"
+        },
+        {
+          "name": "email_encrypted",
+          "ordinal": 5,
+          "type_info": "Bytea"
+        },
+        {
+          "name": "phone_encrypted",
+          "ordinal": 6,
+          "type_info": "Bytea"
+        },
+        {
+          "name": "pii_key_version",
+          "ordinal": 7,
+          "type_info": "Int4"
+        },
+        {
+          "name": "created_at",
+          "ordinal": 8,
+          "type_info": "Timestamptz"
+        }
+      ],
+      "nullable": [
+        false,
+        false,
+        false,
+        true,
+        true,
+        true,
+        true,
+        true,
+        false
+      ],
+      "parameters": {
+        "Left": [
+          "Text",
+          "Bytea",
+          "Bytea",
+          "Bytea",
+          "Bytea",
+          "Int4",
+          "Timestamptz",
+          "Uuid",
+          "Uuid"
+        ]
+      }
+    },
+    "query": "\n        UPDATE customers\n        SET name = $1,\n            email = NULL,\n            phone = NULL,\n            email_encrypted = $2,\n            phone_encrypted = $3,\n            email_hash = $4,\n            phone_hash = $5,\n            pii_key_version = $6,\n            pii_encrypted_at = $7\n        WHERE tenant_id = $8 AND id = $9\n        RETURNING\n            id,\n            tenant_id,\n            name,\n            email,\n            phone,\n            email_encrypted,\n            phone_encrypted,\n            pii_key_version,\n            created_at\n        "
+  }
 }
