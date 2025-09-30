@@ -349,7 +349,11 @@ async fn insert_order_items(
     items: &[OrderItem],
 ) -> Result<(), (StatusCode, String)> {
     for item in items {
-        sqlx::query("INSERT INTO order_items (id, order_id, product_id, quantity, unit_price, line_total, product_name) VALUES ($1, $2, $3, $4, $5, $6, $7)")
+        // NOTE: kept as dynamic query because NUMERIC columns (unit_price, line_total) would
+        // require enabling the `bigdecimal` or appropriate feature for compile-time checking.
+        sqlx::query(
+            "INSERT INTO order_items (id, order_id, product_id, quantity, unit_price, line_total, product_name) VALUES ($1, $2, $3, $4, $5, $6, $7)"
+        )
         .bind(Uuid::new_v4())
         .bind(order_id)
         .bind(item.product_id)
@@ -1446,10 +1450,12 @@ pub async fn clear_offline_orders(
     ensure_role(&auth, ORDER_REFUND_ROLES)?;
     let tenant_id = tenant_id_from_request(&headers, &auth)?;
 
-    let result = sqlx::query("DELETE FROM orders WHERE tenant_id = $1 AND offline = TRUE")
-        .bind(tenant_id)
-        .execute(&state.db)
-        .await
+    let result = sqlx::query!(
+        r#"DELETE FROM orders WHERE tenant_id = $1 AND offline = TRUE"#,
+        tenant_id
+    )
+    .execute(&state.db)
+    .await
         .map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,

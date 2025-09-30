@@ -17,7 +17,7 @@ use rdkafka::consumer::{Consumer, StreamConsumer};
 use rdkafka::producer::{FutureProducer, FutureRecord};
 use rdkafka::Message;
 use serde::Deserialize;
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 use std::{
     collections::HashMap,
     env,
@@ -70,27 +70,22 @@ async fn get_points(
             "customer_id required".into(),
         ))?;
 
-    let rec =
-        sqlx::query("SELECT points FROM loyalty_points WHERE customer_id =  AND tenant_id = ")
-            .bind(cust_id)
-            .bind(tenant_id)
-            .fetch_one(&state.db)
-            .await
-            .map_err(|e| {
-                (
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("DB error: {}", e),
-                )
-            })?;
-
-    let points: i32 = rec.try_get("points").map_err(|e| {
+    let rec = sqlx::query!(
+        r#"SELECT points FROM loyalty_points WHERE customer_id = $1 AND tenant_id = $2"#,
+        cust_id,
+        tenant_id
+    )
+    .fetch_one(&state.db)
+    .await
+    .map_err(|e| {
         (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             format!("DB error: {}", e),
         )
     })?;
 
-    Ok(points.to_string())
+    // query! macro creates a struct with a `points` field directly
+    Ok(rec.points.to_string())
 }
 
 #[tokio::main]
@@ -192,42 +187,43 @@ async fn handle_completed_event(
     };
 
     if delta != 0 {
-        let _ = sqlx::query(
-            "INSERT INTO loyalty_points (customer_id, tenant_id, points)
-             VALUES (, , )
-             ON CONFLICT (customer_id) DO UPDATE
-             SET points = loyalty_points.points + EXCLUDED.points",
+        let _ = sqlx::query!(
+            r#"INSERT INTO loyalty_points (customer_id, tenant_id, points)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (customer_id, tenant_id) DO UPDATE
+                SET points = loyalty_points.points + EXCLUDED.points"#,
+            cust_id,
+            evt.tenant_id,
+            delta
         )
-        .bind(cust_id)
-        .bind(evt.tenant_id)
-        .bind(delta)
         .execute(db)
         .await;
     }
 
-    if let Ok(record) = sqlx::query("SELECT points FROM loyalty_points WHERE customer_id = ")
-        .bind(cust_id)
-        .fetch_one(db)
-        .await
+    if let Ok(record) = sqlx::query!(
+        r#"SELECT points FROM loyalty_points WHERE customer_id = $1 AND tenant_id = $2"#,
+        cust_id,
+        evt.tenant_id
+    )
+    .fetch_one(db)
+    .await
     {
-        if let Ok(new_balance) = record.try_get::<i32, _>("points") {
-            let loyalty_event = serde_json::json!({
-                "order_id": evt.order_id,
-                "customer_id": cust_id,
-                "tenant_id": evt.tenant_id,
-                "points_delta": delta,
-                "new_balance": new_balance
-            });
-
-            let _ = producer
-                .send(
-                    FutureRecord::to("loyalty.updated")
-                        .payload(&loyalty_event.to_string())
-                        .key(&evt.tenant_id.to_string()),
-                    Duration::from_secs(0),
-                )
-                .await;
-        }
+        let new_balance = record.points;
+        let loyalty_event = serde_json::json!({
+            "order_id": evt.order_id,
+            "customer_id": cust_id,
+            "tenant_id": evt.tenant_id,
+            "points_delta": delta,
+            "new_balance": new_balance
+        });
+        let _ = producer
+            .send(
+                FutureRecord::to("loyalty.updated")
+                    .payload(&loyalty_event.to_string())
+                    .key(&evt.tenant_id.to_string()),
+                Duration::from_secs(0),
+            )
+            .await;
     }
 }
 

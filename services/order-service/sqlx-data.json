@@ -1,3 +1,15 @@
 {
-  "db": "PostgreSQL"
+  "db": "PostgreSQL",
+  "bebe683753ec41e6fad3881ea164e10d918aba468fe19996a3bd75c78bfe6c44": {
+    "describe": {
+      "columns": [],
+      "nullable": [],
+      "parameters": {
+        "Left": [
+          "Uuid"
+        ]
+      }
+    },
+    "query": "DELETE FROM orders WHERE tenant_id = $1 AND offline = TRUE"
+  }
 }
