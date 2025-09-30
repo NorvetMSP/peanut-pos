@@ -13,6 +13,7 @@ use rdkafka::producer::FutureRecord;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use bigdecimal::BigDecimal;
+use common_money::{nearly_equal, normalize_scale};
 // Removed unused FromStr import after BigDecimal migration
 use sqlx::{Postgres, QueryBuilder, Row, Transaction};
 use std::collections::HashMap;
@@ -421,15 +422,11 @@ pub async fn create_order(
         }
     }
 
-    use bigdecimal::ToPrimitive;
     let total_from_items: BigDecimal = new_order
         .items
         .iter()
         .fold(BigDecimal::from(0), |acc, item| acc + item.line_total.clone());
-    // Compare with tolerance of 0.01 using f64 conversion (safe for comparison tolerance only)
-    if (total_from_items.to_f64().unwrap_or(0.0) - new_order.total.to_f64().unwrap_or(0.0)).abs()
-        > 0.01
-    {
+    if !nearly_equal(&total_from_items, &new_order.total, 1) {
         tracing::warn!(
             tenant_id = %tenant_id,
             provided_total = %new_order.total,
@@ -944,9 +941,7 @@ pub async fn refund_order(
     }
 
     if let Some(client_total) = req.total.clone() {
-        use bigdecimal::ToPrimitive;
-        let diff = (client_total.clone() - refund_total.clone()).to_f64().unwrap_or(0.0).abs();
-        if diff > 0.01 {
+        if !nearly_equal(&client_total, &refund_total, 1) {
             tracing::warn!(
                 order_id = %req.order_id,
                 tenant_id = %tenant_id,

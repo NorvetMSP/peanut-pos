@@ -848,6 +848,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "common-money"
+version = "0.1.0"
+dependencies = [
+ "bigdecimal",
+ "serde",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "concurrent-queue"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2449,6 +2458,7 @@ dependencies = [
  "bigdecimal",
  "chrono",
  "common-auth",
+ "common-money",
  "futures-util",
  "hyper 1.7.0",
  "libz-sys",
@@ -2542,7 +2552,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "bigdecimal",
  "common-auth",
+ "common-money",
  "hyper 1.7.0",
  "serde",
  "serde_json",
@@ -2782,8 +2794,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "bigdecimal",
  "chrono",
  "common-auth",
+ "common-money",
  "hyper 1.7.0",
  "libz-sys",
  "rdkafka",
