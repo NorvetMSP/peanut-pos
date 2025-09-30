@@ -260,6 +260,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "Requires running Postgres instance and TEST_DATABASE_URL or local novapos_test database"]
     async fn test_handle_completed_event_upserts_points() {
         let pool = test_pool().await;
         let producer = dummy_producer();

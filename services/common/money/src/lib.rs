@@ -42,7 +42,9 @@ fn half_up(value: &BigDecimal, scale: i32) -> BigDecimal {
     // Handle "-0" artifact
     let cleaned = if int_portion == "-0" { "0" } else { int_portion };
     let int_bd = BigDecimal::from_str(cleaned).unwrap();
-    int_bd / factor
+    let rounded = int_bd / factor;
+    // Ensure fixed scale with trailing zeros
+    rounded.with_scale(scale as i64)
 }
 
 /// Compare two monetary values allowing a tolerance (in cents) after normalization.
@@ -75,9 +77,8 @@ impl<'de> Deserialize<'de> for Money {
 impl Money {
     pub fn new(raw: BigDecimal) -> Self { Self(normalize_scale(&raw)) }
     pub fn from_major_minor(major: i64, minor: i64) -> Self {
-        let sign = if (major < 0) ^ (minor < 0) { -1 } else { 1 };
-        let abs_minor = minor.abs();
-        let value = BigDecimal::from(major) + BigDecimal::from(sign * abs_minor) / BigDecimal::from(100);
+        // Combine independently signed major & minor components: major + minor/100
+        let value = BigDecimal::from(major) + BigDecimal::from(minor) / BigDecimal::from(100);
         Self::new(value)
     }
     pub fn inner(&self) -> &BigDecimal { &self.0 }
