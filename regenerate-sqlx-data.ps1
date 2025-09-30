@@ -1,160 +1,135 @@
+<# 
+Regenerates SQLx offline metadata (sqlx-data.json) per service.
+#>
+
 [CmdletBinding()]
 param(
-    [string]$DatabaseUrl = $env:DATABASE_URL,
-    [string[]]$Services,
-    [switch]$ResetDatabase,
-    [switch]$SkipMigrations,
-    [switch]$SkipPrepare
+  [string[]] $Services,
+  [switch]   $ResetDatabase,
+  [switch]   $SkipMigrations,
+  [switch]   $SkipPrepare,
+  [switch]   $AutoResetOnChecksum
 )
 
 Set-StrictMode -Version Latest
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = 'Stop'
 
-function Invoke-Tool {
-    param(
-        [Parameter(Mandatory=$true)][string]$Command,
-        [string[]]$Arguments = @(),
-        [string]$ErrorContext
-    )
+if (-not $env:DATABASE_URL -or [string]::IsNullOrWhiteSpace($env:DATABASE_URL)) {
+  $env:DATABASE_URL = "postgres://novapos:novapos@localhost:5432/novapos"
+}
+Write-Host "DATABASE_URL = $($env:DATABASE_URL)"
 
-    & $Command @Arguments
-    if ($LASTEXITCODE -ne 0) {
-        $context = if ($ErrorContext) { $ErrorContext } else { "$Command $($Arguments -join ' ')" }
-        throw "'$context' exited with code $LASTEXITCODE"
+# Normalize service list (comma support)
+if ($Services -and $Services.Count -eq 1 -and $Services[0] -match ',') {
+  $Services = $Services[0].Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+}
+if (-not $Services -or $Services.Count -eq 0) {
+  $Services = @(
+    'auth-service','order-service','product-service','payment-service',
+    'inventory-service','loyalty-service','customer-service',
+    'analytics-service','integration-gateway'
+  )
+}
+$Services = @($Services | ForEach-Object { $_.Trim() } | Where-Object { $_ }) | Sort-Object -Unique
+Write-Host "Target services: $($Services -join ', ')"
+
+Write-Host "Ensuring database exists..."
+try { sqlx database create 2>$null | Out-Null } catch { Write-Warning "sqlx database create: $($_.Exception.Message)" }
+
+function Test-MigrationHealth {
+  param([string] $Service)
+  $dir = Join-Path services $Service
+  $migrations = Join-Path $dir migrations
+  if (-not (Test-Path $migrations)) { return $true }
+  pushd $dir | Out-Null
+  try {
+    $info = sqlx migrate info --format json 2>$null | ConvertFrom-Json
+    if (-not $info) { return $true }
+    $bad = $info | Where-Object { $_.applied -eq $true -and $_.checksum_ok -eq $false }
+    return -not ($bad)
+  } catch { return $true } finally { popd | Out-Null }
+}
+
+# Pre-migration checksum scan (only if we intend to run migrations and not already forcing a reset)
+if (-not $SkipMigrations -and -not $ResetDatabase) {
+  $needsReset = $false
+  foreach ($svc in $Services) {
+    if (-not (Test-MigrationHealth -Service $svc)) {
+      Write-Warning "Checksum mismatch detected in $svc migrations."
+      $needsReset = $true
     }
-}
-
-if (-not (Get-Command sqlx -ErrorAction SilentlyContinue)) {
-    throw "sqlx CLI not found on PATH. Install with 'cargo install sqlx-cli'."
-}
-
-if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
-    throw "cargo is required but was not found on PATH."
-}
-
-if (-not $DatabaseUrl) {
-    $DatabaseUrl = "postgres://novapos:novapos@localhost:5432/novapos"
-}
-
-$env:DATABASE_URL = $DatabaseUrl
-if ($env:SQLX_OFFLINE) {
-    Remove-Item Env:SQLX_OFFLINE
-}
-
-$repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Definition
-$servicesRoot = Join-Path $repoRoot "services"
-if (-not (Test-Path $servicesRoot)) {
-    throw "Unable to locate services directory at '$servicesRoot'."
-}
-
-$defaultOrder = @(
-    "product-service",
-    "order-service",
-    "auth-service",
-    "inventory-service",
-    "customer-service",
-    "loyalty-service",
-    "analytics-service",
-    "integration-gateway",
-    "payment-service"
-)
-
-$metadataCommand = @(
-    "metadata",
-    "--manifest-path", (Join-Path $servicesRoot "Cargo.toml"),
-    "--no-deps",
-    "--format-version", "1"
-)
-$metadataJson = & cargo @metadataCommand
-if ($LASTEXITCODE -ne 0) {
-    throw "Failed to read cargo metadata"
-}
-$metadata = $metadataJson | ConvertFrom-Json
-
-$packageMap = @{}
-foreach ($pkg in $metadata.packages) {
-    $pkgDir = Split-Path $pkg.manifest_path -Parent
-    if (-not $pkgDir.StartsWith($servicesRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
-        continue
+  }
+  if ($needsReset) {
+    if ($AutoResetOnChecksum) {
+      Write-Host "AutoResetOnChecksum: enabling ResetDatabase."
+      $ResetDatabase = $true
+    } else {
+      Write-Error "One or more checksum mismatches. Re-run with -ResetDatabase (or add -AutoResetOnChecksum)."
+      exit 2
     }
-    $binTargets = @($pkg.targets | Where-Object { $_.kind -contains 'bin' } | ForEach-Object { $_.name })
-    if ($binTargets.Count -eq 0) {
-        continue
-    }
-    $packageMap[$pkg.name] = [ordered]@{
-        Path = $pkgDir
-        Bins = $binTargets
-    }
+  }
 }
-
-if ($Services -and $Services.Count -gt 0) {
-    $servicesToProcess = $Services
-} else {
-    $servicesToProcess = $defaultOrder + ($packageMap.Keys | Where-Object { $defaultOrder -notcontains $_ })
-}
-$servicesToProcess = $servicesToProcess | Where-Object { $packageMap.ContainsKey($_) } | Select-Object -Unique
-if ($servicesToProcess.Count -eq 0) {
-    Write-Warning "No matching services to process."
-    exit 0
-}
-
-Write-Host "Using DATABASE_URL = $DatabaseUrl"
 
 if ($ResetDatabase) {
-    Write-Host "Resetting database..."
-    try {
-        $uri = [System.Uri]$DatabaseUrl
-        $dbName = $uri.AbsolutePath.TrimStart('/')
-        if ([string]::IsNullOrWhiteSpace($dbName)) { throw 'Database name missing from DATABASE_URL' }
-        $userInfo = $uri.UserInfo
-        $dbHost = $uri.Host
-        $port = if ($uri.Port -gt 0) { $uri.Port } else { 5432 }
-        $adminUrl = "postgres://{0}@{1}:{2}/postgres" -f $userInfo, $dbHost, $port
-        $dropSql = "DROP DATABASE IF EXISTS ""$dbName"" WITH (FORCE);"
-        Invoke-Tool -Command "psql" -Arguments @('-d', $adminUrl, '-c', $dropSql) -ErrorContext 'psql drop database'
-    } catch {
-        Write-Warning $_.Exception.Message
+  Write-Host "ResetDatabase: dropping active connections then recreating DB..."
+  try {
+    # psql may not exist; ignore failure
+    psql "$($env:DATABASE_URL)" -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid();" 2>$null | Out-Null
+  } catch { }
+  sqlx database drop -y
+  sqlx database create
+  Write-Host "Database recreated."
+}
+
+# Run migrations
+if (-not $SkipMigrations) {
+  foreach ($svc in $Services) {
+    $svcPath = Join-Path services $svc
+    $migPath = Join-Path $svcPath migrations
+    if (Test-Path $migPath) {
+      Write-Host "[migrate] $svc"
+      pushd $svcPath | Out-Null
+      sqlx migrate run --ignore-missing
+      popd | Out-Null
+    } else {
+      Write-Host "[migrate] $svc (no migrations directory)"
     }
-    Invoke-Tool -Command "sqlx" -Arguments @("database", "create") -ErrorContext "sqlx database create"
+  }
 } else {
-    Write-Host "Ensuring database exists..."
-    Invoke-Tool -Command "sqlx" -Arguments @("database", "create") -ErrorContext "sqlx database create"
+  Write-Host "Skipping migrations."
+}
+
+if ($SkipPrepare) {
+  Write-Host "SkipPrepare set: skipping offline metadata generation."
+  exit 0
 }
 
 $failures = @()
-foreach ($serviceName in $servicesToProcess) {
-    $info = $packageMap[$serviceName]
-    Write-Host "`n=== $serviceName ==="
-    Push-Location $info.Path
-    try {
-        if (-not $SkipMigrations -and (Test-Path "migrations")) {
-            Write-Host "  Running migrations..."
-            Invoke-Tool -Command "sqlx" -Arguments @("migrate", "run", "--ignore-missing") -ErrorContext "sqlx migrate run ($serviceName)"
-        } elseif ($SkipMigrations) {
-            Write-Host "  Skipping migrations (per flag)."
-        } else {
-            Write-Host "  No migrations directory; skipping."
-        }
-
-        if (-not $SkipPrepare) {
-            foreach ($bin in $info.Bins) {
-                Write-Host "  Preparing queries for '$bin'..."
-                Invoke-Tool -Command "cargo" -Arguments @("sqlx", "prepare", "--", "--bin", $bin) -ErrorContext ("cargo sqlx prepare ({0}::{1})" -f $serviceName, $bin)
-            }
-        } else {
-            Write-Host "  Skipping cargo sqlx prepare (per flag)."
-        }
-    } catch {
-        $failures += ("{0}: {1}" -f $serviceName, $_.Exception.Message)
-        Write-Warning "  Failed: $($_.Exception.Message)"
-    } finally {
-        Pop-Location
-    }
+foreach ($svc in $Services) {
+  $svcDir = Join-Path services $svc
+  if (-not (Test-Path $svcDir)) {
+    Write-Warning "[prepare] $svc directory missing"
+    $failures += $svc
+    continue
+  }
+  Write-Host "[prepare] $svc"
+  pushd $svcDir | Out-Null
+  if (Test-Path sqlx-data.json) { Remove-Item sqlx-data.json -Force }
+  try {
+    # Assume bin name == service folder; adjust if any differs.
+    cargo sqlx prepare -- --bin $svc
+    if (-not (Test-Path sqlx-data.json)) { throw "sqlx-data.json not produced" }
+  } catch {
+    Write-Warning "[prepare] $svc failed: $($_.Exception.Message)"
+    $failures += $svc
+  } finally {
+    popd | Out-Null
+  }
 }
 
 if ($failures.Count -gt 0) {
-    Write-Error ("SQLx refresh completed with errors:`n - " + ($failures -join "`n - "))
-    exit 1
+  Write-Error "Offline prepare failed for: $($failures -join ', ')"
+  exit 1
 }
 
-Write-Host "`nAll services processed successfully."
+Write-Host "All sqlx-data.json files generated successfully."

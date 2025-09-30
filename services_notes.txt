@@ -1,15 +1,79 @@
 Regenerating SQLx Offline Data
 ------------------------------
-- Use `regenerate-sqlx-data.ps1` to run service migrations and refresh `sqlx-data.json` with `cargo sqlx prepare`....this is For everyday query tweaks you don’t have to pay that cost—.\regenerate-sqlx-data.ps1 (no flags) just 
----ensures the DB exists, runs migrations as needed, and refreshes the offline cache. Save the -ResetDatabase run for when the script tells you a migration hash is out of sync or you explicitly want to wipe the DB.
-- Why: keeps offline query metadata in sync after changing SQLx queries or database migrations and avoids checksum drift errors.
-- Command: `powershell -ExecutionPolicy Bypass -File .\regenerate-sqlx-data.ps1`; defaults `DATABASE_URL` to `postgres://novapos:novapos@localhost:5432/novapos`.it’s the “start-from-zero” path: 
-- Add `-ResetDatabase` when migrations changed or checksums fail; the script drops, recreates, migrates once, then prepares every service binary.
-- Scope control: `-Services auth-service,order-service` limits execution; `-SkipMigrations` or `-SkipPrepare` help when you only need one phase.
-- Prereqs: `sqlx` CLI must be installed (`cargo install sqlx-cli`); ensure Postgres is running before you execute the script.
-- On failure, check the per-service error the script prints (migration checksum mismatches usually mean the DB needs a reset or the migration must be reverted).
+Purpose:
+Keep each service's sqlx-data.json in sync with its queries + migrations so Docker builds (SQLX_OFFLINE=true) compile without a live database.
 
+Script:
+  powershell -ExecutionPolicy Bypass -File .\regenerate-sqlx-data.ps1
+
+Defaults:
+  - Uses DATABASE_URL (auto-sets to postgres://novapos:novapos@localhost:5432/novapos if unset)
+  - Runs migrations (all selected services) then generates sqlx-data.json per service
+  - Fails if any offline prepare fails
+
+Common Scenarios:
+1. Edit or add queries (no new migration):
+   .\regenerate-sqlx-data.ps1 -Services customer-service
+2. Add a new forward migration file:
+   (create migration) -> .\regenerate-sqlx-data.ps1 -Services customer-service
+3. Multiple services changed:
+   .\regenerate-sqlx-data.ps1 -Services auth-service,order-service
+4. Full workspace refresh:
+   .\regenerate-sqlx-data.ps1
+5. Checksum mismatch (rewrote old migration):
+   .\regenerate-sqlx-data.ps1 -ResetDatabase
+   (or auto) .\regenerate-sqlx-data.ps1 -AutoResetOnChecksum
+6. Only regenerate offline metadata (skip migrations):
+   .\regenerate-sqlx-data.ps1 -SkipMigrations
+7. Only run migrations (no offline files needed yet):
+   .\regenerate-sqlx-data.ps1 -SkipPrepare
+8. Force clean DB even if healthy:
+   .\regenerate-sqlx-data.ps1 -ResetDatabase
+
+
+# Check for drift manually (simulates CI)
+git add services/*/sqlx-data.json
+git diff --cached --quiet
+pwsh .\regenerate-sqlx-data.ps1
+git add services/*/sqlx-data.json
+git diff --cached   # should be empty
+
+
+Flags:
+  -Services <list>            Comma or array; defaults to all services
+  -ResetDatabase              Drop & recreate DB before migrations
+  -AutoResetOnChecksum        If checksum mismatch detected, automatically reset (no second run needed)
+  -SkipMigrations             Do not execute sqlx migrate run
+  -SkipPrepare                Skip cargo sqlx prepare (no sqlx-data.json updates)
+
+When NOT to use -ResetDatabase:
+  - Adding a migration at the end
+  - Only changing Rust-side query logic or parameters
+
+Indicators you DO need -ResetDatabase:
+  - "checksum mismatch" warnings from the script
+  - You edited or reordered an earlier migration
+  - You intentionally want a clean local dataset
+
+Result Artifacts:
+  services/<service>/sqlx-data.json (commit these changes with migrations + query edits)
+
+Typical Workflow (single service change):
+  1. Modify queries / add migration
+  2. .\regenerate-sqlx-data.ps1 -Services customer-service
+  3. git add services/customer-service/migrations/* services/customer-service/sqlx-data.json
+  4. docker compose build customer-service && docker compose up -d customer-service
+
+Troubleshooting:
+  - Missing sqlx-data.json during Docker build: re-run script for that service
+  - Prepare failure: check the first compile error; usually a missing feature flag or unresolved type
+  - Persistent checksum mismatch after reset: ensure old migration file matches DB state or recreate DB again
+
+(Do not embed the script’s PowerShell source here—see regenerate-sqlx-data.ps1 for implementation.)
 HashiCorp Vault (local dev)
+
+
+
 --------------------------
 - docker compose up -d vault
 - export VAULT_ADDR="http://127.0.0.1:8200" (PowerShell: $env:VAULT_ADDR="http://127.0.0.1:8200")
