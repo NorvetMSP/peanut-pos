@@ -41,13 +41,13 @@ function Test-MigrationHealth {
   $dir = Join-Path services $Service
   $migrations = Join-Path $dir migrations
   if (-not (Test-Path $migrations)) { return $true }
-  pushd $dir | Out-Null
+  Push-Location $dir | Out-Null
   try {
     $info = sqlx migrate info --format json 2>$null | ConvertFrom-Json
     if (-not $info) { return $true }
     $bad = $info | Where-Object { $_.applied -eq $true -and $_.checksum_ok -eq $false }
     return -not ($bad)
-  } catch { return $true } finally { popd | Out-Null }
+  } catch { return $true } finally { Pop-Location | Out-Null }
 }
 
 # Pre-migration checksum scan (only if we intend to run migrations and not already forcing a reset)
@@ -88,9 +88,9 @@ if (-not $SkipMigrations) {
     $migPath = Join-Path $svcPath migrations
     if (Test-Path $migPath) {
       Write-Host "[migrate] $svc"
-      pushd $svcPath | Out-Null
+  Push-Location $svcPath | Out-Null
       sqlx migrate run --ignore-missing
-      popd | Out-Null
+  Pop-Location | Out-Null
     } else {
       Write-Host "[migrate] $svc (no migrations directory)"
     }
@@ -113,7 +113,7 @@ foreach ($svc in $Services) {
     continue
   }
   Write-Host "[prepare] $svc"
-  pushd $svcDir | Out-Null
+  Push-Location $svcDir | Out-Null
   if (Test-Path sqlx-data.json) { Remove-Item sqlx-data.json -Force }
   try {
     # Assume bin name == service folder; adjust if any differs.
@@ -123,7 +123,7 @@ foreach ($svc in $Services) {
     Write-Warning "[prepare] $svc failed: $($_.Exception.Message)"
     $failures += $svc
   } finally {
-    popd | Out-Null
+  Pop-Location | Out-Null
   }
 }
 

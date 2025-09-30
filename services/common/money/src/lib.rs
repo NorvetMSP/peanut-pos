@@ -6,17 +6,30 @@ use sqlx::error::BoxDynError;
 use serde::{Serializer, Deserializer};
 use serde::{Deserialize, Serialize};
 
-/// Rounding mode supported (extendable later via feature flag / env)
+/// Rounding modes supported (configurable via env in later initialization step)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RoundingMode { HalfUp }
+pub enum RoundingMode { HalfUp, Truncate, Bankers }
 
-// Current global policy (future: load from env once)
+impl RoundingMode {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "halfup" | "half-up" | "half_up" => Some(RoundingMode::HalfUp),
+            "truncate" | "trunc" => Some(RoundingMode::Truncate),
+            "bankers" | "banker" | "half-even" | "halfeven" | "half_even" => Some(RoundingMode::Bankers),
+            _ => None,
+        }
+    }
+}
+
+// Current global policy (temporary; will be made runtime-configurable in next task)
 const CURRENT_ROUNDING: RoundingMode = RoundingMode::HalfUp;
 
 /// Apply configured rounding to scale=2 using Half-Up (away from zero on .5).
 fn round_scale_2(value: &BigDecimal) -> BigDecimal {
     match CURRENT_ROUNDING {
         RoundingMode::HalfUp => half_up(value, 2),
+        RoundingMode::Truncate => truncate(value, 2),
+        RoundingMode::Bankers => bankers(value, 2),
     }
 }
 
@@ -45,6 +58,72 @@ fn half_up(value: &BigDecimal, scale: i32) -> BigDecimal {
     let rounded = int_bd / factor;
     // Ensure fixed scale with trailing zeros
     rounded.with_scale(scale as i64)
+}
+
+/// Truncate toward zero at given scale.
+fn truncate(value: &BigDecimal, scale: i32) -> BigDecimal {
+    // factor = 10^scale
+    let mut factor = BigDecimal::from(1);
+    for _ in 0..scale { factor = factor * BigDecimal::from(10u32); }
+    let shifted = value * &factor;
+    let s = shifted.to_string();
+    let int_portion = if let Some(dot) = s.find('.') { &s[..dot] } else { &s };
+    let cleaned = if int_portion == "-0" { "0" } else { int_portion };
+    let int_bd = BigDecimal::from_str(cleaned).unwrap();
+    (int_bd / factor).with_scale(scale as i64)
+}
+
+/// Bankers (round half to even) at given scale.
+fn bankers(value: &BigDecimal, scale: i32) -> BigDecimal {
+    // factor = 10^scale
+    let mut factor = BigDecimal::from(1);
+    for _ in 0..scale { factor = factor * BigDecimal::from(10u32); }
+    let shifted = value * &factor; // exact scaled number
+    let s = shifted.to_string();
+    let negative = s.starts_with('-');
+    let abs = if negative { &s[1..] } else { &s }; // strip sign
+    let (int_str, frac_str) = if let Some(dot) = abs.find('.') { (&abs[..dot], &abs[dot+1..]) } else { (abs, "") };
+    // Normalize fractional substring (we only care if it's >, <, or == 0.5)
+    // Compare using BigDecimal might reintroduce rounding; use string logic.
+    let cmp_half = {
+        if frac_str.is_empty() { -1 } // no fraction => < 0.5
+        else {
+            // Build a comparison on first digit and beyond
+            let first = frac_str.chars().next().unwrap();
+            match first {
+                '0' => if frac_str.len() == 1 { -1 } else { // e.g. 0xxxxx < 0.5
+                    // any non-zero after still < 0.5
+                    if frac_str.chars().any(|c| c != '0') { -1 } else { -1 }
+                },
+                '1'..='4' => -1,
+                '5' => {
+                    // Check if exactly 0.5 == all remaining digits zero
+                    if frac_str.chars().skip(1).all(|c| c == '0') { 0 } else { 1 }
+                },
+                _ => 1, // 6-9 => >0.5
+            }
+        }
+    };
+    // Parse integer portion (always positive here)
+    let mut int_bd = BigDecimal::from_str(if int_str.is_empty() { "0" } else { int_str }).unwrap();
+    match cmp_half {
+        -1 => { /* keep int */ }
+        1 => { int_bd = &int_bd + BigDecimal::from(1); }
+        0 => { // tie 0.5 -> round to even
+            // Determine if int is even
+            let even = {
+                // Extract last digit (string) - safe because int_str not empty for any non-zero
+                let last_digit = int_str.chars().last().unwrap_or('0');
+                let digit_val = last_digit.to_digit(10).unwrap_or(0);
+                digit_val % 2 == 0
+            };
+            if !even { int_bd = &int_bd + BigDecimal::from(1); }
+        }
+        _ => {}
+    }
+    // Reapply sign
+    if negative { int_bd = int_bd * BigDecimal::from(-1); }
+    (int_bd / factor).with_scale(scale as i64)
 }
 
 /// Compare two monetary values allowing a tolerance (in cents) after normalization.
@@ -161,5 +240,38 @@ mod tests {
         let a = BigDecimal::parse_bytes(b"10.001", 10).unwrap();
         let b = BigDecimal::parse_bytes(b"10.009", 10).unwrap();
         assert!(nearly_equal(&a, &b, 1)); // 1 cent tolerance
+    }
+
+    #[test]
+    fn test_rounding_mode_parse() {
+        assert_eq!(RoundingMode::parse("halfup"), Some(RoundingMode::HalfUp));
+        assert_eq!(RoundingMode::parse("truncate"), Some(RoundingMode::Truncate));
+        assert_eq!(RoundingMode::parse("bankers"), Some(RoundingMode::Bankers));
+        assert!(RoundingMode::parse("unknown").is_none());
+    }
+
+    #[test]
+    fn test_truncate_rounding_behavior() {
+        // local direct call to truncate to validate distinct behaviour from half_up
+        let v = BigDecimal::from_str("12.345").unwrap();
+        assert_eq!(truncate(&v, 2).to_string(), "12.34");
+        let neg = BigDecimal::from_str("-1.239").unwrap();
+        assert_eq!(truncate(&neg, 2).to_string(), "-1.23");
+    }
+
+    #[test]
+    fn test_bankers_rounding_ties() {
+        // 1.235 -> 1.24 (123.5 -> 124 because 123 odd)
+        let v1 = BigDecimal::from_str("1.235").unwrap();
+        assert_eq!(bankers(&v1, 2).to_string(), "1.24");
+        // 1.245 -> 1.24 (124.5 -> 124 even stays)
+        let v2 = BigDecimal::from_str("1.245").unwrap();
+        assert_eq!(bankers(&v2, 2).to_string(), "1.24");
+        // -1.235 -> -1.24 (123.5 tie, 123 odd -> increment magnitude)
+        let v3 = BigDecimal::from_str("-1.235").unwrap();
+        assert_eq!(bankers(&v3, 2).to_string(), "-1.24");
+        // -1.245 -> -1.24 (124 even -> stays -1.24)
+        let v4 = BigDecimal::from_str("-1.245").unwrap();
+        assert_eq!(bankers(&v4, 2).to_string(), "-1.24");
     }
 }

@@ -55,4 +55,3 @@ If you still see unresolved symbols, verify that `vcpkg` or system-wide zlib is 
 
 - Introduce a shared `[workspace.dependencies]` section (Rust 1.64+) to centralize rdkafka+zlib settings.
 - Add a CI matrix job (Windows) that builds one Kafka service to guard against regressions.
-
