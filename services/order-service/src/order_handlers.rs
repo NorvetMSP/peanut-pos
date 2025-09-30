@@ -12,6 +12,8 @@ use common_auth::{
 use rdkafka::producer::FutureRecord;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use bigdecimal::BigDecimal;
+// Removed unused FromStr import after BigDecimal migration
 use sqlx::{Postgres, QueryBuilder, Row, Transaction};
 use std::collections::HashMap;
 use std::time::Duration;
@@ -30,15 +32,15 @@ pub struct OrderItem {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub product_name: Option<String>,
     pub quantity: i32,
-    pub unit_price: f64,
-    pub line_total: f64,
+    pub unit_price: BigDecimal,
+    pub line_total: BigDecimal,
 }
 
 #[derive(Deserialize, Debug)]
 pub struct NewOrder {
     pub items: Vec<OrderItem>,
     pub payment_method: String,
-    pub total: f64,
+    pub total: BigDecimal,
     pub customer_id: Option<String>,
     pub customer_name: Option<String>,
     pub customer_email: Option<String>,
@@ -51,7 +53,7 @@ pub struct NewOrder {
 pub struct Order {
     pub id: Uuid,
     pub tenant_id: Uuid,
-    pub total: f64,
+    pub total: BigDecimal,
     pub status: String,
     pub customer_id: Option<Uuid>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -80,15 +82,15 @@ struct OrderStatusSnapshot {
     payment_method: String,
     customer_id: Option<Uuid>,
     offline: bool,
-    total: Option<f64>,
+    total: Option<BigDecimal>,
 }
 
 #[derive(sqlx::FromRow)]
 struct OrderItemFinancialRow {
     product_id: Uuid,
     quantity: i32,
-    unit_price: f64,
-    line_total: f64,
+    unit_price: BigDecimal,
+    line_total: BigDecimal,
 }
 
 #[derive(Serialize)]
@@ -128,7 +130,7 @@ pub struct ListReturnsParams {
 pub struct ReturnSummary {
     pub id: Uuid,
     pub order_id: Uuid,
-    pub total: f64,
+    pub total: BigDecimal,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     pub created_at: DateTime<Utc>,
@@ -141,8 +143,8 @@ pub struct OrderLineItem {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub product_name: Option<String>,
     pub quantity: i32,
-    pub unit_price: f64,
-    pub line_total: f64,
+    pub unit_price: BigDecimal,
+    pub line_total: BigDecimal,
     pub returned_quantity: i32,
 }
 
@@ -167,7 +169,7 @@ pub struct RefundLine {
 pub struct RefundRequest {
     pub order_id: Uuid,
     pub items: Vec<RefundLine>,
-    pub total: Option<f64>,
+    pub total: Option<BigDecimal>,
     pub reason: Option<String>,
 }
 
@@ -287,7 +289,7 @@ async fn notify_payment_void(
     order_id: Uuid,
     tenant_id: Uuid,
     payment_method: &str,
-    amount: f64,
+    amount: BigDecimal,
     reason: Option<&str>,
 ) -> Result<(), String> {
     if !payment_method.eq_ignore_ascii_case("card")
@@ -349,18 +351,17 @@ async fn insert_order_items(
     items: &[OrderItem],
 ) -> Result<(), (StatusCode, String)> {
     for item in items {
-        // NOTE: kept as dynamic query because NUMERIC columns (unit_price, line_total) would
-        // require enabling the `bigdecimal` or appropriate feature for compile-time checking.
-        sqlx::query(
-            "INSERT INTO order_items (id, order_id, product_id, quantity, unit_price, line_total, product_name) VALUES ($1, $2, $3, $4, $5, $6, $7)"
+        sqlx::query!(
+            r#"INSERT INTO order_items (id, order_id, product_id, quantity, unit_price, line_total, product_name)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)"#,
+            Uuid::new_v4(),
+            order_id,
+            item.product_id,
+            item.quantity,
+            item.unit_price,
+            item.line_total,
+            item.product_name.as_deref()
         )
-        .bind(Uuid::new_v4())
-        .bind(order_id)
-        .bind(item.product_id)
-        .bind(item.quantity)
-        .bind(item.unit_price)
-        .bind(item.line_total)
-        .bind(item.product_name.as_deref())
         .execute(&mut *tx)
         .await
         .map_err(|e| {
@@ -403,7 +404,7 @@ pub async fn create_order(
 
     if let Some(ref key) = idempotency_key {
         if let Some(existing) = sqlx::query_as::<_, Order>(
-            "SELECT id, tenant_id, total::FLOAT8 AS total, status, customer_id, customer_name, customer_email, store_id, created_at, offline, payment_method, idempotency_key FROM orders WHERE tenant_id = $1 AND idempotency_key = $2"
+            "SELECT id, tenant_id, total, status, customer_id, customer_name, customer_email, store_id, created_at, offline, payment_method, idempotency_key FROM orders WHERE tenant_id = $1 AND idempotency_key = $2"
         )
         .bind(tenant_id)
         .bind(key)
@@ -420,12 +421,19 @@ pub async fn create_order(
         }
     }
 
-    let total_from_items: f64 = new_order.items.iter().map(|item| item.line_total).sum();
-    if (total_from_items - new_order.total).abs() > 0.01 {
+    use bigdecimal::ToPrimitive;
+    let total_from_items: BigDecimal = new_order
+        .items
+        .iter()
+        .fold(BigDecimal::from(0), |acc, item| acc + item.line_total.clone());
+    // Compare with tolerance of 0.01 using f64 conversion (safe for comparison tolerance only)
+    if (total_from_items.to_f64().unwrap_or(0.0) - new_order.total.to_f64().unwrap_or(0.0)).abs()
+        > 0.01
+    {
         tracing::warn!(
             tenant_id = %tenant_id,
-            provided_total = new_order.total,
-            derived_total = total_from_items,
+            provided_total = %new_order.total,
+            derived_total = %total_from_items,
             "Order total differs from item aggregate by more than a cent"
         );
     }
@@ -511,11 +519,11 @@ pub async fn create_order(
     let order = match sqlx::query_as::<_, Order>(
         "INSERT INTO orders (id, tenant_id, total, status, customer_id, customer_name, customer_email, store_id, offline, payment_method, idempotency_key)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-         RETURNING id, tenant_id, total::FLOAT8 AS total, status, customer_id, customer_name, customer_email, store_id, created_at, offline, payment_method, idempotency_key"
+         RETURNING id, tenant_id, total, status, customer_id, customer_name, customer_email, store_id, created_at, offline, payment_method, idempotency_key"
     )
     .bind(order_id)
     .bind(tenant_id)
-    .bind(new_order.total)
+    .bind(&new_order.total)
     .bind(status)
     .bind(customer_uuid)
     .bind(customer_name.as_deref())
@@ -638,7 +646,7 @@ pub async fn void_order(
         .map(|value| value.to_string());
 
     let existing = sqlx::query_as::<_, OrderStatusSnapshot>(
-        "SELECT status, payment_method, customer_id, offline, total::FLOAT8 AS total FROM orders WHERE id = $1 AND tenant_id = $2",
+    "SELECT status, payment_method, customer_id, offline, total FROM orders WHERE id = $1 AND tenant_id = $2",
     )
     .bind(order_id)
     .bind(tenant_id)
@@ -664,7 +672,10 @@ pub async fn void_order(
         order_id,
         tenant_id,
         &existing.payment_method,
-        existing.total.unwrap_or(0.0),
+        existing
+            .total
+            .clone()
+            .unwrap_or_else(|| BigDecimal::from(0)),
         void_reason.as_deref(),
     )
     .await
@@ -678,7 +689,7 @@ pub async fn void_order(
 
     let updated_order = sqlx::query_as::<_, Order>(
         "UPDATE orders SET status = 'VOIDED', void_reason = $3 WHERE id = $1 AND tenant_id = $2 AND status = 'PENDING'
-         RETURNING id, tenant_id, total::FLOAT8 AS total, status, customer_id, customer_name, customer_email, store_id, created_at, offline, payment_method, idempotency_key",
+         RETURNING id, tenant_id, total, status, customer_id, customer_name, customer_email, store_id, created_at, offline, payment_method, idempotency_key",
     )
     .bind(order_id)
     .bind(tenant_id)
@@ -697,7 +708,7 @@ pub async fn void_order(
     ))?;
 
     let item_rows = sqlx::query_as::<_, OrderItemFinancialRow>(
-        "SELECT product_id, quantity, unit_price::FLOAT8 AS unit_price, line_total::FLOAT8 AS line_total FROM order_items WHERE order_id = $1",
+    "SELECT product_id, quantity, unit_price, line_total FROM order_items WHERE order_id = $1",
     )
     .bind(order_id)
     .fetch_all(&state.db)
@@ -772,7 +783,7 @@ pub async fn refund_order(
     })?;
 
     let order_snapshot = sqlx::query_as::<_, OrderStatusSnapshot>(
-        "SELECT status, payment_method, customer_id, offline, total::FLOAT8 AS total FROM orders WHERE id = $1 AND tenant_id = $2 FOR UPDATE",
+    "SELECT status, payment_method, customer_id, offline, total FROM orders WHERE id = $1 AND tenant_id = $2 FOR UPDATE",
     )
     .bind(req.order_id)
     .bind(tenant_id)
@@ -800,7 +811,7 @@ pub async fn refund_order(
     }
 
     let db_rows = sqlx::query(
-        "SELECT id, product_id, quantity, returned_quantity, unit_price::FLOAT8 AS unit_price FROM order_items WHERE order_id = $1 FOR UPDATE"
+    "SELECT id, product_id, quantity, returned_quantity, unit_price FROM order_items WHERE order_id = $1 FOR UPDATE"
     )
     .bind(req.order_id)
     .fetch_all(&mut tx)
@@ -823,15 +834,15 @@ pub async fn refund_order(
         order_item_id: Uuid,
         product_id: Uuid,
         quantity: i32,
-        unit_price: f64,
-        line_total: f64,
+    unit_price: BigDecimal,
+    line_total: BigDecimal,
     }
 
     struct DbItem {
         order_item_id: Uuid,
         quantity: i32,
         returned_quantity: i32,
-        unit_price: f64,
+    unit_price: BigDecimal,
     }
 
     let mut items_map: HashMap<Uuid, DbItem> = HashMap::new();
@@ -855,7 +866,7 @@ pub async fn refund_order(
             )
         })?;
         let returned_quantity: i32 = row.try_get("returned_quantity").unwrap_or(0);
-        let unit_price: f64 = row.try_get("unit_price").map_err(|e| {
+    let unit_price: BigDecimal = row.try_get("unit_price").map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("Failed to read order item unit price: {}", e),
@@ -874,7 +885,7 @@ pub async fn refund_order(
     }
 
     let mut updates: Vec<PendingUpdate> = Vec::new();
-    let mut refund_total = 0.0f64;
+    let mut refund_total = BigDecimal::from(0);
 
     for request_item in req.items.iter() {
         if request_item.quantity <= 0 {
@@ -914,14 +925,14 @@ pub async fn refund_order(
         }
 
         entry.returned_quantity += request_item.quantity;
-        let line_total = entry.unit_price * request_item.quantity as f64;
-        refund_total += line_total;
+        let line_total = &entry.unit_price * BigDecimal::from(request_item.quantity);
+        refund_total += line_total.clone();
         updates.push(PendingUpdate {
             order_item_id: entry.order_item_id,
             product_id: request_item.product_id,
             quantity: request_item.quantity,
-            unit_price: entry.unit_price,
-            line_total,
+            unit_price: entry.unit_price.clone(),
+            line_total: line_total.clone(),
         });
     }
 
@@ -932,13 +943,15 @@ pub async fn refund_order(
         ));
     }
 
-    if let Some(client_total) = req.total {
-        if (client_total - refund_total).abs() > 0.01 {
+    if let Some(client_total) = req.total.clone() {
+        use bigdecimal::ToPrimitive;
+        let diff = (client_total.clone() - refund_total.clone()).to_f64().unwrap_or(0.0).abs();
+        if diff > 0.01 {
             tracing::warn!(
                 order_id = %req.order_id,
                 tenant_id = %tenant_id,
-                client_total,
-                computed_total = refund_total,
+                client_total = %client_total,
+                computed_total = %refund_total,
                 "Client-supplied refund total differs from server computation"
             );
         }
@@ -977,7 +990,7 @@ pub async fn refund_order(
     .bind(return_id)
     .bind(req.order_id)
     .bind(tenant_id)
-    .bind(refund_total)
+    .bind(&refund_total)
     .bind(reason_text.as_deref())
     .execute(&mut tx)
     .await
@@ -996,7 +1009,7 @@ pub async fn refund_order(
         .bind(return_id)
         .bind(update.order_item_id)
         .bind(update.quantity)
-        .bind(update.line_total)
+    .bind(&update.line_total)
         .execute(&mut tx)
         .await
         .map_err(|e| {
@@ -1018,7 +1031,7 @@ pub async fn refund_order(
 
     let updated_order = sqlx::query_as::<_, Order>(
         "UPDATE orders SET status = $3 WHERE id = $1 AND tenant_id = $2
-         RETURNING id, tenant_id, total::FLOAT8 AS total, status, customer_id, customer_name, customer_email, store_id, created_at, offline, payment_method, idempotency_key"
+         RETURNING id, tenant_id, total, status, customer_id, customer_name, customer_email, store_id, created_at, offline, payment_method, idempotency_key"
     )
     .bind(req.order_id)
     .bind(tenant_id)
@@ -1046,7 +1059,7 @@ pub async fn refund_order(
                 "product_id": update.product_id,
                 "quantity": -update.quantity,
                 "unit_price": update.unit_price,
-                "line_total": -update.line_total,
+                "line_total": update.line_total.clone() * BigDecimal::from(-1),
             })
         })
         .collect();
@@ -1055,7 +1068,7 @@ pub async fn refund_order(
         "order_id": updated_order.id,
         "tenant_id": tenant_id,
         "items": event_items,
-        "total": -refund_total,
+    "total": (&refund_total * BigDecimal::from(-1)),
         "customer_id": updated_order.customer_id,
         "offline": updated_order.offline,
         "payment_method": updated_order.payment_method,
@@ -1109,7 +1122,7 @@ pub async fn list_orders(
     };
 
     let mut builder = QueryBuilder::new(
-        "SELECT id, tenant_id, total::FLOAT8 AS total, status, customer_id, customer_name, customer_email, store_id, created_at, offline, payment_method, idempotency_key FROM orders WHERE tenant_id = "
+    "SELECT id, tenant_id, total AS total, status, customer_id, customer_name, customer_email, store_id, created_at, offline, payment_method, idempotency_key FROM orders WHERE tenant_id = "
     );
     builder.push_bind(tenant_id);
 
@@ -1228,7 +1241,7 @@ pub async fn list_returns(
     let offset = params.offset.unwrap_or(0).max(0);
 
     let mut builder = QueryBuilder::new(
-        "SELECT r.id, r.order_id, r.total::FLOAT8 AS total, r.reason, r.created_at, o.store_id \
+    "SELECT r.id, r.order_id, r.total AS total, r.reason, r.created_at, o.store_id \
          FROM order_returns r \
          JOIN orders o ON o.id = r.order_id \
          WHERE r.tenant_id = ",
@@ -1286,7 +1299,7 @@ async fn fetch_order_detail(
     order_id: Uuid,
 ) -> Result<OrderDetail, (StatusCode, String)> {
     let order = sqlx::query_as::<_, Order>(
-        "SELECT id, tenant_id, total::FLOAT8 AS total, status, customer_id, customer_name, customer_email, store_id, created_at, offline, payment_method, idempotency_key FROM orders WHERE id = $1 AND tenant_id = $2",
+    "SELECT id, tenant_id, total, status, customer_id, customer_name, customer_email, store_id, created_at, offline, payment_method, idempotency_key FROM orders WHERE id = $1 AND tenant_id = $2",
     )
     .bind(order_id)
     .bind(tenant_id)
@@ -1301,7 +1314,7 @@ async fn fetch_order_detail(
     .ok_or((StatusCode::NOT_FOUND, "Order not found".to_string()))?;
 
     let item_rows = sqlx::query(
-        "SELECT product_id, product_name, quantity, returned_quantity, unit_price::FLOAT8 AS unit_price, line_total::FLOAT8 AS line_total FROM order_items WHERE order_id = $1 ORDER BY created_at"
+    "SELECT product_id, product_name, quantity, returned_quantity, unit_price, line_total FROM order_items WHERE order_id = $1 ORDER BY created_at"
     )
     .bind(order_id)
     .fetch_all(&state.db)
@@ -1335,13 +1348,13 @@ async fn fetch_order_detail(
                 )
             })?;
             let returned_quantity: i32 = row.try_get("returned_quantity").unwrap_or(0);
-            let unit_price: f64 = row.try_get("unit_price").map_err(|e| {
+            let unit_price: BigDecimal = row.try_get("unit_price").map_err(|e| {
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     format!("Failed to read order item unit price: {}", e),
                 )
             })?;
-            let line_total: f64 = row.try_get("line_total").map_err(|e| {
+            let line_total: BigDecimal = row.try_get("line_total").map_err(|e| {
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     format!("Failed to read order item line total: {}", e),

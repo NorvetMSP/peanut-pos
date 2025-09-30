@@ -16,7 +16,7 @@ anyhow = "1"
 thiserror = "1"
 hyper = "1"
 uuid = { version = "1", features = ["v4", "serde"] }
-sqlx = { version = "0.6", features = ["runtime-tokio-native-tls", "postgres", "macros", "uuid", "chrono", "offline"] }
+sqlx = { version = "0.6", features = ["runtime-tokio-native-tls", "postgres", "macros", "uuid", "chrono", "offline", "bigdecimal"] }
 tower-http = { version = "0.5", features = ["cors"] }
 argon2 = { version = "0.5", features = ["std"] }
 rand_core = "0.6"

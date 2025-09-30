@@ -1,5 +1,23 @@
 {
   "db": "PostgreSQL",
+  "1aec917433c8efd30b1d24b3879bfd3926328aa0504ea35e2097884eb78752fe": {
+    "describe": {
+      "columns": [],
+      "nullable": [],
+      "parameters": {
+        "Left": [
+          "Uuid",
+          "Uuid",
+          "Uuid",
+          "Int4",
+          "Numeric",
+          "Numeric",
+          "Text"
+        ]
+      }
+    },
+    "query": "INSERT INTO order_items (id, order_id, product_id, quantity, unit_price, line_total, product_name)\n                VALUES ($1, $2, $3, $4, $5, $6, $7)"
+  },
   "bebe683753ec41e6fad3881ea164e10d918aba468fe19996a3bd75c78bfe6c44": {
     "describe": {
       "columns": [],

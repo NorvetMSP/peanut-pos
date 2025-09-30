@@ -1,4 +1,5 @@
 use anyhow::Context;
+use bigdecimal::BigDecimal;
 use axum::{
     extract::FromRef,
     http::{
@@ -50,7 +51,7 @@ impl FromRef<AppState> for Arc<JwtVerifier> {
 struct PaymentCompletedEvent {
     pub order_id: Uuid,
     pub tenant_id: Uuid,
-    pub amount: f64,
+    pub amount: BigDecimal,
 }
 
 #[derive(serde::Deserialize, Debug)]
@@ -63,7 +64,7 @@ struct PaymentFailedEvent {
 
 #[derive(sqlx::FromRow)]
 struct OrderFinancialSummary {
-    total: Option<f64>,
+    total: Option<BigDecimal>,
     customer_id: Option<Uuid>,
     offline: bool,
     payment_method: String,
@@ -73,8 +74,8 @@ struct OrderFinancialSummary {
 struct OrderItemFinancialRow {
     product_id: Uuid,
     quantity: i32,
-    unit_price: f64,
-    line_total: f64,
+    unit_price: BigDecimal,
+    line_total: BigDecimal,
 }
 
 async fn health() -> &'static str {
@@ -363,7 +364,10 @@ async fn main() -> anyhow::Result<()> {
                                                                         "order_id": evt.order_id,
                                                                         "tenant_id": evt.tenant_id,
                                                                         "items": event_items,
-                                                                        "total": order_row.total.unwrap_or(0.0),
+                                                                        "total": order_row
+                                                                            .total
+                                                                            .clone()
+                                                                            .unwrap_or_else(|| BigDecimal::from(0)),
                                                                         "customer_id": order_row.customer_id,
                                                                         "offline": order_row.offline,
                                                                         "payment_method": order_row.payment_method,

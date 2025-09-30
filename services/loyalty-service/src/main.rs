@@ -227,6 +227,64 @@ async fn handle_completed_event(
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::{Executor, PgPool};
+    use rdkafka::producer::FutureProducer;
+
+    async fn test_pool() -> PgPool {
+        let url = std::env::var("TEST_DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://novapos:novapos@localhost:5432/novapos_test".into());
+        let pool = PgPool::connect(&url).await.expect("connect test db");
+        // Minimal schema for points table
+        pool.execute(
+            r#"CREATE TABLE IF NOT EXISTS loyalty_points (
+                customer_id UUID NOT NULL,
+                tenant_id UUID NOT NULL,
+                points INT NOT NULL DEFAULT 0,
+                PRIMARY KEY (customer_id, tenant_id)
+            )"#,
+        )
+        .await
+        .expect("create table");
+        pool
+    }
+
+    fn dummy_producer() -> FutureProducer {
+        // Use a local bootstrap that may not exist; we won't rely on send success in this test.
+        rdkafka::ClientConfig::new()
+            .set("bootstrap.servers", "localhost:9092")
+            .create()
+            .expect("create producer")
+    }
+
+    #[tokio::test]
+    async fn test_handle_completed_event_upserts_points() {
+        let pool = test_pool().await;
+        let producer = dummy_producer();
+        let customer_id = Uuid::new_v4();
+        let tenant_id = Uuid::new_v4();
+        let evt = CompletedEvent {
+            order_id: Uuid::new_v4(),
+            tenant_id,
+            total: 42.75,
+            customer_id: Some(customer_id),
+        };
+        handle_completed_event(&evt, customer_id, &pool, &producer).await;
+
+        let rec = sqlx::query!(
+            r#"SELECT points FROM loyalty_points WHERE customer_id = $1 AND tenant_id = $2"#,
+            customer_id,
+            tenant_id
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("fetch points");
+        assert!(rec.points > 0, "points should have been incremented");
+    }
+}
+
 async fn build_jwt_verifier_from_env() -> anyhow::Result<Arc<JwtVerifier>> {
     let issuer = env::var("JWT_ISSUER").context("JWT_ISSUER must be set")?;
     let audience = env::var("JWT_AUDIENCE").context("JWT_AUDIENCE must be set")?;
