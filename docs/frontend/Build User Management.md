@@ -586,14 +586,27 @@ Additionally, we will perform manual testing of the UI in multiple browsers to e
 
 By having this robust test suite, we can deploy the new features with confidence. And going forward, any changes to user management will be caught by these tests, ensuring we maintain the integrity of these critical admin functions.
 
-## Backend Implementation Update (2025-09-30)
+## Backend Implementation Update (2025-09-29)
 
 - Enabled `PUT /users/:user_id` and `POST /users/:user_id/reset-password` in auth-service so admins can edit accounts, toggle `is_active`, and issue password resets.
 - Added `PUT /customers/:id` in customer-service with tenant-aware validation plus encryption/hash management for updated contact info.
 - Verified existing migrations and updated SQLx metadata by running `cargo test` inside both services (integration suites that require embedded Postgres remain tagged `#[ignore]`).
+
+## Frontend Implementation Update (2025-10-02)
+
+- Added the manager-guarded CustomersPage route and navigation entry so admins/managers can search, edit, view audit history, and GDPR-delete customer profiles within the current tenant context.
+- Customer workflows now call the live PUT /customers/:id, POST /customers/:id/gdpr/delete, and GET /customers/:id/audit endpoints, updating in-memory state, surfacing success/error banners, and rendering an activity timeline for each customer.
+- Introduced Vitest + React Testing Library coverage for search/edit/delete/audit flows and a Playwright smoke path that stubs auth/customer APIs; run `npx playwright install` before `npm run test:e2e` to download browsers.
 
 ## Conclusion
 
 With the above implementation plan, NovaPOS will significantly enhance its user management system from an MVP-level feature to a more **complete, secure, and user-friendly module**. The backend changes introduce full lifecycle support (create/update/deactivate/reset) with proper audit logging and multi-tenant safeguards, while the frontend changes empower admins with an easy-to-use interface to manage employee accounts and customer profiles. These improvements close the identified gaps[[12]](https://github.com/datawrangler05/novapos/blob/7f7ec40e7568b98c9c7f4fae84e6c071d7b0230c/doc/analysis/MVP_Gaps.md#L73-L79) and align with the product's requirements for security and operability. Admin users will be able to confidently onboard employees, adjust their roles or access, troubleshoot login issues with password resets, and even maintain customer accounts - all within the Admin Portal, with a clear record of all actions taken.
 
 By implementing these changes, NovaPOS not only addresses immediate needs (like deactivating a departed employee's access), but also lays groundwork for future scalability: the audit trails and RBAC enforcement will support compliance audits, the architecture will support adding more account types or integrating with an identity provider if needed, and the consistent handling of multi-tenancy will facilitate onboarding many tenants securely. This plan ensures that user management in NovaPOS becomes a robust, enterprise-ready feature, rather than a limiting factor, as the platform grows.
+
+
+
+
+
+
+

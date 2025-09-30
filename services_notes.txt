@@ -635,7 +635,7 @@ $env:SECURITY_SUSPICIOUS_WEBHOOK_BEARER = ""
 docker compose up -d postgres kafka redis
 docker compose up -d --build auth-service
 
-# (Optional) make sure admin has an MFA secret so the login flow enforces a code
+#  make sure admin has an MFA secret so the login flow enforces a code
 docker compose exec -T postgres psql -U novapos -d novapos -c "UPDATE users SET mfa_secret='JBSWY3DPEHPK3PXP', mfa_enrolled_at=NOW(), mfa_failed_attempts=0 WHERE email='admin@novapos.local';"
 
 # Generate a current TOTP code for that secret (run right before you post /login) ---only last 30 seconds
