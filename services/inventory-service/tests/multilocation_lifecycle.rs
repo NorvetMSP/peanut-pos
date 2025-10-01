@@ -5,7 +5,7 @@ use uuid::Uuid;
 use reqwest::Client;
 use std::{env, time::Duration};
 use tokio::process::Command;
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
 use testcontainers::{runners::AsyncRunner, ContainerAsync, GenericImage};
 use testcontainers::core::WaitFor;
 
@@ -65,11 +65,35 @@ async fn reservation_expires_and_restocks() {
     // Best-effort migrate (if already applied it will be idempotent)
     // Optional: if migrations embedded: sqlx::migrate!("../../inventory-service/migrations").run(&pool).await.ok();
     // Insert legacy inventory
-    sqlx::query!("INSERT INTO inventory (product_id, tenant_id, quantity, threshold) VALUES ($1,$2,$3,$4)", product_id, tenant_id, 10, 5).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO inventory (product_id, tenant_id, quantity, threshold) VALUES ($1,$2,$3,$4)")
+        .bind(product_id)
+        .bind(tenant_id)
+        .bind(10)
+        .bind(5)
+        .execute(&pool)
+        .await
+        .unwrap();
     // Backfill default location (simulate migration 4005)
-    sqlx::query!("INSERT INTO locations (tenant_id, code, name, timezone) VALUES ($1,'DEFAULT','Default','UTC') ON CONFLICT DO NOTHING", tenant_id).execute(&pool).await.unwrap();
-    let loc = sqlx::query!("SELECT id FROM locations WHERE tenant_id = $1 AND code='DEFAULT'", tenant_id).fetch_one(&pool).await.unwrap().id;
-    sqlx::query!("INSERT INTO inventory_items (tenant_id, product_id, location_id, quantity, threshold) VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING", tenant_id, product_id, loc, 10, 5).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO locations (tenant_id, code, name, timezone) VALUES ($1,'DEFAULT','Default','UTC') ON CONFLICT DO NOTHING")
+        .bind(tenant_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let loc = sqlx::query("SELECT id FROM locations WHERE tenant_id = $1 AND code='DEFAULT'")
+        .bind(tenant_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+        .get::<uuid::Uuid,_>("id");
+    sqlx::query("INSERT INTO inventory_items (tenant_id, product_id, location_id, quantity, threshold) VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING")
+        .bind(tenant_id)
+        .bind(product_id)
+        .bind(loc)
+        .bind(10)
+        .bind(5)
+        .execute(&pool)
+        .await
+        .unwrap();
 
     // Prepare authenticated reservation creation via HTTP using a dev-signed JWT
     let order_id = Uuid::new_v4();
@@ -129,10 +153,23 @@ async fn reservation_expires_and_restocks() {
     assert!(saw_audit, "expected audit.events reservation.expired audit event");
 
     // Assert reservation expired
-    let active = sqlx::query!("SELECT count(*) as ct FROM inventory_reservations WHERE tenant_id=$1 AND product_id=$2 AND status='ACTIVE'", tenant_id, product_id).fetch_one(&pool).await.unwrap().ct.unwrap_or(0);
+    let active_row = sqlx::query("SELECT count(*) as ct FROM inventory_reservations WHERE tenant_id=$1 AND product_id=$2 AND status='ACTIVE'")
+        .bind(tenant_id)
+        .bind(product_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let active: i64 = active_row.get::<Option<i64>,_>("ct").unwrap_or(0);
     assert_eq!(active, 0, "active reservations should be zero after expiry");
     // Assert inventory restored
-    let qty = sqlx::query!("SELECT SUM(quantity) as q FROM inventory_items WHERE tenant_id=$1 AND product_id=$2", tenant_id, product_id).fetch_one(&pool).await.unwrap().q.unwrap_or(0);
+    let qty_row = sqlx::query("SELECT SUM(quantity) as q FROM inventory_items WHERE tenant_id=$1 AND product_id=$2")
+        .bind(tenant_id)
+        .bind(product_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let qty: i64 = qty_row.get::<Option<i64>,_>("q").unwrap_or(0);
+    let qty = qty as i32;
     assert_eq!(qty, 10, "quantity should be restored to 10 after expiration");
 
     let _ = child.kill().await; // cleanup
