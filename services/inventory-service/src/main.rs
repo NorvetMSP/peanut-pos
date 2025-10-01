@@ -15,7 +15,7 @@ use rdkafka::consumer::{Consumer, StreamConsumer};
 use rdkafka::producer::FutureProducer;
 use rdkafka::Message;
 use serde::Deserialize;
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
 use std::{env, net::SocketAddr, sync::Arc, time::Duration};
 use tokio::net::TcpListener;
 use tokio::time::{interval, MissedTickBehavior};
@@ -29,6 +29,7 @@ mod reservation_handlers;
 use reservation_handlers::{create_reservation, release_reservation};
 
 pub(crate) const DEFAULT_THRESHOLD: i32 = 5;
+pub(crate) const DEFAULT_RESERVATION_TTL_SECS: i64 = 900; // 15 minutes
 
 #[derive(Deserialize)]
 struct OrderCompletedEvent {
@@ -68,6 +69,12 @@ struct PaymentCompletedEvent {
 pub struct AppState {
     pub(crate) db: PgPool,
     pub(crate) jwt_verifier: Arc<JwtVerifier>,
+    #[allow(dead_code)]
+    pub(crate) multi_location_enabled: bool,
+    #[allow(dead_code)]
+    pub(crate) reservation_default_ttl: Duration,
+    #[allow(dead_code)]
+    pub(crate) reservation_expiry_sweep: Duration,
 }
 
 impl FromRef<AppState> for Arc<JwtVerifier> {
@@ -115,9 +122,27 @@ async fn main() -> anyhow::Result<()> {
         .create()
         .expect("failed to create kafka producer");
 
+    let multi_location_enabled = env::var("MULTI_LOCATION_ENABLED")
+        .ok()
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let reservation_default_ttl = env::var("RESERVATION_DEFAULT_TTL_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(Duration::from_secs(DEFAULT_RESERVATION_TTL_SECS as u64));
+    let reservation_expiry_sweep = env::var("RESERVATION_EXPIRY_SWEEP_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(Duration::from_secs(60));
+
     let state = AppState {
         db: db_pool.clone(),
         jwt_verifier,
+        multi_location_enabled,
+        reservation_default_ttl: reservation_default_ttl,
+        reservation_expiry_sweep: reservation_expiry_sweep,
     };
 
     let allowed_origins = [
@@ -153,6 +178,7 @@ async fn main() -> anyhow::Result<()> {
         .layer(cors);
 
     let db_for_consumer = db_pool.clone();
+    let multi_loc_for_consumer = state.multi_location_enabled;
     tokio::spawn(async move {
         let mut stream = consumer.stream();
         while let Some(message) = stream.next().await {
@@ -161,7 +187,7 @@ async fn main() -> anyhow::Result<()> {
                     let topic = m.topic();
                     if let Some(Ok(text)) = m.payload_view::<str>() {
                         if topic == "order.completed" {
-                            handle_order_completed(text, &db_for_consumer, &producer).await;
+                            handle_order_completed(text, &db_for_consumer, &producer, multi_loc_for_consumer).await;
                         } else if topic == "order.voided" {
                             handle_order_voided(text, &db_for_consumer).await;
                         } else if topic == "product.created" {
@@ -178,6 +204,9 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    // Spawn reservation expiration sweeper
+    spawn_reservation_sweeper(state.clone());
+
     let host = env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
     let port: u16 = env::var("PORT")
         .ok()
@@ -191,7 +220,7 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn handle_order_completed(text: &str, db: &PgPool, producer: &FutureProducer) {
+async fn handle_order_completed(text: &str, db: &PgPool, producer: &FutureProducer, multi_location_enabled: bool) {
     match serde_json::from_str::<OrderCompletedEvent>(text) {
         Ok(event) => {
             let OrderCompletedEvent {
@@ -215,59 +244,100 @@ async fn handle_order_completed(text: &str, db: &PgPool, producer: &FutureProduc
                 let quantity_delta = item.quantity;
                 let mut attempts = 0;
                 let mut latest: Option<(i32, i32)> = None;
-
-                loop {
-                    match sqlx::query!(
-                        "UPDATE inventory SET quantity = quantity - $1 WHERE product_id = $2 AND tenant_id = $3 RETURNING quantity, threshold",
-                        quantity_delta,
-                        product_id,
-                        tenant_id
+                if multi_location_enabled {
+                    // Use dynamic queries (query / query_as) to avoid sqlx compile-time validation failing before migrations.
+                    if let Ok(res_rows) = sqlx::query(
+                        "SELECT location_id, quantity FROM inventory_reservations WHERE order_id = $1 AND tenant_id = $2 AND product_id = $3"
                     )
-                    .fetch_optional(&mut *tx)
+                    .bind(order_id)
+                    .bind(tenant_id)
+                    .bind(product_id)
+                    .fetch_all(&mut *tx)
                     .await
                     {
-                        Ok(Some(row)) => {
-                            latest = Some((row.quantity, row.threshold));
-                            break;
+                        for r in res_rows.iter() {
+                            let loc_id: Option<Uuid> = r.get("location_id");
+                            let q: i32 = r.get("quantity");
+                            if let Some(loc) = loc_id {
+                                if let Err(err) = sqlx::query(
+                                    "UPDATE inventory_items SET quantity = quantity - $1, updated_at = NOW() WHERE tenant_id = $2 AND product_id = $3 AND location_id = $4"
+                                )
+                                .bind(q)
+                                .bind(tenant_id)
+                                .bind(product_id)
+                                .bind(loc)
+                                .execute(&mut *tx)
+                                .await {
+                                    tracing::error!(?err, product_id = %product_id, tenant_id = %tenant_id, location_id = %loc, "Failed to decrement inventory_items for completion");
+                                }
+                            }
                         }
-                        Ok(None) if attempts == 0 => {
-                            attempts += 1;
-                            if let Err(err) = sqlx::query!(
-                                "INSERT INTO inventory (product_id, tenant_id, quantity, threshold) VALUES ($1, $2, $3, $4) ON CONFLICT (product_id, tenant_id) DO NOTHING",
-                                product_id,
-                                tenant_id,
-                                0,
-                                DEFAULT_THRESHOLD
-                            )
-                            .execute(&mut *tx)
-                            .await
-                            {
+                    }
+                    if let Ok(row) = sqlx::query(
+                        "SELECT COALESCE(SUM(quantity),0) as quantity, MIN(threshold) as threshold FROM inventory_items WHERE tenant_id = $1 AND product_id = $2"
+                    )
+                    .bind(tenant_id)
+                    .bind(product_id)
+                    .fetch_one(&mut *tx)
+                    .await {
+                        let q: i64 = row.get("quantity");
+                        let th: Option<i32> = row.get::<Option<i32>, _>("threshold");
+                        if let Some(thr) = th { latest = Some((q as i32, thr)); }
+                    }
+                } else {
+                    loop {
+                        match sqlx::query!(
+                            "UPDATE inventory SET quantity = quantity - $1 WHERE product_id = $2 AND tenant_id = $3 RETURNING quantity, threshold",
+                            quantity_delta,
+                            product_id,
+                            tenant_id
+                        )
+                        .fetch_optional(&mut *tx)
+                        .await
+                        {
+                            Ok(Some(row)) => {
+                                latest = Some((row.quantity, row.threshold));
+                                break;
+                            }
+                            Ok(None) if attempts == 0 => {
+                                attempts += 1;
+                                if let Err(err) = sqlx::query!(
+                                    "INSERT INTO inventory (product_id, tenant_id, quantity, threshold) VALUES ($1, $2, $3, $4) ON CONFLICT (product_id, tenant_id) DO NOTHING",
+                                    product_id,
+                                    tenant_id,
+                                    0,
+                                    DEFAULT_THRESHOLD
+                                )
+                                .execute(&mut *tx)
+                                .await
+                                {
+                                    tracing::error!(
+                                        ?err,
+                                        product_id = %product_id,
+                                        tenant_id = %tenant_id,
+                                        "Failed to initialise inventory row before completion"
+                                    );
+                                    break;
+                                }
+                                continue;
+                            }
+                            Ok(None) => {
+                                tracing::warn!(
+                                    product_id = %product_id,
+                                    tenant_id = %tenant_id,
+                                    "Inventory record missing for completed order; skipping adjustment"
+                                );
+                                break;
+                            }
+                            Err(err) => {
                                 tracing::error!(
                                     ?err,
                                     product_id = %product_id,
                                     tenant_id = %tenant_id,
-                                    "Failed to initialise inventory row before completion"
+                                    "Failed to update inventory for completed order"
                                 );
                                 break;
                             }
-                            continue;
-                        }
-                        Ok(None) => {
-                            tracing::warn!(
-                                product_id = %product_id,
-                                tenant_id = %tenant_id,
-                                "Inventory record missing for completed order; skipping adjustment"
-                            );
-                            break;
-                        }
-                        Err(err) => {
-                            tracing::error!(
-                                ?err,
-                                product_id = %product_id,
-                                tenant_id = %tenant_id,
-                                "Failed to update inventory for completed order"
-                            );
-                            break;
                         }
                     }
                 }
@@ -528,4 +598,58 @@ fn spawn_jwks_refresh(verifier: Arc<JwtVerifier>) {
             }
         }
     });
+}
+
+fn spawn_reservation_sweeper(state: AppState) {
+    tokio::spawn(async move {
+        let sweep_interval = state.reservation_expiry_sweep;
+        loop {
+            tokio::time::sleep(sweep_interval).await;
+            if let Err(err) = expire_reservations(&state).await {
+                tracing::error!(?err, "Reservation sweeper error");
+            }
+        }
+    });
+}
+
+async fn expire_reservations(state: &AppState) -> anyhow::Result<()> {
+    // Update expired reservations and restock inventory for multi-location aware system.
+    let mut tx = state.db.begin().await?;
+    let rows = sqlx::query(
+        "UPDATE inventory_reservations SET status = 'EXPIRED' WHERE status = 'ACTIVE' AND expires_at IS NOT NULL AND expires_at < NOW() RETURNING product_id, tenant_id, location_id, quantity"
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+    if !rows.is_empty() {
+        for r in rows.iter() {
+            let product_id: Uuid = r.get("product_id");
+            let tenant_id: Uuid = r.get("tenant_id");
+            let quantity: i32 = r.get("quantity");
+            if state.multi_location_enabled {
+                let loc_id: Option<Uuid> = r.get("location_id");
+                if let Some(loc) = loc_id {
+                    let _ = sqlx::query(
+                        "UPDATE inventory_items SET quantity = quantity + $1, updated_at = NOW() WHERE tenant_id = $2 AND product_id = $3 AND location_id = $4"
+                    )
+                    .bind(quantity)
+                    .bind(tenant_id)
+                    .bind(product_id)
+                    .bind(loc)
+                    .execute(&mut *tx)
+                    .await;
+                }
+            } else {
+                let _ = sqlx::query(
+                    "UPDATE inventory SET quantity = quantity + $1 WHERE tenant_id = $2 AND product_id = $3"
+                )
+                .bind(quantity)
+                .bind(tenant_id)
+                .bind(product_id)
+                .execute(&mut *tx)
+                .await;
+            }
+        }
+    }
+    tx.commit().await?;
+    Ok(())
 }
