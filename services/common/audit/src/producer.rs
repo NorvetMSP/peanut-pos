@@ -1,22 +1,47 @@
 use crate::{AuditActor, AuditEvent, AuditError, AuditResult, AUDIT_EVENT_VERSION, AuditSeverity};
 use chrono::Utc;
-use rdkafka::producer::{FutureProducer, FutureRecord};
-use std::time::Duration;
 use uuid::Uuid;
+#[cfg(feature = "kafka")] use rdkafka::producer::{FutureProducer, FutureRecord};
+#[cfg(feature = "kafka")] use std::time::Duration;
 
-#[derive(Clone)]
-pub struct AuditProducerConfig {
-    pub topic: String,
+#[derive(Debug, Clone)]
+pub struct AuditProducerConfig { pub topic: String }
+
+#[async_trait::async_trait]
+pub trait AuditSink: Send + Sync + 'static {
+    async fn emit(&self, event: AuditEvent) -> AuditResult<()>;
 }
 
 #[derive(Clone)]
-pub struct AuditProducer {
-    inner: Option<FutureProducer>,
-    config: AuditProducerConfig,
+pub struct KafkaAuditSink { #[cfg(feature = "kafka")] pub(crate) inner: FutureProducer, pub(crate) config: AuditProducerConfig }
+
+impl KafkaAuditSink {
+    #[cfg(feature = "kafka")]
+    pub fn new(inner: FutureProducer, config: AuditProducerConfig) -> Self { Self { inner, config } }
 }
 
-impl AuditProducer {
-    pub fn new(inner: Option<FutureProducer>, config: AuditProducerConfig) -> Self { Self { inner, config } }
+#[cfg(feature = "kafka")]
+#[async_trait::async_trait]
+impl AuditSink for KafkaAuditSink {
+    async fn emit(&self, event: AuditEvent) -> AuditResult<()> {
+        let serialized = serde_json::to_vec(&event).map_err(|e| AuditError::Serialization(e.to_string()))?;
+        let key = event.tenant_id.to_string();
+        let record = FutureRecord::to(&self.config.topic).key(&key).payload(&serialized);
+        if let Err((e,_)) = self.inner.send(record, Duration::from_secs(5)).await { return Err(AuditError::Kafka(e.to_string())); }
+        Ok(())
+    }
+}
+
+pub struct NoopAuditSink;
+
+#[async_trait::async_trait]
+impl AuditSink for NoopAuditSink { async fn emit(&self, _event: AuditEvent) -> AuditResult<()> { Ok(()) } }
+
+#[derive(Clone)]
+pub struct AuditProducer<S: AuditSink> { sink: S }
+
+impl<S: AuditSink> AuditProducer<S> {
+    pub fn new(sink: S) -> Self { Self { sink } }
 
     pub async fn emit(
         &self,
@@ -46,17 +71,9 @@ impl AuditProducer {
             payload,
             meta,
         };
-        let Some(producer) = &self.inner else { return Err(AuditError::NotConfigured); };
-        let serialized = serde_json::to_vec(&event).map_err(|e| AuditError::Serialization(e.to_string()))?;
-        let key = event.tenant_id.to_string();
-        let record = FutureRecord::to(&self.config.topic)
-            .key(&key)
-            .payload(&serialized);
-        if let Err((e,_)) = producer.send(record, Duration::from_secs(5)).await { return Err(AuditError::Kafka(e.to_string())); }
+        self.sink.emit(event.clone()).await?;
         Ok(event)
     }
-
-    pub fn dummy(topic: &str) -> Self { Self { inner: None, config: AuditProducerConfig { topic: topic.to_string() } } }
 }
 
 pub fn extract_actor_from_headers(headers: &axum::http::HeaderMap, claims_raw: &serde_json::Value, subject: uuid::Uuid) -> AuditActor {

@@ -907,12 +907,14 @@ dependencies = [
 name = "common-audit"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "axum",
  "chrono",
  "rdkafka",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
+ "tokio",
  "tracing",
  "uuid",
 ]
@@ -2861,6 +2863,7 @@ dependencies = [
  "common-audit",
  "common-auth",
  "common-money",
+ "common-security",
  "futures-util",
  "hyper 1.7.0",
  "rdkafka",
@@ -3228,6 +3231,7 @@ dependencies = [
  "common-audit",
  "common-auth",
  "common-money",
+ "common-security",
  "hyper 1.7.0",
  "rdkafka",
  "serde",

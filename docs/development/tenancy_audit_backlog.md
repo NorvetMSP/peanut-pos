@@ -1,0 +1,104 @@
+# Tenancy & Audit Unification Backlog
+
+Source-of-truth tracker derived from MVP Gap Build doc and option pathways.
+
+## Tracking Model
+Each work item has an ID `TA-<Category><Sequence>`.
+
+Categories:
+
+- FND: Foundation / cleanup
+- ROL: Rollout to additional services
+- AUD: Audit platform (producer, consumer, search, retention, redaction)
+- PERF: Performance / reliability
+- POL: Policy / authorization evolution
+- OPS: Observability / tooling
+- DOC: Documentation
+- FUT: Research / future evaluation
+
+Status: Planned | In-Progress | Done | Blocked | Deferred
+
+## RACI (Lightweight)
+
+- Owner: primary engineer
+- Approver: tech lead
+- Consulted: security, data stakeholders
+- Informed: frontend, analytics teams
+
+## Dashboard Metrics (Planned)
+
+- audit_emit_latency_p95 (ms)
+- audit_queue_depth
+- audit_events_ingested_total
+- audit_events_redacted_total
+- audit_coverage_ratio
+- auth_regression_incidents (per sprint)
+
+## Items
+
+| ID | Title | Category | Status | Depends | Notes |
+|----|-------|----------|--------|---------|-------|
+| TA-FND-1 | Remove legacy role constants & helpers | FND | Planned | — | Delete unused ensure_role patterns |
+| TA-FND-2 | Add trace_id auto-generation in extractor | FND | Planned | — | Generate UUID if header absent |
+| TA-ROL-1 | Apply SecurityCtxExtractor to inventory-service | ROL | Planned | TA-FND-1 | Inventory mutating endpoints |
+| TA-ROL-2 | Apply SecurityCtxExtractor to loyalty-service | ROL | Planned | TA-FND-1 | Align role mapping |
+| TA-ROL-3 | Apply SecurityCtxExtractor to payment-service | ROL | Planned | TA-FND-1 | Pre-req payment intent model |
+| TA-ROL-4 | Apply SecurityCtxExtractor to customer-service | ROL | Planned | TA-FND-1 | Remove per-handler tenant parsing |
+| TA-ROL-5 | Apply SecurityCtxExtractor to integration-gateway | ROL | Planned | TA-FND-1 | Propagate trace & roles downstream |
+| TA-FND-3 | Unified auth error JSON shape | FND | Planned | TA-FND-1 | {code,missing_role,trace_id} |
+| TA-AUD-1 | Buffered AuditProducer (async channel) | AUD | Planned | TA-FND-2 | Reduce handler latency |
+| TA-OPS-1 | Metrics: queue length & emit failures | OPS | Planned | TA-AUD-1 | Prometheus exporter |
+| TA-AUD-2 | Audit consumer + Postgres read model | AUD | Planned | TA-AUD-1 | MVP storage for queries |
+| TA-AUD-3 | /audit/events query endpoint | AUD | Planned | TA-AUD-2 | Filters: tenant, actor, action, status |
+| TA-AUD-4 | Coverage scanner tool | AUD | Planned | TA-AUD-1 | Detect missing emits |
+| TA-AUD-5 | Retention policy (TTL purge job) | AUD | Planned | TA-AUD-2 | Configurable default 30d |
+| TA-AUD-6 | Redaction tagging + masking layer | AUD | Planned | TA-AUD-2 | Field sensitivity taxonomy |
+| TA-AUD-7 | Role-based redacted view | AUD | Planned | TA-AUD-6 | Hide PII from non-admin roles |
+| TA-PERF-1 | Outbox pattern for audit durability | PERF | Planned | TA-AUD-2 | Optional fallback when Kafka down |
+| TA-PERF-2 | Backpressure metrics & alerts | PERF | Planned | TA-AUD-1 | Alert on queue saturation |
+| TA-POL-1 | Expanded role model (Cashier vs Support) | POL | Planned | TA-ROL-* | Enum refinement |
+| TA-POL-2 | Policy engine evaluation spike | POL | Planned | TA-POL-1 | Cedar/Oso assessment |
+| TA-DOC-1 | Developer guide: emitting audit event | DOC | Planned | TA-AUD-1 | CONTRIBUTING snippet |
+| TA-DOC-2 | Architecture doc: audit pipeline phases | DOC | Planned | TA-AUD-2 | Sequence & flow diagrams |
+| TA-OPS-2 | Schema compliance linter / macro | OPS | Planned | TA-AUD-1 | Build-time validation |
+| TA-AUD-8 | Multi-sink support (Kafka + Search) | AUD | Deferred | TA-AUD-3 | Latency-driven follow-on |
+| TA-FUT-1 | Search backend evaluation | FUT | Planned | TA-AUD-2 | PG vs ES vs ClickHouse bench |
+| TA-FUT-2 | Tenant isolation study (RLS vs shared) | FUT | Planned | — | Decision doc |
+
+## Initial Execution Order (Sprint 1–2)
+
+1. TA-FND-1, TA-FND-2
+2. TA-AUD-1
+3. TA-OPS-1 & TA-AUD-4 (observability + coverage)
+4. TA-AUD-2 then TA-AUD-3
+5. Begin TA-ROL-1 / TA-ROL-2 post buffered stability
+
+## Definition of Done
+
+- Code merged + tests
+- Docs updated (if user/dev facing)
+- Metrics added (if observability-related)
+- Change log entry in `MVP_GAP_BUILD.md` for Partial→Done transitions
+
+## Coverage Scanner Concept (TA-AUD-4)
+
+Heuristic: scan handler source for verbs (create|update|delete|refund|void|adjust). Flag absence of `audit_producer.emit(`. Allow `// audit:ignore` suppression.
+
+## Risk Mitigation Highlights
+
+- Channel overflow: drop counter + sample warn log
+- Consumer lag: expose `audit_consumer_lag_seconds`
+- Redaction regression: table-driven before/after tests
+
+## Open Questions
+
+- Cross-tenant (super-admin) search needed in MVP? (Assumed: No)
+- Default retention period (Assumed: 30 days) configurable per tenant?
+- Severity taxonomy expansion (Warn, Error, Security) now or later?
+
+## Update Cadence
+
+Weekly backlog status refresh; per PR: link item ID + update change log.
+
+---
+(Generated baseline backlog; refine IDs or sequencing as needed.)

@@ -5,9 +5,8 @@ use axum::{
     Json,
 };
 use chrono::{DateTime, Utc};
-use common_auth::{
-    ensure_role, tenant_id_from_request, AuthContext, ROLE_ADMIN, ROLE_MANAGER, ROLE_SUPER_ADMIN,
-};
+use common_auth::{AuthContext, ROLE_ADMIN, ROLE_MANAGER, ROLE_SUPER_ADMIN};
+use common_security::{SecurityCtxExtractor, ensure_role as ensure_role_new, Role};
 use common_audit::{extract_actor_from_headers, AuditActor as SharedAuditActor};
 use rdkafka::producer::FutureRecord;
 use serde::ser::{SerializeStruct, Serializer};
@@ -56,7 +55,7 @@ pub struct AuditActor { // local representation for legacy DB audit table
     pub email: Option<String>,
 }
 
-const PRODUCT_WRITE_ROLES: &[&str] = &[ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_MANAGER];
+const PRODUCT_WRITE_ROLES: &[&str] = &[ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_MANAGER]; // legacy; to be removed once all handlers migrated
 
 fn extract_actor(headers: &HeaderMap, auth: &AuthContext) -> AuditActor {
     let shared = extract_actor_from_headers(headers, &auth.claims.raw, auth.claims.subject);
@@ -116,14 +115,16 @@ impl Serialize for Product {
 }
 pub async fn update_product(
     State(state): State<AppState>,
-    auth: AuthContext,
-    headers: HeaderMap,
+    SecurityCtxExtractor(sec): SecurityCtxExtractor,
     Path(product_id): axum::extract::Path<Uuid>,
     Json(upd): Json<UpdateProduct>,
 ) -> Result<Json<Product>, (StatusCode, String)> {
-    ensure_role(&auth, PRODUCT_WRITE_ROLES)?;
-    let tenant_id = tenant_id_from_request(&headers, &auth)?;
-    let actor = extract_actor(&headers, &auth);
+    // Temporary dual enforcement: old roles + new context roles
+    if !sec.roles.iter().any(|r| matches!(r, Role::Admin | Role::Manager)) {
+        return Err((StatusCode::FORBIDDEN, "missing required role".into()));
+    }
+    let tenant_id = sec.tenant_id;
+    let actor = AuditActor { id: sec.actor.id, name: sec.actor.name.clone(), email: sec.actor.email.clone() };
     let existing = query_as::<_, Product>(
     "SELECT id, tenant_id, name, price, description, image, active FROM products WHERE id = $1 AND tenant_id = $2",
     )
@@ -155,7 +156,7 @@ pub async fn update_product(
         "after": product_to_value(&product),
     });
     record_product_audit(&state.db, &actor, product.id, tenant_id, "updated", changes.clone()).await;
-    if let Some(audit) = &state.audit_producer { let _ = audit.emit(tenant_id, shared(&actor), "product", Some(product.id), "updated", changes, json!({"source":"product-service"})).await; }
+    if let Some(audit) = &state.audit_producer { let _ = audit.emit(tenant_id, shared(&actor), "product", Some(product.id), "updated", "product-service", common_audit::AuditSeverity::Info, None, changes, json!({"source":"product-service"})).await; }
     Ok(Json(product))
 }
 
@@ -181,13 +182,14 @@ pub struct Product {
 
 pub async fn create_product(
     State(state): State<AppState>,
-    auth: AuthContext,
-    headers: HeaderMap,
+    SecurityCtxExtractor(sec): SecurityCtxExtractor,
     Json(new_product): Json<NewProduct>,
 ) -> Result<Json<Product>, (StatusCode, String)> {
-    ensure_role(&auth, PRODUCT_WRITE_ROLES)?;
-    let tenant_id = tenant_id_from_request(&headers, &auth)?;
-    let actor = extract_actor(&headers, &auth);
+    if !sec.roles.iter().any(|r| matches!(r, Role::Admin | Role::Manager)) {
+        return Err((StatusCode::FORBIDDEN, "missing required role".into()));
+    }
+    let tenant_id = sec.tenant_id;
+    let actor = AuditActor { id: sec.actor.id, name: sec.actor.name.clone(), email: sec.actor.email.clone() };
 
     let product_id = Uuid::new_v4();
     let NewProduct {
@@ -217,7 +219,7 @@ pub async fn create_product(
         "after": product_to_value(&product),
     });
     record_product_audit(&state.db, &actor, product.id, tenant_id, "created", changes.clone()).await;
-    if let Some(audit) = &state.audit_producer { let _ = audit.emit(tenant_id, shared(&actor), "product", Some(product.id), "created", json!({"after": product_to_value(&product)}), json!({"source":"product-service"})).await; }
+    if let Some(audit) = &state.audit_producer { let _ = audit.emit(tenant_id, shared(&actor), "product", Some(product.id), "created", "product-service", common_audit::AuditSeverity::Info, None, json!({"after": product_to_value(&product)}), json!({"source":"product-service"})).await; }
 
     let event = serde_json::json!({
         "product_id": product.id,
@@ -243,10 +245,9 @@ pub async fn create_product(
 
 pub async fn list_products(
     State(state): State<AppState>,
-    auth: AuthContext,
-    headers: HeaderMap,
+    SecurityCtxExtractor(sec): SecurityCtxExtractor,
 ) -> Result<Json<Vec<Product>>, (StatusCode, String)> {
-    let tenant_id = tenant_id_from_request(&headers, &auth)?;
+    let tenant_id = sec.tenant_id;
 
     let products = query_as::<_, Product>(
         "SELECT id, tenant_id, name, price, description, image, active FROM products WHERE tenant_id = $1",
@@ -266,13 +267,14 @@ pub async fn list_products(
 
 pub async fn delete_product(
     State(state): State<AppState>,
-    auth: AuthContext,
-    headers: HeaderMap,
+    SecurityCtxExtractor(sec): SecurityCtxExtractor,
     Path(product_id): axum::extract::Path<Uuid>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    ensure_role(&auth, PRODUCT_WRITE_ROLES)?;
-    let tenant_id = tenant_id_from_request(&headers, &auth)?;
-    let actor = extract_actor(&headers, &auth);
+    if !sec.roles.iter().any(|r| matches!(r, Role::Admin | Role::Manager)) {
+        return Err((StatusCode::FORBIDDEN, "missing required role".into()));
+    }
+    let tenant_id = sec.tenant_id;
+    let actor = AuditActor { id: sec.actor.id, name: sec.actor.name.clone(), email: sec.actor.email.clone() };
 
     let existing = query_as::<_, Product>(
         "SELECT id, tenant_id, name, price, description, image, active FROM products WHERE id = $1 AND tenant_id = $2",
@@ -312,7 +314,7 @@ pub async fn delete_product(
         "before": product_to_value(&existing),
     });
     record_product_audit(&state.db, &actor, existing.id, tenant_id, "deleted", changes.clone()).await;
-    if let Some(audit) = &state.audit_producer { let _ = audit.emit(tenant_id, shared(&actor), "product", Some(existing.id), "deleted", json!({"before": product_to_value(&existing)}), json!({"source":"product-service"})).await; }
+    if let Some(audit) = &state.audit_producer { let _ = audit.emit(tenant_id, shared(&actor), "product", Some(existing.id), "deleted", "product-service", common_audit::AuditSeverity::Info, None, json!({"before": product_to_value(&existing)}), json!({"source":"product-service"})).await; }
 
     let event = serde_json::json!({
         "product_id": product_id,
@@ -352,13 +354,14 @@ pub struct ProductAuditEntry {
 
 pub async fn list_product_audit(
     State(state): State<AppState>,
-    auth: AuthContext,
-    headers: HeaderMap,
+    SecurityCtxExtractor(sec): SecurityCtxExtractor,
     Path(product_id): axum::extract::Path<Uuid>,
     Query(params): Query<ProductAuditQuery>,
 ) -> Result<Json<Vec<ProductAuditEntry>>, (StatusCode, String)> {
-    ensure_role(&auth, PRODUCT_WRITE_ROLES)?;
-    let tenant_id = tenant_id_from_request(&headers, &auth)?;
+    if !sec.roles.iter().any(|r| matches!(r, Role::Admin | Role::Manager)) {
+        return Err((StatusCode::FORBIDDEN, "missing required role".into()));
+    }
+    let tenant_id = sec.tenant_id;
 
     let mut limit = params.limit.unwrap_or(10);
     if limit < 1 {

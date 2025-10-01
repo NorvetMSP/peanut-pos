@@ -5,11 +5,9 @@ use axum::{
     Json,
 };
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
-use common_auth::{
-    ensure_role, tenant_id_from_request, AuthContext, ROLE_ADMIN, ROLE_CASHIER, ROLE_MANAGER,
-    ROLE_SUPER_ADMIN,
-};
-use common_audit::extract_actor_from_headers;
+use common_auth::AuthContext; // retained only for access to bearer token for downstream service calls
+use common_security::{SecurityCtxExtractor, Role};
+use common_audit; // for AuditSeverity
 use serde_json::json;
 use rdkafka::producer::FutureRecord;
 use reqwest::Client;
@@ -25,10 +23,8 @@ use uuid::Uuid;
 
 use crate::AppState;
 
-const ORDER_WRITE_ROLES: &[&str] = &[ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_MANAGER, ROLE_CASHIER];
-const ORDER_REFUND_ROLES: &[&str] = &[ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_MANAGER];
-const ORDER_VOID_ROLES: &[&str] = &[ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_MANAGER];
-const ORDER_VIEW_ROLES: &[&str] = &[ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_MANAGER, ROLE_CASHIER];
+// Legacy role string constants removed; unified role enforcement now via common-security Role enum.
+// Mapping note: prior ROLE_CASHIER is approximated by Role::Support until a dedicated Cashier role is introduced.
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct OrderItem {
@@ -384,13 +380,18 @@ async fn insert_order_items(
 
 pub async fn create_order(
     State(state): State<AppState>,
-    auth: AuthContext,
-    headers: HeaderMap,
+    SecurityCtxExtractor(sec): SecurityCtxExtractor,
+    auth: AuthContext, // kept only for propagating bearer token to inventory-service
     Json(new_order): Json<NewOrder>,
 ) -> Result<Json<Order>, (StatusCode, String)> {
-    ensure_role(&auth, ORDER_WRITE_ROLES)?;
-    let tenant_id = tenant_id_from_request(&headers, &auth)?;
-    let audit_actor = extract_actor_from_headers(&headers, &auth.claims.raw, auth.claims.subject);
+    if !sec
+        .roles
+        .iter()
+        .any(|r| matches!(r, Role::Admin | Role::Manager | Role::Support))
+    {
+        return Err((StatusCode::FORBIDDEN, "missing required role".into()));
+    }
+    let tenant_id = sec.tenant_id;
 
     if new_order.items.is_empty() {
         return Err((
@@ -638,20 +639,34 @@ pub async fn create_order(
 
     if let Some(audit) = &state.audit_producer {
         let changes = json!({"after": {"order_id": order.id, "status": order.status, "total": order.total.inner()}});
-        let _ = audit.emit(tenant_id, audit_actor, "order", Some(order.id), "created", changes, json!({"source":"order-service"})).await;
+        let _ = audit
+            .emit(
+                tenant_id,
+                sec.actor.clone(),
+                "order",
+                Some(order.id),
+                "created",
+                "order-service",
+                common_audit::AuditSeverity::Info,
+                None,
+                changes,
+                json!({"source":"order-service"}),
+            )
+            .await;
     }
     Ok(Json(order))
 }
 
 pub async fn void_order(
     State(state): State<AppState>,
-    auth: AuthContext,
+    SecurityCtxExtractor(sec): SecurityCtxExtractor,
     Path(order_id): Path<Uuid>,
-    headers: HeaderMap,
     Json(req): Json<VoidOrderRequest>,
 ) -> Result<Json<Order>, (StatusCode, String)> {
-    ensure_role(&auth, ORDER_VOID_ROLES)?;
-    let tenant_id = tenant_id_from_request(&headers, &auth)?;
+    if !sec.roles.iter().any(|r| matches!(r, Role::Admin | Role::Manager)) {
+        return Err((StatusCode::FORBIDDEN, "missing required role".into()));
+    }
+    let tenant_id = sec.tenant_id;
 
     let void_reason = req
         .reason
@@ -771,17 +786,39 @@ pub async fn void_order(
         tracing::error!("Failed to send order.voided: {:?}", err);
     }
 
+    if let Some(audit) = &state.audit_producer {
+        let changes = json!({
+            "order_id": updated_order.id,
+            "before": {"status": "PENDING"},
+            "after": {"status": "VOIDED", "reason": void_reason},
+        });
+        let _ = audit
+            .emit(
+                tenant_id,
+                sec.actor.clone(),
+                "order",
+                Some(updated_order.id),
+                "voided",
+                "order-service",
+                common_audit::AuditSeverity::Info,
+                None,
+                changes,
+                json!({"source":"order-service"}),
+            )
+            .await;
+    }
     Ok(Json(updated_order))
 }
 
 pub async fn refund_order(
     State(state): State<AppState>,
-    auth: AuthContext,
-    headers: HeaderMap,
+    SecurityCtxExtractor(sec): SecurityCtxExtractor,
     Json(req): Json<RefundRequest>,
 ) -> Result<Json<Order>, (StatusCode, String)> {
-    ensure_role(&auth, ORDER_REFUND_ROLES)?;
-    let tenant_id = tenant_id_from_request(&headers, &auth)?;
+    if !sec.roles.iter().any(|r| matches!(r, Role::Admin | Role::Manager)) {
+        return Err((StatusCode::FORBIDDEN, "missing required role".into()));
+    }
+    let tenant_id = sec.tenant_id;
 
     if req.items.is_empty() {
         return Err((
@@ -1133,17 +1170,44 @@ pub async fn refund_order(
         tracing::error!("Failed to send order.completed (refund): {:?}", err);
     }
 
+    if let Some(audit) = &state.audit_producer {
+        let changes = json!({
+            "order_id": updated_order.id,
+            "return_id": return_id,
+            "refund_total": refund_total,
+            "new_status": updated_order.status,
+        });
+        let _ = audit
+            .emit(
+                tenant_id,
+                sec.actor.clone(),
+                "order",
+                Some(updated_order.id),
+                "refunded",
+                "order-service",
+                common_audit::AuditSeverity::Info,
+                None,
+                changes,
+                json!({"source":"order-service"}),
+            )
+            .await;
+    }
     Ok(Json(updated_order))
 }
 
 pub async fn list_orders(
     State(state): State<AppState>,
-    auth: AuthContext,
-    headers: HeaderMap,
+    SecurityCtxExtractor(sec): SecurityCtxExtractor,
     Query(params): Query<ListOrdersParams>,
 ) -> Result<Json<Vec<Order>>, (StatusCode, String)> {
-    ensure_role(&auth, ORDER_VIEW_ROLES)?;
-    let tenant_id = tenant_id_from_request(&headers, &auth)?;
+    if !sec
+        .roles
+        .iter()
+        .any(|r| matches!(r, Role::Admin | Role::Manager | Role::Support))
+    {
+        return Err((StatusCode::FORBIDDEN, "missing required role".into()));
+    }
+    let tenant_id = sec.tenant_id;
 
     let limit = params.limit.unwrap_or(50).clamp(1, 200);
     let offset = params.offset.unwrap_or(0).max(0);
@@ -1275,12 +1339,17 @@ pub async fn list_orders(
 
 pub async fn list_returns(
     State(state): State<AppState>,
-    auth: AuthContext,
-    headers: HeaderMap,
+    SecurityCtxExtractor(sec): SecurityCtxExtractor,
     Query(params): Query<ListReturnsParams>,
 ) -> Result<Json<Vec<ReturnSummary>>, (StatusCode, String)> {
-    ensure_role(&auth, ORDER_VIEW_ROLES)?;
-    let tenant_id = tenant_id_from_request(&headers, &auth)?;
+    if !sec
+        .roles
+        .iter()
+        .any(|r| matches!(r, Role::Admin | Role::Manager | Role::Support))
+    {
+        return Err((StatusCode::FORBIDDEN, "missing required role".into()));
+    }
+    let tenant_id = sec.tenant_id;
 
     let limit = params.limit.unwrap_or(50).clamp(1, 200);
     let offset = params.offset.unwrap_or(0).max(0);
@@ -1432,23 +1501,33 @@ async fn fetch_order_detail(
 
 pub async fn get_order(
     State(state): State<AppState>,
-    auth: AuthContext,
+    SecurityCtxExtractor(sec): SecurityCtxExtractor,
     Path(order_id): Path<Uuid>,
-    headers: HeaderMap,
 ) -> Result<Json<OrderDetail>, (StatusCode, String)> {
-    ensure_role(&auth, ORDER_VIEW_ROLES)?;
-    let tenant_id = tenant_id_from_request(&headers, &auth)?;
+    if !sec
+        .roles
+        .iter()
+        .any(|r| matches!(r, Role::Admin | Role::Manager | Role::Support))
+    {
+        return Err((StatusCode::FORBIDDEN, "missing required role".into()));
+    }
+    let tenant_id = sec.tenant_id;
     let detail = fetch_order_detail(&state, tenant_id, order_id).await?;
     Ok(Json(detail))
 }
 pub async fn get_order_receipt(
     State(state): State<AppState>,
-    auth: AuthContext,
+    SecurityCtxExtractor(sec): SecurityCtxExtractor,
     Path(order_id): Path<Uuid>,
-    headers: HeaderMap,
 ) -> Result<Response, (StatusCode, String)> {
-    ensure_role(&auth, ORDER_VIEW_ROLES)?;
-    let tenant_id = tenant_id_from_request(&headers, &auth)?;
+    if !sec
+        .roles
+        .iter()
+        .any(|r| matches!(r, Role::Admin | Role::Manager | Role::Support))
+    {
+        return Err((StatusCode::FORBIDDEN, "missing required role".into()));
+    }
+    let tenant_id = sec.tenant_id;
     let detail = fetch_order_detail(&state, tenant_id, order_id).await?;
 
     let mut body = String::new();
@@ -1513,11 +1592,12 @@ pub async fn get_order_receipt(
 }
 pub async fn clear_offline_orders(
     State(state): State<AppState>,
-    auth: AuthContext,
-    headers: HeaderMap,
+    SecurityCtxExtractor(sec): SecurityCtxExtractor,
 ) -> Result<Json<ClearOfflineResponse>, (StatusCode, String)> {
-    ensure_role(&auth, ORDER_REFUND_ROLES)?;
-    let tenant_id = tenant_id_from_request(&headers, &auth)?;
+    if !sec.roles.iter().any(|r| matches!(r, Role::Admin | Role::Manager)) {
+        return Err((StatusCode::FORBIDDEN, "missing required role".into()));
+    }
+    let tenant_id = sec.tenant_id;
 
     let result = sqlx::query!(
         r#"DELETE FROM orders WHERE tenant_id = $1 AND offline = TRUE"#,

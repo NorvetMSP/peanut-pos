@@ -39,8 +39,8 @@ Legend: ✅ Done | 🌓 Partial | ⛔ Missing
 | C Admin | Tenant onboarding workflow | 🌓 | `auth-service/src/tenant_handlers.rs` | Need provisioning hooks |
 | C Admin | Global audit views | ⛔ | — | Audit search API + UI |
 | D Security | Central tenancy middleware | 🌓 | Duplicate guards across services | Consolidate into shared crate |
-| D Security | Consistent RBAC enforcement | 🌓 | Product/customer handlers | Audit coverage uneven |
-| D Security | Unified audit pipeline | 🌓 | `docs/security/security_plan.txt` | Wire producer/consumer across services |
+| D Security | Consistent RBAC enforcement | 🌓 | Product & Order services now on `common-security` | Migrate remaining services (inventory, loyalty, payment, auth refactor) |
+| D Security | Unified audit pipeline | 🌓 | `common-audit` producer in product & order services | Add remaining services + consumer/search API |
 | D Security | GDPR/retention (non-customer) | ⛔ | — | Extend tombstones, purge jobs |
 | D Security | Network segmentation | ⛔ | `docker-compose.yml` flat network | Define ingress/egress profiles |
 | D Security | Timezone/reporting strategy | ⛔ | — | Store tz + conversion utils |
@@ -188,9 +188,30 @@ Legend: Done = implemented & exercised, Partial = foundations exist but gaps / b
 
 ### Epic: Tenancy & Audit Unification
 
-- Extract shared tenancy/RBAC crate; apply to 2 pilot services.
-- Introduce audit producer wrapper; instrument product + order mutations.
-- Add global audit search backend route scaffold.
+Status: Phase 1 foundations in place (crate extraction, dual-service adoption, structured event schema, sink abstraction). Search/consumer layer deferred to Phase 2.
+
+Delivered (Phase 1):
+
+- Shared security context crate (`services/common/security`): unified tenant_id, actor, roles, trace propagation.
+- Audit event schema v1: event_version, event_id (UUID), severity, source_service, trace_id, payload/meta separation.
+- AuditSink abstraction with `KafkaAuditSink` (feature-gated) and `NoopAuditSink` for test isolation.
+- Product-service & order-service migrated to `SecurityCtxExtractor` (handlers now enforce roles via `Role` enum; removed legacy per-file constants in order-service; product-service cleanup pending unused legacy helpers removal).
+- Audit emissions added for product CRUD and order create/void/refund events.
+
+Pending (Phase 2 / Next Sprints):
+
+- Extend security context usage to remaining services (inventory, loyalty, payment, integration-gateway, customer, auth modernization).
+- Implement audit consumer & indexing service (persist to analytical store / searchable index) + REST query (`/audit/events`).
+- Role model expansion (distinct Cashier vs Support, granular inventory adjustment roles).
+- Redaction & retention policies (sensitive fields masking, TTL jobs) linked to GDPR roadmap.
+- Global audit search UI (admin portal) with filters (actor, action, entity, severity, date).
+- Cross-service correlation fields (propagate trace_id automatically from incoming request spans).
+
+Risks / Considerations:
+
+- Need to remove remaining legacy role helpers to avoid drift.
+- Kafka backpressure & batching strategy (currently synchronous fire-and-forget; move to buffered channel + backpressure metrics).
+- Future multi-sink support (e.g., direct OpenSearch sink) can extend `AuditSink` without schema churn.
 
 ### Epic: Offline Replay Validation
 
@@ -306,6 +327,7 @@ Legend: Done = implemented & exercised, Partial = foundations exist but gaps / b
 | 2025-10-01 | INV-ML-1 | Per-location inventory model | ⛔→✅ | Migrations + handlers + aggregation queries |
 | 2025-10-01 | INV-ML-2 | Reservation lifecycle (expiration) | 🌓→✅ | TTL + sweeper + audit + events |
 | 2025-10-01 | INV-ML-3 | Low-stock alerts & audit | ⛔→🌓 | Event emission implemented; UI pending |
+| 2025-10-01 | SEC-AUD-1 | Tenancy & audit foundations | ⛔→🌓 | Added common-security, audit schema v1, sink abstraction, product+order integration |
 
 ## 8. Open Questions / Decisions To Record
 

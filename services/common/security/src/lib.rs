@@ -4,4 +4,4 @@ pub mod roles;
 
 pub use context::{SecurityContext, SecurityCtxExtractor};
 pub use error::SecurityError;
-pub use roles::{ensure_role, ensure_any_role};
+pub use roles::{ensure_role, ensure_any_role, Role};

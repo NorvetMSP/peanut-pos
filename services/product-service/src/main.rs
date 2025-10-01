@@ -32,7 +32,7 @@ pub struct AppState {
     pub(crate) db: PgPool,
     pub(crate) kafka_producer: FutureProducer,
     pub(crate) jwt_verifier: Arc<JwtVerifier>,
-    pub(crate) audit_producer: Option<common_audit::AuditProducer>,
+    pub(crate) audit_producer: Option<common_audit::AuditProducer<common_audit::KafkaAuditSink>>,
 }
 
 impl FromRef<AppState> for Arc<JwtVerifier> {
@@ -70,10 +70,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Build application state
     let audit_topic = env::var("AUDIT_TOPIC").unwrap_or_else(|_| "audit.events".to_string());
-    let audit_producer = Some(common_audit::AuditProducer::new(
-        Some(kafka_producer.clone()),
-        common_audit::AuditProducerConfig { topic: audit_topic.clone() },
-    ));
+    let audit_producer = Some(common_audit::AuditProducer::new(common_audit::KafkaAuditSink::new(kafka_producer.clone(), common_audit::AuditProducerConfig { topic: audit_topic.clone() })));
     tracing::info!(topic = %audit_topic, "Audit producer initialized");
     let state = AppState { db, kafka_producer, jwt_verifier, audit_producer };
 

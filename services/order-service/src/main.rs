@@ -41,7 +41,7 @@ pub struct AppState {
     pub jwt_verifier: Arc<JwtVerifier>,
     pub http_client: Client,
     pub inventory_base_url: String,
-    pub audit_producer: Option<common_audit::AuditProducer>,
+    pub audit_producer: Option<common_audit::AuditProducer<common_audit::KafkaAuditSink>>,
 }
 
 impl FromRef<AppState> for Arc<JwtVerifier> {
@@ -115,10 +115,7 @@ async fn main() -> anyhow::Result<()> {
         jwt_verifier,
         http_client: http_client.clone(),
         inventory_base_url: inventory_base_url.clone(),
-        audit_producer: Some(common_audit::AuditProducer::new(
-            Some(kafka_producer.clone()),
-            common_audit::AuditProducerConfig { topic: env::var("AUDIT_TOPIC").unwrap_or_else(|_| "audit.events".to_string()) },
-        )),
+    audit_producer: Some(common_audit::AuditProducer::new(common_audit::KafkaAuditSink::new(kafka_producer.clone(), common_audit::AuditProducerConfig { topic: env::var("AUDIT_TOPIC").unwrap_or_else(|_| "audit.events".to_string()) }))),
     };
     tracing::info!(topic = %env::var("AUDIT_TOPIC").unwrap_or_else(|_| "audit.events".to_string()), "Audit producer initialized");
 
