@@ -6,6 +6,7 @@ use sqlx::encode::IsNull;
 use sqlx::error::BoxDynError;
 use serde::{Serializer, Deserializer};
 use serde::{Deserialize, Serialize};
+use std::sync::Once;
 
 /// Rounding modes supported (configurable via env in later initialization step)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,6 +46,14 @@ pub fn current_rounding_mode() -> RoundingMode {
 pub fn set_rounding_mode_for_tests(mode: RoundingMode) {
     // For tests we want to reconfigure; OnceLock cannot be reset, so we only allow setting if empty.
     if ROUNDING_MODE.get().is_none() { let _ = ROUNDING_MODE.set(mode); }
+}
+
+static LOG_ONCE: Once = Once::new();
+pub fn log_rounding_mode_once() {
+    LOG_ONCE.call_once(|| {
+        let mode = init_rounding_mode_from_env();
+        tracing::info!(monetary.rounding_mode = ?mode, "Initialized monetary rounding mode");
+    });
 }
 
 /// Apply configured rounding to scale=2 using Half-Up (away from zero on .5).
@@ -184,6 +193,103 @@ impl Money {
         Self::new(value)
     }
     pub fn inner(&self) -> &BigDecimal { &self.0 }
+    /// Construct from integer cents (minor units) without intermediate floating rounding.
+    pub fn from_cents(cents: i64) -> Self {
+        // value = cents / 100
+        let major = BigDecimal::from(cents) / BigDecimal::from(100);
+        Money::new(major)
+    }
+    /// Return total minor units (cents) as i64. Panics if out of i64 range (extremely unlikely with enforced scale=2).
+    pub fn as_cents(&self) -> i64 {
+        // Multiply by 100 exactly using string to avoid floating imprecision
+        // self.0 is guaranteed scale 2, so representation like X.YY
+        let s = self.0.to_string();
+        if let Some(dot) = s.find('.') {
+            let (int_part, frac_part) = s.split_at(dot);
+            let frac = &frac_part[1..]; // skip '.'
+            let mut frac_norm = String::from(frac);
+            if frac_norm.len() < 2 { frac_norm.push('0'); }
+            if frac_norm.len() > 2 { frac_norm.truncate(2); }
+            let sign = if int_part.starts_with('-') { -1i64 } else { 1i64 };
+            let int_clean = if int_part == "-0" || int_part == "+0" { "0" } else { int_part.trim_start_matches('+') };
+            let major = int_clean.parse::<i64>().unwrap();
+            let minor = frac_norm.parse::<i64>().unwrap();
+            sign * (major.abs() * 100 + minor)
+        } else {
+            // Whole number -> multiply by 100
+            let major = s.parse::<i64>().unwrap();
+            major * 100
+        }
+    }
+}
+
+// Arithmetic trait implementations
+use std::ops::{Add, Sub, AddAssign, SubAssign, Mul};
+impl Add for Money {
+    type Output = Money;
+    fn add(self, rhs: Money) -> Money { Money::new(self.0 + rhs.0) }
+}
+impl<'a> Add<&'a Money> for Money {
+    type Output = Money;
+    fn add(self, rhs: &'a Money) -> Money { Money::new(self.0 + rhs.0.clone()) }
+}
+impl<'a> Add<Money> for &'a Money {
+    type Output = Money;
+    fn add(self, rhs: Money) -> Money { Money::new(self.0.clone() + rhs.0) }
+}
+impl<'a, 'b> Add<&'b Money> for &'a Money {
+    type Output = Money;
+    fn add(self, rhs: &'b Money) -> Money { Money::new(self.0.clone() + rhs.0.clone()) }
+}
+
+impl Sub for Money {
+    type Output = Money;
+    fn sub(self, rhs: Money) -> Money { Money::new(self.0 - rhs.0) }
+}
+impl<'a> Sub<&'a Money> for Money {
+    type Output = Money;
+    fn sub(self, rhs: &'a Money) -> Money { Money::new(self.0 - rhs.0.clone()) }
+}
+impl<'a> Sub<Money> for &'a Money {
+    type Output = Money;
+    fn sub(self, rhs: Money) -> Money { Money::new(self.0.clone() - rhs.0) }
+}
+impl<'a, 'b> Sub<&'b Money> for &'a Money {
+    type Output = Money;
+    fn sub(self, rhs: &'b Money) -> Money { Money::new(self.0.clone() - rhs.0.clone()) }
+}
+
+impl AddAssign for Money {
+    fn add_assign(&mut self, rhs: Money) { *self = Money::new(self.0.clone() + rhs.0); }
+}
+impl<'a> AddAssign<&'a Money> for Money {
+    fn add_assign(&mut self, rhs: &'a Money) { *self = Money::new(self.0.clone() + rhs.0.clone()); }
+}
+impl SubAssign for Money {
+    fn sub_assign(&mut self, rhs: Money) { *self = Money::new(self.0.clone() - rhs.0); }
+}
+impl<'a> SubAssign<&'a Money> for Money {
+    fn sub_assign(&mut self, rhs: &'a Money) { *self = Money::new(self.0.clone() - rhs.0.clone()); }
+}
+
+impl Mul<i32> for Money {
+    type Output = Money;
+    fn mul(self, rhs: i32) -> Money { Money::new(self.0 * BigDecimal::from(rhs)) }
+}
+impl<'a> Mul<i32> for &'a Money {
+    type Output = Money;
+    fn mul(self, rhs: i32) -> Money { Money::new(self.0.clone() * BigDecimal::from(rhs)) }
+}
+
+impl std::iter::Sum for Money {
+    fn sum<I: Iterator<Item = Money>>(iter: I) -> Money {
+        iter.fold(Money::new(BigDecimal::from(0)), |acc, m| acc + m)
+    }
+}
+impl<'a> std::iter::Sum<&'a Money> for Money {
+    fn sum<I: Iterator<Item = &'a Money>>(iter: I) -> Money {
+        iter.fold(Money::new(BigDecimal::from(0)), |acc, m| acc + m)
+    }
 }
 
 impl From<BigDecimal> for Money { fn from(v: BigDecimal) -> Self { Money::new(v) } }
@@ -266,6 +372,39 @@ mod tests {
     }
 
     #[test]
+    fn test_arithmetic_add_sub_mul() {
+        let a = Money::from(BigDecimal::from_str("10.015").unwrap()); // rounds to 10.02
+        let b = Money::from(BigDecimal::from_str("2.005").unwrap());  // 2.01
+        assert_eq!((a.clone() + b.clone()).inner().to_string(), "12.03");
+        assert_eq!((a.clone() - b.clone()).inner().to_string(), "8.01");
+        assert_eq!((a.clone() * 3).inner().to_string(), "30.06");
+    }
+
+    #[test]
+    fn test_arithmetic_sum_iterator() {
+        let values = vec![
+            Money::from(BigDecimal::from_str("1.005").unwrap()), // 1.01
+            Money::from(BigDecimal::from_str("2.004").unwrap()), // 2.00
+            Money::from(BigDecimal::from_str("3.001").unwrap()), // 3.00
+        ];
+        let total: Money = values.iter().sum();
+        assert_eq!(total.inner().to_string(), "6.01");
+    }
+
+    #[test]
+    fn test_from_cents_and_as_cents() {
+        let m = Money::from_cents(1234); // 12.34
+        assert_eq!(m.inner().to_string(), "12.34");
+        assert_eq!(m.as_cents(), 1234);
+        let n = Money::from_cents(-995); // -9.95
+        assert_eq!(n.inner().to_string(), "-9.95");
+        assert_eq!(n.as_cents(), -995);
+        let zero = Money::from_cents(0);
+        assert_eq!(zero.inner().to_string(), "0.00");
+        assert_eq!(zero.as_cents(), 0);
+    }
+
+    #[test]
     fn test_rounding_mode_parse() {
         assert_eq!(RoundingMode::parse("halfup"), Some(RoundingMode::HalfUp));
         assert_eq!(RoundingMode::parse("truncate"), Some(RoundingMode::Truncate));
@@ -296,6 +435,38 @@ mod tests {
         // -1.245 -> -1.24 (124 even -> stays -1.24)
         let v4 = BigDecimal::from_str("-1.245").unwrap();
         assert_eq!(bankers(&v4, 2).to_string(), "-1.24");
+    }
+
+    #[test]
+    fn test_rounding_matrix_all_modes() {
+        // (input, half_up, truncate, bankers)
+        let cases = vec![
+            ("1.005",  "1.01", "1.00", "1.00"),
+            ("2.675",  "2.68", "2.67", "2.68"),
+            ("0.005",  "0.01", "0.00", "0.00"),
+            ("-1.005", "-1.01", "-1.00", "-1.00"),
+            ("-2.505", "-2.51", "-2.50", "-2.50"),
+            ("12345",  "12345.00", "12345.00", "12345.00"),
+            ("19.90",  "19.90", "19.90", "19.90"),
+        ];
+
+        for (input, expect_half, expect_trunc, expect_bank) in cases {            
+            let v = BigDecimal::from_str(input).unwrap();
+            let h = half_up(&v, 2).to_string();
+            let t = truncate(&v, 2).to_string();
+            let b = bankers(&v, 2).to_string();
+            assert_eq!(h, expect_half,   "HalfUp mismatch for {input}");
+            assert_eq!(t, expect_trunc,  "Truncate mismatch for {input}");
+            assert_eq!(b, expect_bank,   "Bankers mismatch for {input}");
+
+            // Idempotence: applying again to already-rounded output should not change.
+            let hv2 = half_up(&BigDecimal::from_str(&h).unwrap(), 2).to_string();
+            let tv2 = truncate(&BigDecimal::from_str(&t).unwrap(), 2).to_string();
+            let bv2 = bankers(&BigDecimal::from_str(&b).unwrap(), 2).to_string();
+            assert_eq!(hv2, h, "HalfUp idempotence failed for {input}");
+            assert_eq!(tv2, t, "Truncate idempotence failed for {input}");
+            assert_eq!(bv2, b, "Bankers idempotence failed for {input}");
+        }
     }
 
     #[test]

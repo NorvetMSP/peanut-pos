@@ -97,6 +97,7 @@ dependencies = [
  "anyhow",
  "axum",
  "common-auth",
+ "common-money",
  "futures-util",
  "hyper 1.7.0",
  "libz-sys",
@@ -855,6 +856,7 @@ dependencies = [
  "serde",
  "sqlx",
  "thiserror 1.0.69",
+ "tracing",
 ]
 
 [[package]]
@@ -972,6 +974,7 @@ dependencies = [
  "clap",
  "common-auth",
  "common-crypto",
+ "common-money",
  "serde",
  "serde_json",
  "sqlx",
@@ -1909,6 +1912,7 @@ dependencies = [
  "bytes",
  "chrono",
  "common-auth",
+ "common-money",
  "hex",
  "hmac",
  "hyper 1.7.0",
@@ -1937,6 +1941,7 @@ dependencies = [
  "axum",
  "chrono",
  "common-auth",
+ "common-money",
  "futures",
  "hyper 1.7.0",
  "libz-sys",
@@ -2153,6 +2158,7 @@ dependencies = [
  "anyhow",
  "axum",
  "common-auth",
+ "common-money",
  "futures",
  "libz-sys",
  "rdkafka",

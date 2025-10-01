@@ -24,6 +24,7 @@ use tokio::net::TcpListener;
 use tokio::time::{interval, MissedTickBehavior};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tracing::{debug, info, warn};
+use common_money::log_rounding_mode_once;
 use uuid::Uuid;
 
 mod order_handlers;
@@ -85,6 +86,7 @@ async fn health() -> &'static str {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().with_env_filter("info").init();
+    log_rounding_mode_once();
 
     let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
     let db = PgPool::connect(&database_url).await?;

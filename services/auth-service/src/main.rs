@@ -22,6 +22,7 @@ use tokio::{
 };
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tracing::{debug, info, warn};
+use common_money::log_rounding_mode_once;
 
 use auth_service::config::load_auth_config;
 use auth_service::metrics::AuthMetrics;
@@ -58,6 +59,7 @@ async fn metrics_endpoint(State(state): State<AppState>) -> Response {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().with_env_filter("info").init();
+    log_rounding_mode_once();
 
     let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
     let db_pool = PgPool::connect(&database_url).await?;

@@ -12,6 +12,7 @@ use common_auth::{
     ensure_role, tenant_id_from_request, AuthContext, JwtConfig, JwtVerifier, ROLE_ADMIN,
     ROLE_CASHIER, ROLE_MANAGER, ROLE_SUPER_ADMIN,
 };
+use common_money::log_rounding_mode_once;
 use futures::StreamExt;
 use rdkafka::consumer::{Consumer, StreamConsumer};
 use rdkafka::producer::{FutureProducer, FutureRecord};
@@ -91,6 +92,7 @@ async fn get_points(
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().with_env_filter("info").init();
+    log_rounding_mode_once();
 
     let database_url = env::var("DATABASE_URL")?;
     let db_pool = PgPool::connect(&database_url).await?;

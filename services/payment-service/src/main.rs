@@ -9,6 +9,7 @@ use axum::{
     Router,
 };
 use common_auth::{JwtConfig, JwtVerifier, ROLE_ADMIN, ROLE_CASHIER, ROLE_SUPER_ADMIN};
+use common_money::log_rounding_mode_once;
 use std::{env, net::SocketAddr, sync::Arc, time::Duration};
 use tokio::net::TcpListener;
 use tokio::time::{interval, MissedTickBehavior};
@@ -34,6 +35,7 @@ impl FromRef<AppState> for Arc<JwtVerifier> {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().with_env_filter("info").init();
+    log_rounding_mode_once();
 
     let jwt_verifier = build_jwt_verifier_from_env().await?;
     spawn_jwks_refresh(jwt_verifier.clone());

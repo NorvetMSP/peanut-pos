@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 tower-http = { version = "0.5", features = ["cors"] }
 common-auth = { path = "../common/auth" }
+common-money = { path = "../common/money" }
 anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt","env-filter"] }

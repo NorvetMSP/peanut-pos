@@ -7,6 +7,7 @@ edition = "2021"
 clap = { version = "4", features = ["derive"] }
 common-auth = { path = "../common/auth" }
 common-crypto = { path = "../common/crypto" }
+common-money = { path = "../common/money" }
 tower-http = { version = "0.5", features = ["cors"] }
 anyhow = "1"
 tracing = "0.1"

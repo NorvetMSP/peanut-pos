@@ -9,6 +9,7 @@ use axum::{
     Router,
 };
 use common_auth::{JwtConfig, JwtVerifier};
+use common_money::log_rounding_mode_once;
 use rdkafka::producer::FutureProducer;
 use sqlx::PgPool;
 use std::{env, net::SocketAddr, sync::Arc};
@@ -45,6 +46,7 @@ async fn health() -> &'static str {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().with_env_filter("info").init();
+    log_rounding_mode_once();
     // Initialize database connection pool
     let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
     let db = PgPool::connect(&database_url).await?;

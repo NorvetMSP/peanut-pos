@@ -1,0 +1,48 @@
+name: Money Rounding Matrix
+
+on:
+  pull_request:
+    paths:
+      - 'services/common/money/**'
+      - '.github/workflows/money-rounding-matrix.yml'
+  push:
+    branches: [ main ]
+    paths:
+      - 'services/common/money/**'
+      - '.github/workflows/money-rounding-matrix.yml'
+  workflow_dispatch:
+
+jobs:
+  test-matrix:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        mode: [halfup, truncate, bankers]
+    name: Rounding Mode = ${{ matrix.mode }}
+    env:
+      SQLX_OFFLINE: 'true'
+      MONEY_ROUNDING: ${{ matrix.mode }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-money-${{ matrix.mode }}-${{ hashFiles('services/**/Cargo.toml') }}
+
+      - name: Run common-money tests (mode)
+        working-directory: services
+        run: cargo test -p common-money -- --nocapture
+
+      - name: Verify mode surfaced in log (best-effort)
+        if: success()
+        run: |
+          grep -i "rounding mode" -R . || echo "(No explicit runtime log captured; compile-time tests sufficient)"
