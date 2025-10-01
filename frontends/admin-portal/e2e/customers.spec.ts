@@ -2,6 +2,8 @@ import { createHmac } from 'node:crypto';
 import { execSync } from 'node:child_process';
 import path from 'node:path';
 import { expect, test } from '@playwright/test';
+import { customerAuthMock } from './utils/installMocks';
+import type { CustomerRecord, AuditEvent } from './utils/types';
 
 const REPO_ROOT = path.resolve(process.cwd(), '..', '..');
 const ADMIN_EMAIL = 'admin@novapos.local';
@@ -11,20 +13,7 @@ const CUSTOMER_SERVICE_BASE = 'http://localhost:8089';
 const AUTH_SERVICE_BASE = 'http://localhost:8085';
 const TENANT_ID = '00000000-0000-0000-0000-000000000001';
 
-type CustomerRecord = {
-  id: string;
-  name: string;
-  email: string | null;
-  phone: string | null;
-  created_at: string;
-};
-
-type AuditEvent = {
-  timestamp: string;
-  action: string;
-  actor: string;
-  details: string;
-};
+// Types moved to utils/types.ts
 
 type LoginUser = {
   id: string;
@@ -74,7 +63,7 @@ const FIXTURES = {
       phone: null as string | null,
       created_at: '2025-10-02T10:15:00.000Z',
     },
-  ],
+  ] as CustomerRecord[],
   auditEvents: [
     {
       timestamp: '2025-10-02T09:00:00.000Z',
@@ -82,7 +71,7 @@ const FIXTURES = {
       actor: 'Dana Admin',
       details: 'Initial profile created.',
     },
-  ],
+  ] as AuditEvent[],
 };
 
 const ensureAdminMfaSeeded = () => {
@@ -289,92 +278,13 @@ test.describe('Customers management', () => {
     expect(authCookies.length, 'Expected auth-service to return cookies').toBeGreaterThan(0);
     await page.context().addCookies(authCookies);
 
-    await page.addInitScript(
-      ({ fixtures, customerBase, authBase, tenantId, session }) => {
-        const state = {
-          customers: structuredClone(fixtures.customers),
-          audit: structuredClone(fixtures.auditEvents),
-        };
-
-        const toJsonResponse = (payload: unknown, init?: ResponseInit) =>
-          new Response(JSON.stringify(payload), {
-            status: 200,
-            headers: { 'Content-Type': 'application/json' },
-            ...init,
-          });
-
-        const originalFetch = window.fetch.bind(window);
-
-        window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
-          const url = typeof input === 'string' ? input : input.url;
-          const method = (init?.method ?? 'GET').toUpperCase();
-
-          if (url.startsWith(`${customerBase}/customers/cust-1/audit`) && method === 'GET') {
-            return toJsonResponse(state.audit);
-          }
-
-          if (url.startsWith(`${customerBase}/customers/cust-1/gdpr/delete`) && method === 'POST') {
-            state.customers = [];
-            state.audit.unshift({
-              timestamp: new Date('2025-10-02T13:00:00.000Z').toISOString(),
-              action: 'Customer Deleted',
-              actor: 'Dana Admin',
-              details: 'GDPR delete issued from UI test.',
-            });
-            return toJsonResponse({ status: 'deleted' });
-          }
-
-          if (url.startsWith(`${customerBase}/customers/cust-1`) && method === 'PUT') {
-            const raw = init?.body;
-            const text =
-              typeof raw === 'string'
-                ? raw
-                : raw
-                ? await new Response(raw).text()
-                : '{}';
-            const payload = JSON.parse(text) as Partial<CustomerRecord>;
-            state.customers[0] = {
-              ...state.customers[0],
-              ...(payload.name !== undefined ? { name: payload.name } : {}),
-              ...(payload.email !== undefined ? { email: payload.email } : {}),
-              ...(payload.phone !== undefined ? { phone: payload.phone } : {}),
-            };
-            state.audit.unshift({
-              timestamp: new Date('2025-10-02T12:00:00.000Z').toISOString(),
-              action: 'Profile Updated',
-              actor: 'Dana Admin',
-              details: 'Profile edited via UI test.',
-            });
-            return toJsonResponse(state.customers[0]);
-          }
-
-          if (url.startsWith(`${customerBase}/customers`) && method === 'GET') {
-            return toJsonResponse(state.customers);
-          }
-
-          if (url.startsWith(`${authBase}/session`) && method === 'GET') {
-            return toJsonResponse(session);
-          }
-
-          if (url.startsWith(authBase)) {
-            const requestInit: RequestInit = { ...init };
-            const headers = new Headers(requestInit.headers ?? {});
-            headers.set('X-Tenant-ID', tenantId);
-            requestInit.headers = headers;
-            return originalFetch(input, requestInit);
-          }
-
-          return originalFetch(input, init);
-        };
-      },
-      {
-        fixtures: FIXTURES,
-        customerBase: CUSTOMER_SERVICE_BASE,
-        authBase: AUTH_SERVICE_BASE,
-        tenantId: TENANT_ID,
-        session: loginJson,
-      },
-    );
+    await page.addInitScript(customerAuthMock, {
+      fixtures: FIXTURES,
+      customerBase: CUSTOMER_SERVICE_BASE,
+      authBase: AUTH_SERVICE_BASE,
+      tenantId: TENANT_ID,
+      session: loginJson,
+    });
 
     await page.goto('/home');
     await page.waitForURL('**/home');
@@ -389,6 +299,11 @@ test.describe('Customers management', () => {
 
     await page.getByRole('button', { name: 'View Activity' }).click();
     await expect(page.getByText('Customer Created')).toBeVisible();
+    // Assert audit ordering after initial load
+    let auditActions = await page.evaluate(
+      () => (window as unknown as { __mockState?: { audit: { action: string }[] } }).__mockState?.audit.map(a => a.action) ?? []
+    );
+    expect(auditActions[0]).toBe('Customer Created');
     await page.keyboard.press('Escape');
 
     await page.getByRole('button', { name: 'Edit' }).click();
@@ -399,11 +314,19 @@ test.describe('Customers management', () => {
     await saveButton.evaluate((button) => (button as HTMLButtonElement).click());
     await expect(page.getByText('Customer updated successfully.')).toBeVisible();
     await expect(page.getByRole('cell', { name: 'Alice Johnson' })).toBeVisible();
+    auditActions = await page.evaluate(
+      () => (window as unknown as { __mockState?: { audit: { action: string }[] } }).__mockState?.audit.map(a => a.action) ?? []
+    );
+    expect(auditActions.slice(0,2)).toEqual(['Profile Updated','Customer Created']);
 
     await page.getByRole('button', { name: 'Edit' }).click();
     page.once('dialog', (dialog) => dialog.accept());
     await page.getByRole('button', { name: 'Delete Customer' }).evaluate((button) => (button as HTMLButtonElement).click());
     await expect(page.getByText('Customer deleted and anonymized.')).toBeVisible();
     await expect(page.getByText(/No customers found/i)).toBeVisible();
+    auditActions = await page.evaluate(
+      () => (window as unknown as { __mockState?: { audit: { action: string }[] } }).__mockState?.audit.map(a => a.action) ?? []
+    );
+    expect(auditActions.slice(0,3)).toEqual(['Customer Deleted','Profile Updated','Customer Created']);
   });
 });
