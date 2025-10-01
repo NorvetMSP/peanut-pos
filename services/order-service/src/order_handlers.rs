@@ -9,6 +9,8 @@ use common_auth::{
     ensure_role, tenant_id_from_request, AuthContext, ROLE_ADMIN, ROLE_CASHIER, ROLE_MANAGER,
     ROLE_SUPER_ADMIN,
 };
+use common_audit::extract_actor_from_headers;
+use serde_json::json;
 use rdkafka::producer::FutureRecord;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -388,6 +390,7 @@ pub async fn create_order(
 ) -> Result<Json<Order>, (StatusCode, String)> {
     ensure_role(&auth, ORDER_WRITE_ROLES)?;
     let tenant_id = tenant_id_from_request(&headers, &auth)?;
+    let audit_actor = extract_actor_from_headers(&headers, &auth.claims.raw, auth.claims.subject);
 
     if new_order.items.is_empty() {
         return Err((
@@ -633,6 +636,10 @@ pub async fn create_order(
         }
     }
 
+    if let Some(audit) = &state.audit_producer {
+        let changes = json!({"after": {"order_id": order.id, "status": order.status, "total": order.total.inner()}});
+        let _ = audit.emit(tenant_id, audit_actor, "order", Some(order.id), "created", changes, json!({"source":"order-service"})).await;
+    }
     Ok(Json(order))
 }
 

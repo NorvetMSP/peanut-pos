@@ -904,6 +904,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "common-audit"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "chrono",
+ "rdkafka",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "common-auth"
 version = "0.1.0"
 dependencies = [
@@ -2803,6 +2817,7 @@ dependencies = [
  "axum",
  "bigdecimal",
  "chrono",
+ "common-audit",
  "common-auth",
  "common-money",
  "futures-util",
@@ -3169,6 +3184,7 @@ dependencies = [
  "axum",
  "bigdecimal",
  "chrono",
+ "common-audit",
  "common-auth",
  "common-money",
  "hyper 1.7.0",

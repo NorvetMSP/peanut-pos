@@ -4,7 +4,7 @@ use axum::{
     extract::FromRef,
     http::{
         header::{ACCEPT, CONTENT_TYPE},
-        HeaderName, HeaderValue, Method,
+        HeaderName, HeaderValue, Method, StatusCode,
     },
     routing::{get, post},
     Router,
@@ -32,6 +32,7 @@ use order_handlers::{
     clear_offline_orders, create_order, get_order, get_order_receipt, list_orders, list_returns,
     refund_order, void_order,
 };
+async fn audit_search() -> (StatusCode, &'static str) { (StatusCode::NOT_IMPLEMENTED, "audit search not implemented") }
 
 #[derive(Clone)]
 pub struct AppState {
@@ -40,6 +41,7 @@ pub struct AppState {
     pub jwt_verifier: Arc<JwtVerifier>,
     pub http_client: Client,
     pub inventory_base_url: String,
+    pub audit_producer: Option<common_audit::AuditProducer>,
 }
 
 impl FromRef<AppState> for Arc<JwtVerifier> {
@@ -113,7 +115,12 @@ async fn main() -> anyhow::Result<()> {
         jwt_verifier,
         http_client: http_client.clone(),
         inventory_base_url: inventory_base_url.clone(),
+        audit_producer: Some(common_audit::AuditProducer::new(
+            Some(kafka_producer.clone()),
+            common_audit::AuditProducerConfig { topic: env::var("AUDIT_TOPIC").unwrap_or_else(|_| "audit.events".to_string()) },
+        )),
     };
+    tracing::info!(topic = %env::var("AUDIT_TOPIC").unwrap_or_else(|_| "audit.events".to_string()), "Audit producer initialized");
 
     let allowed_origins = [
         "http://localhost:3000",
@@ -159,6 +166,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/orders/:order_id/void", post(void_order))
         .route("/orders/refund", post(refund_order))
         .route("/returns", get(list_returns))
+        .route("/audit/events", get(audit_search))
         .with_state(state.clone())
         .layer(cors);
 

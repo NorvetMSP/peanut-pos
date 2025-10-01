@@ -8,6 +8,7 @@ use chrono::{DateTime, Utc};
 use common_auth::{
     ensure_role, tenant_id_from_request, AuthContext, ROLE_ADMIN, ROLE_MANAGER, ROLE_SUPER_ADMIN,
 };
+use common_audit::{extract_actor_from_headers, AuditActor as SharedAuditActor};
 use rdkafka::producer::FutureRecord;
 use serde::ser::{SerializeStruct, Serializer};
 use serde::{Deserialize, Serialize};
@@ -49,7 +50,7 @@ fn normalize_image_input(input: Option<String>) -> Option<String> {
 }
 
 #[derive(Default, Clone)]
-pub struct AuditActor {
+pub struct AuditActor { // local representation for legacy DB audit table
     pub id: Option<Uuid>,
     pub name: Option<String>,
     pub email: Option<String>,
@@ -58,47 +59,12 @@ pub struct AuditActor {
 const PRODUCT_WRITE_ROLES: &[&str] = &[ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_MANAGER];
 
 fn extract_actor(headers: &HeaderMap, auth: &AuthContext) -> AuditActor {
-    let mut actor = AuditActor {
-        id: Some(auth.claims.subject),
-        name: auth
-            .claims
-            .raw
-            .get("name")
-            .and_then(|value| value.as_str())
-            .map(|value| value.to_string()),
-        email: auth
-            .claims
-            .raw
-            .get("email")
-            .and_then(|value| value.as_str())
-            .map(|value| value.to_string()),
-    };
+    let shared = extract_actor_from_headers(headers, &auth.claims.raw, auth.claims.subject);
+    AuditActor { id: shared.id, name: shared.name, email: shared.email }
+}
 
-    if let Some(value) = headers
-        .get("X-User-ID")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| Uuid::parse_str(value.trim()).ok())
-    {
-        actor.id = Some(value);
-    }
-    if let Some(value) = headers
-        .get("X-User-Name")
-        .and_then(|value| value.to_str().ok())
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-    {
-        actor.name = Some(value);
-    }
-    if let Some(value) = headers
-        .get("X-User-Email")
-        .and_then(|value| value.to_str().ok())
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-    {
-        actor.email = Some(value);
-    }
-
-    actor
+fn shared(actor: &AuditActor) -> SharedAuditActor {
+    SharedAuditActor { id: actor.id, name: actor.name.clone(), email: actor.email.clone() }
 }
 
 async fn record_product_audit(
@@ -140,7 +106,7 @@ impl Serialize for Product {
         state.serialize_field("id", &self.id)?;
         state.serialize_field("tenant_id", &self.tenant_id)?;
         state.serialize_field("name", &self.name)?;
-    state.serialize_field("price", &self.price.inner())?;
+        state.serialize_field("price", &self.price.inner())?;
         state.serialize_field("description", &self.description)?;
         state.serialize_field("image", &self.image)?;
         state.serialize_field("image_url", &self.image)?;
@@ -172,23 +138,24 @@ pub async fn update_product(
     };
     let image = normalize_image_input(upd.image);
     let product = query_as::<_, Product>(
-    "UPDATE products SET name = $1, price = $2, description = $3, active = $4, image = COALESCE($5, image)\n         WHERE id = $6 AND tenant_id = $7\n         RETURNING id, tenant_id, name, price, description, image, active"
+        "UPDATE products SET name = $1, price = $2, description = $3, active = $4, image = COALESCE($5, image)\n         WHERE id = $6 AND tenant_id = $7\n         RETURNING id, tenant_id, name, price, description, image, active"
     )
-    .bind(upd.name)
-    .bind(normalize_scale(&upd.price))
-    .bind(upd.description)
-    .bind(upd.active)
-    .bind(image)
-    .bind(product_id)
-    .bind(tenant_id)
-    .fetch_one(&state.db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+        .bind(upd.name)
+        .bind(normalize_scale(&upd.price))
+        .bind(upd.description)
+        .bind(upd.active)
+        .bind(image)
+        .bind(product_id)
+        .bind(tenant_id)
+        .fetch_one(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
     let changes = json!({
         "before": product_to_value(&existing),
         "after": product_to_value(&product),
     });
-    record_product_audit(&state.db, &actor, product.id, tenant_id, "updated", changes).await;
+    record_product_audit(&state.db, &actor, product.id, tenant_id, "updated", changes.clone()).await;
+    if let Some(audit) = &state.audit_producer { let _ = audit.emit(tenant_id, shared(&actor), "product", Some(product.id), "updated", changes, json!({"source":"product-service"})).await; }
     Ok(Json(product))
 }
 
@@ -233,23 +200,24 @@ pub async fn create_product(
     let image = normalize_image_input(image).unwrap_or_else(default_product_image);
 
     let product = query_as::<_, Product>(
-    "INSERT INTO products (id, tenant_id, name, price, description, active, image) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id, tenant_id, name, price, description, image, active"
+        "INSERT INTO products (id, tenant_id, name, price, description, active, image) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id, tenant_id, name, price, description, image, active"
     )
-    .bind(product_id)
-    .bind(tenant_id)
-    .bind(name)
-    .bind(normalize_scale(&price))
-    .bind(desc)
-    .bind(true)
-    .bind(image)
-    .fetch_one(&state.db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+        .bind(product_id)
+        .bind(tenant_id)
+        .bind(name)
+        .bind(normalize_scale(&price))
+        .bind(desc)
+        .bind(true)
+        .bind(image)
+        .fetch_one(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
 
     let changes = json!({
         "after": product_to_value(&product),
     });
-    record_product_audit(&state.db, &actor, product.id, tenant_id, "created", changes).await;
+    record_product_audit(&state.db, &actor, product.id, tenant_id, "created", changes.clone()).await;
+    if let Some(audit) = &state.audit_producer { let _ = audit.emit(tenant_id, shared(&actor), "product", Some(product.id), "created", json!({"after": product_to_value(&product)}), json!({"source":"product-service"})).await; }
 
     let event = serde_json::json!({
         "product_id": product.id,
@@ -343,15 +311,8 @@ pub async fn delete_product(
     let changes = json!({
         "before": product_to_value(&existing),
     });
-    record_product_audit(
-        &state.db,
-        &actor,
-        existing.id,
-        tenant_id,
-        "deleted",
-        changes,
-    )
-    .await;
+    record_product_audit(&state.db, &actor, existing.id, tenant_id, "deleted", changes.clone()).await;
+    if let Some(audit) = &state.audit_producer { let _ = audit.emit(tenant_id, shared(&actor), "product", Some(existing.id), "deleted", json!({"before": product_to_value(&existing)}), json!({"source":"product-service"})).await; }
 
     let event = serde_json::json!({
         "product_id": product_id,
