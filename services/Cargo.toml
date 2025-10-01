@@ -5,6 +5,7 @@ members = [
   "common/money",
   "common/observability",
   "common/audit",
+  "common/security",
   "auth-service",
   "order-service",
   "product-service",

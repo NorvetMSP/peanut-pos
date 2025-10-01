@@ -10,16 +10,28 @@ pub struct AuditActor {
     pub email: Option<String>,
 }
 
+pub const AUDIT_EVENT_VERSION: i32 = 1;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuditSeverity { Info, Warning, Security, Compliance }
+
+impl Default for AuditSeverity { fn default() -> Self { AuditSeverity::Info } }
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditEvent {
-    pub id: Uuid,
+    pub event_id: Uuid,
+    pub event_version: i32,
     pub tenant_id: Uuid,
     pub actor: AuditActor,
     pub entity_type: String,
     pub entity_id: Option<Uuid>,
     pub action: String,
     pub occurred_at: DateTime<Utc>,
-    pub changes: serde_json::Value,
+    pub source_service: String,
+    pub severity: AuditSeverity,
+    pub trace_id: Option<Uuid>,
+    pub payload: serde_json::Value,
     pub meta: serde_json::Value,
 }
 

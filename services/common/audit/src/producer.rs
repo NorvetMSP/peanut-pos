@@ -1,4 +1,4 @@
-use crate::{AuditActor, AuditEvent, AuditError, AuditResult};
+use crate::{AuditActor, AuditEvent, AuditError, AuditResult, AUDIT_EVENT_VERSION, AuditSeverity};
 use chrono::Utc;
 use rdkafka::producer::{FutureProducer, FutureRecord};
 use std::time::Duration;
@@ -25,26 +25,33 @@ impl AuditProducer {
         entity_type: impl Into<String>,
         entity_id: Option<Uuid>,
         action: impl Into<String>,
-        changes: serde_json::Value,
+        source_service: &str,
+        severity: AuditSeverity,
+        trace_id: Option<Uuid>,
+        payload: serde_json::Value,
         meta: serde_json::Value,
     ) -> AuditResult<AuditEvent> {
         let event = AuditEvent {
-            id: Uuid::new_v4(),
+            event_id: Uuid::new_v4(),
+            event_version: AUDIT_EVENT_VERSION,
             tenant_id,
             actor: actor.clone(),
             entity_type: entity_type.into(),
             entity_id,
             action: action.into(),
             occurred_at: Utc::now(),
-            changes,
+            source_service: source_service.to_string(),
+            severity,
+            trace_id,
+            payload,
             meta,
         };
         let Some(producer) = &self.inner else { return Err(AuditError::NotConfigured); };
-        let payload = serde_json::to_vec(&event).map_err(|e| AuditError::Serialization(e.to_string()))?;
+        let serialized = serde_json::to_vec(&event).map_err(|e| AuditError::Serialization(e.to_string()))?;
         let key = event.tenant_id.to_string();
         let record = FutureRecord::to(&self.config.topic)
             .key(&key)
-            .payload(&payload);
+            .payload(&serialized);
         if let Err((e,_)) = producer.send(record, Duration::from_secs(5)).await { return Err(AuditError::Kafka(e.to_string())); }
         Ok(event)
     }
