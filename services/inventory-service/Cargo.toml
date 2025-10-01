@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 common-auth = { path = "../common/auth" }
 common-money = { path = "../common/money" }
+common-observability = { path = "../common/observability" }
 tower-http = { version = "0.5", features = ["cors"] }
 futures = "0.3"
 axum = "0.7"
@@ -31,4 +32,5 @@ chrono = "0.4"
 testcontainers = { version = "0.16" }
 reqwest = { version = "0.11", features=["json","rustls-tls"] }
 tokio = { version = "1", features=["full"] }
+jsonwebtoken = { version = "9", default-features = false, features = ["use_pem"] }
 

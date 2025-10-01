@@ -71,8 +71,32 @@ async fn reservation_expires_and_restocks() {
     let loc = sqlx::query!("SELECT id FROM locations WHERE tenant_id = $1 AND code='DEFAULT'", tenant_id).fetch_one(&pool).await.unwrap().id;
     sqlx::query!("INSERT INTO inventory_items (tenant_id, product_id, location_id, quantity, threshold) VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING", tenant_id, product_id, loc, 10, 5).execute(&pool).await.unwrap();
 
-    // Create reservation via HTTP (mock auth headers minimal - would require valid JWT in real scenario; here we bypass if service expects verification) - skipped; directly insert reservation.
-    sqlx::query!("INSERT INTO inventory_reservations (order_id, tenant_id, product_id, quantity, location_id, expires_at) VALUES ($1,$2,$3,$4,$5, NOW() + INTERVAL '2 seconds')", Uuid::new_v4(), tenant_id, product_id, 3, loc).execute(&pool).await.unwrap();
+    // Prepare authenticated reservation creation via HTTP using a dev-signed JWT
+    let order_id = Uuid::new_v4();
+    // Provide JWT config env vars so the service verifier accepts our token.
+    env::set_var("JWT_ISSUER", "itest-issuer");
+    env::set_var("JWT_AUDIENCE", "itest-aud");
+    // Inject dev public key so verifier can use it
+    let public_pem = std::fs::read_to_string("jwt-dev.pub.pem").expect("read dev public key");
+    env::set_var("JWT_DEV_PUBLIC_KEY_PEM", public_pem);
+
+    // Issue a JWT using private key material
+    let private_pem = std::fs::read_to_string("jwt-dev.pem").expect("read dev private key");
+    let token = issue_dev_jwt(&private_pem, tenant_id, &["admin"], "itest-issuer", "itest-aud");
+
+    let reservation_body = serde_json::json!({
+        "order_id": order_id,
+        "items": [ { "product_id": product_id, "quantity": 3, "location_id": loc } ]
+    });
+    let resp = client
+        .post("http://127.0.0.1:48087/inventory/reservations")
+        .header("authorization", format!("Bearer {}", token))
+        .header("x-tenant-id", tenant_id.to_string())
+        .json(&reservation_body)
+        .send()
+        .await
+        .expect("send reservation request");
+    assert!(resp.status().is_success(), "reservation creation failed: {:?}", resp.text().await.ok());
 
     // Wait for sweeper (1s sweep + TTL 2s)
     tokio::time::sleep(Duration::from_secs(4)).await;
@@ -112,4 +136,34 @@ async fn reservation_expires_and_restocks() {
     assert_eq!(qty, 10, "quantity should be restored to 10 after expiration");
 
     let _ = child.kill().await; // cleanup
+}
+
+fn issue_dev_jwt(private_pem: &str, tenant_id: Uuid, roles: &[&str], issuer: &str, audience: &str) -> String {
+    use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+    use chrono::Utc;
+    #[derive(serde::Serialize)]
+    struct Claims<'a> {
+        sub: &'a str,
+        #[serde(rename = "tid")] tid: &'a str,
+        roles: Vec<String>,
+        iss: &'a str,
+        aud: &'a str,
+        exp: i64,
+        iat: i64,
+    }
+    let subject = Uuid::new_v4();
+    let now = Utc::now().timestamp();
+    let claims = Claims {
+        sub: &subject.to_string(),
+        tid: &tenant_id.to_string(),
+        roles: roles.iter().map(|r| r.to_string()).collect(),
+        iss: issuer,
+        aud: audience,
+        exp: now + 600,
+        iat: now,
+    };
+    let mut header = Header::new(Algorithm::RS256);
+    header.kid = Some("local-dev".to_string());
+    let key = EncodingKey::from_rsa_pem(private_pem.as_bytes()).expect("valid private key");
+    encode(&header, &claims, &key).expect("jwt encode")
 }

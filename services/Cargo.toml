@@ -3,6 +3,7 @@ members = [
   "common/auth",
   "common/crypto",
   "common/money",
+  "common/observability",
   "auth-service",
   "order-service",
   "product-service",

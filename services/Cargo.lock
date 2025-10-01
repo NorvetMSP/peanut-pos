@@ -953,6 +953,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "common-observability"
+version = "0.1.0"
+dependencies = [
+ "prometheus",
+]
+
+[[package]]
 name = "concurrent-queue"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2234,8 +2241,10 @@ dependencies = [
  "chrono",
  "common-auth",
  "common-money",
+ "common-observability",
  "futures",
  "hyper 1.7.0",
+ "jsonwebtoken",
  "prometheus",
  "rdkafka",
  "reqwest 0.11.27",

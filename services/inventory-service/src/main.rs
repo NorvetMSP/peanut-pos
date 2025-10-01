@@ -16,7 +16,8 @@ use rdkafka::producer::FutureProducer;
 use rdkafka::Message;
 use serde::Deserialize;
 use sqlx::{PgPool, Row};
-use prometheus::{Encoder, IntCounter, Registry, TextEncoder};
+use prometheus::{Encoder, TextEncoder};
+use common_observability::InventoryMetrics;
 use std::{env, net::SocketAddr, sync::Arc, time::Duration};
 use tokio::net::TcpListener;
 use tokio::time::{interval, MissedTickBehavior};
@@ -80,46 +81,10 @@ pub struct AppState {
     pub(crate) reservation_expiry_sweep: Duration,
     pub(crate) dual_write_enabled: bool,
     pub(crate) kafka_producer: FutureProducer,
-    pub(crate) metrics: Arc<Metrics>,
+    pub(crate) metrics: Arc<InventoryMetrics>,
 }
 
-#[derive(Clone)]
-pub struct Metrics {
-    pub registry: Registry,
-    pub dual_write_divergence: IntCounter,
-    pub reservation_expired: IntCounter,
-    pub audit_emit_failures: IntCounter,
-}
-
-impl Metrics {
-    fn new() -> Self {
-        let registry = Registry::new();
-        let dual_write_divergence = IntCounter::new(
-            "dual_write_divergence_total",
-            "Dual write divergence occurrences",
-        )
-        .unwrap();
-        let reservation_expired = IntCounter::new(
-            "inventory_reservation_expired_total",
-            "Expired reservations count",
-        )
-        .unwrap();
-        let audit_emit_failures = IntCounter::new(
-            "audit_event_emit_failures_total",
-            "Audit event emission failures",
-        )
-        .unwrap();
-        let _ = registry.register(Box::new(dual_write_divergence.clone()));
-        let _ = registry.register(Box::new(reservation_expired.clone()));
-        let _ = registry.register(Box::new(audit_emit_failures.clone()));
-        Metrics {
-            registry,
-            dual_write_divergence,
-            reservation_expired,
-            audit_emit_failures,
-        }
-    }
-}
+// Metrics implementation now provided by common-observability crate.
 
 async fn metrics_endpoint(State(state): State<AppState>) -> (axum::http::StatusCode, String) {
     let encoder = TextEncoder::new();
@@ -202,7 +167,7 @@ async fn main() -> anyhow::Result<()> {
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
 
-    let metrics = Arc::new(Metrics::new());
+    let metrics = Arc::new(InventoryMetrics::new());
     let state = AppState {
         db: db_pool.clone(),
         jwt_verifier,
@@ -709,9 +674,12 @@ fn spawn_reservation_sweeper(state: AppState) {
         let sweep_interval = state.reservation_expiry_sweep;
         loop {
             tokio::time::sleep(sweep_interval).await;
+            let start = std::time::Instant::now();
             if let Err(err) = expire_reservations(&state).await {
                 tracing::error!(?err, "Reservation sweeper error");
             }
+            let elapsed = start.elapsed().as_secs_f64();
+            state.metrics.sweeper_duration_seconds.observe(elapsed);
         }
     });
 }
