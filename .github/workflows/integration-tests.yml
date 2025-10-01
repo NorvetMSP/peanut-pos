@@ -25,10 +25,11 @@ jobs:
           POSTGRES_USER: novapos
           POSTGRES_DB: novapos
         ports: ["5432:5432"]
+        # NOTE: Avoid trailing backslashes; YAML folding already concatenates lines.
         options: >-
-          --health-cmd "pg_isready -U novapos" \
-          --health-interval 5s \
-          --health-timeout 5s \
+          --health-cmd "pg_isready -U novapos"
+          --health-interval 5s
+          --health-timeout 5s
           --health-retries 12
       kafka:
         image: confluentinc/cp-kafka:7.5.0
@@ -83,7 +84,24 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Install sqlx-cli (for migrations)
-        run: cargo install sqlx-cli --no-default-features --features native-tls,postgres || true
+        run: cargo install sqlx-cli --version 0.7.4 --no-default-features --features native-tls,postgres || true
+
+      - name: Tooling versions
+        run: |
+          docker --version || true
+          psql --version || true
+          cargo sqlx --version || true
+
+      - name: sqlx version parity check
+        run: |
+          set -e
+          CLI_VERSION=$(cargo sqlx --version 2>/dev/null | awk '{print $2}') || true
+          EXPECTED=0.7.4
+          if [ "$CLI_VERSION" != "$EXPECTED" ]; then
+            echo "ERROR: sqlx-cli version $CLI_VERSION does not match expected $EXPECTED" >&2
+            exit 1
+          fi
+          echo "sqlx-cli version parity OK ($CLI_VERSION)"
 
       - name: Wait for Postgres health
         run: |
