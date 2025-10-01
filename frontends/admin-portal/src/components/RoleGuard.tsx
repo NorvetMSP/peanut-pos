@@ -8,12 +8,12 @@ interface RoleGuardOptions {
   fallbackContent?: React.ReactNode;
 }
 
-export function withRoleGuard<P extends Record<string, unknown>>(
+export function withRoleGuard<P extends object>(
   Component: React.ComponentType<P>,
   allowedRoles: readonly string[],
   options?: RoleGuardOptions,
 ): React.FC<P> {
-  const Guarded: React.FC<P> = (props: P) => {
+  const Guarded: React.FC<P> = (props) => {
     const hasAccess = useHasAnyRole(allowedRoles);
 
     if (!hasAccess) {
@@ -24,7 +24,7 @@ export function withRoleGuard<P extends Record<string, unknown>>(
       );
     }
 
-    return <Component {...(props as P)} />;
+    return <Component {...props} />;
   };
 
   Guarded.displayName = `WithRoleGuard(${Component.displayName ?? Component.name ?? "Component"})`;

@@ -5,21 +5,20 @@ import { afterAll, afterEach, beforeEach, describe, expect, test, vi } from 'vit
 
 import { CustomersPageContent } from '../CustomersPage';
 
-type FetchArgs = [RequestInfo | URL, RequestInit | undefined];
+type FetchArgs = [input: RequestInfo | URL, init: RequestInit | undefined];
 
-// Vitest's vi.fn only accepts up to one generic (return type). We'll create a typed function signature instead.
-const fetchMock: ((...args: FetchArgs) => Promise<Response>) & { mock: any; mockReset: () => void; mockResolvedValueOnce: (v: Response) => any } =
-  vi.fn();
-
-const getFetchCall = (index: number): FetchArgs | undefined => {
-  const calls = fetchMock.mock.calls as FetchArgs[];
-  return calls[index];
+// Strongly typed mock for fetch without introducing any
+type FetchMock = ((...args: FetchArgs) => Promise<Response>) & {
+  mock: ReturnType<typeof vi.fn>['mock'];
+  mockReset: () => void;
+  mockResolvedValueOnce: (value: Response) => FetchMock;
 };
+const fetchMock = vi.fn(() => Promise.resolve(new Response())) as unknown as FetchMock;
 
-const getLastFetchCall = (): FetchArgs | undefined => {
-  const calls = fetchMock.mock.calls as FetchArgs[];
-  return calls[calls.length - 1];
-};
+const getFetchCall = (index: number): FetchArgs | undefined => fetchMock.mock.calls[index] as FetchArgs | undefined;
+
+const getLastFetchCall = (): FetchArgs | undefined =>
+  (fetchMock.mock.calls[fetchMock.mock.calls.length - 1] as FetchArgs | undefined);
 const originalFetch = globalThis.fetch;
 
 let authState: ReturnType<typeof createAuthState>;
