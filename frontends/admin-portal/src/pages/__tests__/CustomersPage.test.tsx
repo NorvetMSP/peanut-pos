@@ -7,7 +7,9 @@ import { CustomersPageContent } from '../CustomersPage';
 
 type FetchArgs = [RequestInfo | URL, RequestInit | undefined];
 
-const fetchMock = vi.fn<FetchArgs, Promise<Response>>();
+// Vitest's vi.fn only accepts up to one generic (return type). We'll create a typed function signature instead.
+const fetchMock: ((...args: FetchArgs) => Promise<Response>) & { mock: any; mockReset: () => void; mockResolvedValueOnce: (v: Response) => any } =
+  vi.fn();
 
 const getFetchCall = (index: number): FetchArgs | undefined => {
   const calls = fetchMock.mock.calls as FetchArgs[];

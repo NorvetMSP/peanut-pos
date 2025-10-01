@@ -575,33 +575,22 @@ const UsersPageContent: React.FC = () => {
         throw new Error(`Fetch audit failed (${response.status})`);
       }
       const payload = (await response.json()) as unknown;
-      let events: AuditEvent[] = [];
-      if (Array.isArray(payload)) {
-        events = payload
-          .map((entry) => {
-            if (!entry || typeof entry !== "object") return null;
+      const events: AuditEvent[] = Array.isArray(payload)
+        ? payload.reduce<AuditEvent[]>((acc, entry) => {
+            if (!entry || typeof entry !== "object") return acc;
             const candidate = entry as Record<string, unknown>;
-            const timestamp =
-              typeof candidate.timestamp === "string"
-                ? candidate.timestamp
-                : null;
-            const action =
-              typeof candidate.action === "string" ? candidate.action : null;
-            if (!timestamp || !action) return null;
-            const actor =
-              typeof candidate.actor === "string" ? candidate.actor : undefined;
-            const details =
-              typeof candidate.details === "string"
-                ? candidate.details
-                : undefined;
-            return { timestamp, action, actor, details };
-          })
-          .filter((item): item is AuditEvent => item !== null);
-        events.sort(
-          (a, b) =>
-            new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime(),
-        );
-      }
+            const timestamp = typeof candidate.timestamp === "string" ? candidate.timestamp : undefined;
+            const action = typeof candidate.action === "string" ? candidate.action : undefined;
+            if (!timestamp || !action) return acc; // skip invalid
+            const actor = typeof candidate.actor === "string" ? candidate.actor : undefined;
+            const details = typeof candidate.details === "string" ? candidate.details : undefined;
+            acc.push({ timestamp, action, actor, details });
+            return acc;
+          }, [])
+        : [];
+      events.sort(
+        (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime(),
+      );
       setAuditEvents(events);
     } catch (err) {
       console.error("Unable to load audit history", err);
