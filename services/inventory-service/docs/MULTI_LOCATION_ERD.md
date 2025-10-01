@@ -50,6 +50,7 @@ erDiagram
 ## Reservation Expiration
 
 Add `expires_at` + `status` to support:
+
 - Background sweeper scanning for `status='ACTIVE' AND expires_at < now()` -> set `status='EXPIRED'` and re-credit stock.
 - Emit Kafka event `inventory.reservation.expired` for audit/metrics.
 

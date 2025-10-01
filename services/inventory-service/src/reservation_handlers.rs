@@ -207,9 +207,28 @@ pub async fn create_reservation(
         }
     }
 
-    tx.commit()
-        .await
-        .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?;
+    tx.commit().await.map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?;
+
+    // Emit audit event (best-effort)
+    let event = serde_json::json!({
+        "action": "inventory.reservation.created",
+        "schema_version": 1,
+        "tenant_id": tenant_id,
+        "order_id": payload.order_id,
+        "items": reserved_items.iter().map(|i| serde_json::json!({
+            "product_id": i.product_id,
+            "quantity": i.quantity,
+            "location_id": i.location_id,
+        })).collect::<Vec<_>>(),
+    });
+    if let Err(_err) = state.kafka_producer.send(
+        rdkafka::producer::FutureRecord::to("audit.events")
+            .payload(&event.to_string())
+            .key(&tenant_id.to_string()),
+        std::time::Duration::from_secs(0),
+    ).await {
+        state.metrics.audit_emit_failures.inc();
+    }
 
     Ok(Json(ReservationResponse {
         order_id: payload.order_id,

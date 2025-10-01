@@ -1,6 +1,6 @@
 use anyhow::Context;
 use axum::{
-    extract::FromRef,
+    extract::{FromRef, State},
     http::{
         header::{ACCEPT, CONTENT_TYPE},
         HeaderName, HeaderValue, Method,
@@ -16,6 +16,7 @@ use rdkafka::producer::FutureProducer;
 use rdkafka::Message;
 use serde::Deserialize;
 use sqlx::{PgPool, Row};
+use prometheus::{Encoder, IntCounter, Registry, TextEncoder};
 use std::{env, net::SocketAddr, sync::Arc, time::Duration};
 use tokio::net::TcpListener;
 use tokio::time::{interval, MissedTickBehavior};
@@ -27,6 +28,8 @@ mod inventory_handlers;
 use inventory_handlers::list_inventory;
 mod reservation_handlers;
 use reservation_handlers::{create_reservation, release_reservation};
+mod location_handlers;
+use location_handlers::list_locations;
 
 pub(crate) const DEFAULT_THRESHOLD: i32 = 5;
 pub(crate) const DEFAULT_RESERVATION_TTL_SECS: i64 = 900; // 15 minutes
@@ -75,6 +78,63 @@ pub struct AppState {
     pub(crate) reservation_default_ttl: Duration,
     #[allow(dead_code)]
     pub(crate) reservation_expiry_sweep: Duration,
+    pub(crate) dual_write_enabled: bool,
+    pub(crate) kafka_producer: FutureProducer,
+    pub(crate) metrics: Arc<Metrics>,
+}
+
+#[derive(Clone)]
+pub struct Metrics {
+    pub registry: Registry,
+    pub dual_write_divergence: IntCounter,
+    pub reservation_expired: IntCounter,
+    pub audit_emit_failures: IntCounter,
+}
+
+impl Metrics {
+    fn new() -> Self {
+        let registry = Registry::new();
+        let dual_write_divergence = IntCounter::new(
+            "dual_write_divergence_total",
+            "Dual write divergence occurrences",
+        )
+        .unwrap();
+        let reservation_expired = IntCounter::new(
+            "inventory_reservation_expired_total",
+            "Expired reservations count",
+        )
+        .unwrap();
+        let audit_emit_failures = IntCounter::new(
+            "audit_event_emit_failures_total",
+            "Audit event emission failures",
+        )
+        .unwrap();
+        let _ = registry.register(Box::new(dual_write_divergence.clone()));
+        let _ = registry.register(Box::new(reservation_expired.clone()));
+        let _ = registry.register(Box::new(audit_emit_failures.clone()));
+        Metrics {
+            registry,
+            dual_write_divergence,
+            reservation_expired,
+            audit_emit_failures,
+        }
+    }
+}
+
+async fn metrics_endpoint(State(state): State<AppState>) -> (axum::http::StatusCode, String) {
+    let encoder = TextEncoder::new();
+    let families = state.metrics.registry.gather();
+    let mut buf = Vec::new();
+    if let Err(e) = encoder.encode(&families, &mut buf) {
+        return (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("metrics encode error: {e}"),
+        );
+    }
+    (
+        axum::http::StatusCode::OK,
+        String::from_utf8_lossy(&buf).to_string(),
+    )
 }
 
 impl FromRef<AppState> for Arc<JwtVerifier> {
@@ -137,12 +197,21 @@ async fn main() -> anyhow::Result<()> {
         .map(Duration::from_secs)
         .unwrap_or(Duration::from_secs(60));
 
+    let dual_write_enabled = env::var("INVENTORY_DUAL_WRITE")
+        .ok()
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+
+    let metrics = Arc::new(Metrics::new());
     let state = AppState {
         db: db_pool.clone(),
         jwt_verifier,
         multi_location_enabled,
         reservation_default_ttl: reservation_default_ttl,
         reservation_expiry_sweep: reservation_expiry_sweep,
+        dual_write_enabled,
+        kafka_producer: producer.clone(),
+        metrics: metrics.clone(),
     };
 
     let allowed_origins = [
@@ -174,6 +243,8 @@ async fn main() -> anyhow::Result<()> {
             "/inventory/reservations/:order_id",
             delete(release_reservation),
         )
+        .route("/locations", get(list_locations))
+        .route("/metrics", get(metrics_endpoint))
         .with_state(state.clone())
         .layer(cors);
 
@@ -396,6 +467,39 @@ async fn handle_order_completed(text: &str, db: &PgPool, producer: &FutureProduc
                     );
                 }
             }
+
+            // Dual-write validation: verify legacy aggregate matches sum of multi-location if both features active.
+            if multi_location_enabled {
+                if let Ok(rows) = sqlx::query(
+                    "SELECT product_id, SUM(quantity) as sum_qty FROM inventory_items WHERE tenant_id = $1 GROUP BY product_id"
+                )
+                .bind(tenant_id)
+                .fetch_all(db)
+                .await
+                {
+                    for r in rows {
+                        let product_id: Uuid = r.get("product_id");
+                        let sum_qty: Option<i64> = r.get("sum_qty");
+                        if let Some(sum_qty) = sum_qty {
+                            if let Ok(legacy) = sqlx::query(
+                                "SELECT quantity FROM inventory WHERE tenant_id = $1 AND product_id = $2"
+                            )
+                            .bind(tenant_id)
+                            .bind(product_id)
+                            .fetch_optional(db)
+                            .await
+                            {
+                                if let Some(row) = legacy {
+                                    let legacy_qty: i32 = row.get("quantity");
+                                    if legacy_qty != sum_qty as i32 {
+                                        tracing::warn!(product_id = %product_id, tenant_id = %tenant_id, legacy = legacy_qty, agg = sum_qty, "Dual-write divergence detected");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
         Err(err) => tracing::error!(?err, "Failed to parse OrderCompletedEvent"),
     }
@@ -616,7 +720,7 @@ async fn expire_reservations(state: &AppState) -> anyhow::Result<()> {
     // Update expired reservations and restock inventory for multi-location aware system.
     let mut tx = state.db.begin().await?;
     let rows = sqlx::query(
-        "UPDATE inventory_reservations SET status = 'EXPIRED' WHERE status = 'ACTIVE' AND expires_at IS NOT NULL AND expires_at < NOW() RETURNING product_id, tenant_id, location_id, quantity"
+        "UPDATE inventory_reservations SET status = 'EXPIRED' WHERE status = 'ACTIVE' AND expires_at IS NOT NULL AND expires_at < NOW() RETURNING product_id, tenant_id, location_id, quantity, order_id"
     )
     .fetch_all(&mut *tx)
     .await?;
@@ -625,6 +729,7 @@ async fn expire_reservations(state: &AppState) -> anyhow::Result<()> {
             let product_id: Uuid = r.get("product_id");
             let tenant_id: Uuid = r.get("tenant_id");
             let quantity: i32 = r.get("quantity");
+            let order_id: Uuid = r.get("order_id");
             if state.multi_location_enabled {
                 let loc_id: Option<Uuid> = r.get("location_id");
                 if let Some(loc) = loc_id {
@@ -648,8 +753,87 @@ async fn expire_reservations(state: &AppState) -> anyhow::Result<()> {
                 .execute(&mut *tx)
                 .await;
             }
+
+            // Emit reservation expired event
+            let expired_at = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let evt = serde_json::json!({
+                "type": "reservation.expired",
+                "tenant_id": tenant_id,
+                "product_id": product_id,
+                "order_id": order_id,
+                "quantity": quantity,
+                "expired_at_epoch": expired_at,
+            });
+            if let Err(err) = state.kafka_producer.send(
+                rdkafka::producer::FutureRecord::to("inventory.reservation.expired")
+                    .payload(&evt.to_string())
+                    .key(&tenant_id.to_string()),
+                Duration::from_secs(0)
+            ).await {
+                tracing::error!(?err, tenant_id = %tenant_id, order_id = %order_id, "Failed to emit inventory.reservation.expired");
+            }
+            // Audit event
+            let audit_evt = serde_json::json!({
+                "action": "inventory.reservation.expired",
+                "schema_version": 1,
+                "tenant_id": tenant_id,
+                "order_id": order_id,
+                "product_id": product_id,
+                "quantity": quantity,
+                "expired_at_epoch": expired_at,
+            });
+            let _ = state.kafka_producer.send(
+                rdkafka::producer::FutureRecord::to("audit.events")
+                    .payload(&audit_evt.to_string())
+                    .key(&tenant_id.to_string()),
+                Duration::from_secs(0)
+            ).await;
         }
     }
     tx.commit().await?;
+
+    // Dual-write validation (periodic) if enabled
+    if state.multi_location_enabled && state.dual_write_enabled {
+        if let Ok(tenants) = sqlx::query("SELECT DISTINCT tenant_id FROM inventory_items")
+            .fetch_all(&state.db)
+            .await
+        {
+            for r in tenants {
+                let tenant_id: Uuid = r.get("tenant_id");
+                if let Ok(rows) = sqlx::query(
+                    "SELECT product_id, SUM(quantity) as sum_qty FROM inventory_items WHERE tenant_id = $1 GROUP BY product_id"
+                )
+                .bind(tenant_id)
+                .fetch_all(&state.db)
+                .await
+                {
+                    for row in rows {
+                        let product_id: Uuid = row.get("product_id");
+                        let sum_qty: Option<i64> = row.get("sum_qty");
+                        if let Some(sum_qty) = sum_qty {
+                            if let Ok(legacy) = sqlx::query(
+                                "SELECT quantity FROM inventory WHERE tenant_id = $1 AND product_id = $2"
+                            )
+                            .bind(tenant_id)
+                            .bind(product_id)
+                            .fetch_optional(&state.db)
+                            .await
+                            {
+                                if let Some(lrow) = legacy {
+                                    let legacy_qty: i32 = lrow.get("quantity");
+                                    if legacy_qty != sum_qty as i32 {
+                                        tracing::warn!(product_id = %product_id, tenant_id = %tenant_id, legacy = legacy_qty, agg = sum_qty, "Dual-write divergence detected (sweeper)");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
     Ok(())
 }

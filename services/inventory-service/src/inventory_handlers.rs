@@ -36,6 +36,7 @@ pub struct InventoryRecord {
 #[derive(Debug, Deserialize, Default)]
 pub struct InventoryQueryParams {
     pub location_id: Option<Uuid>,
+    pub location_ids: Option<String>, // CSV list of location_ids
 }
 
 pub async fn list_inventory(
@@ -64,6 +65,32 @@ pub async fn list_inventory(
                     threshold: r.get::<i32, _>("threshold"),
                 })
                 .collect()
+        } else if let Some(list) = params.location_ids.as_ref() {
+            let ids: Vec<Uuid> = list
+                .split(',')
+                .filter_map(|s| Uuid::parse_str(s.trim()).ok())
+                .collect();
+            if ids.is_empty() {
+                Vec::new()
+            } else {
+                // Build dynamic IN clause using UNNEST
+                let rows = query(
+                    "SELECT product_id, tenant_id, SUM(quantity) as quantity, MIN(threshold) as threshold FROM inventory_items WHERE tenant_id = $1 AND location_id = ANY($2) GROUP BY product_id, tenant_id",
+                )
+                .bind(tenant_id)
+                .bind(&ids)
+                .fetch_all(&state.db)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+                rows.into_iter()
+                    .map(|r| InventoryRecord {
+                        product_id: r.get("product_id"),
+                        tenant_id: r.get("tenant_id"),
+                        quantity: r.get::<i64, _>("quantity") as i32,
+                        threshold: r.get::<i32, _>("threshold"),
+                    })
+                    .collect()
+            }
         } else {
             let rows = query(
                 "SELECT product_id, tenant_id, SUM(quantity) AS quantity, MIN(threshold) AS threshold FROM inventory_items WHERE tenant_id = $1 GROUP BY product_id, tenant_id",
@@ -115,12 +142,20 @@ mod tests {
             .connect_lazy("postgres://postgres:postgres@localhost:5432/inventory_tests")
             .expect("should build lazy postgres pool");
         let verifier = Arc::new(JwtVerifier::new(JwtConfig::new("issuer", "audience")));
+        // For test, create a no-op producer (uses localhost default; failures won't impact logic here)
+        let producer: rdkafka::producer::FutureProducer = rdkafka::ClientConfig::new()
+            .set("bootstrap.servers", "localhost:9092")
+            .create()
+            .expect("producer");
         let state = AppState {
             db: pool,
             jwt_verifier: verifier,
             multi_location_enabled: false,
             reservation_default_ttl: std::time::Duration::from_secs(900),
             reservation_expiry_sweep: std::time::Duration::from_secs(60),
+            dual_write_enabled: false,
+            kafka_producer: producer,
+            metrics: std::sync::Arc::new(crate::Metrics::new()),
         };
 
         let tenant_id = Uuid::new_v4();

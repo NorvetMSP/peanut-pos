@@ -3,6 +3,7 @@
 > Goal: A single, authoritative checklist to go from an empty machine (with Docker & Rust toolchain installed) to a fully running local NovaPOS stack (services + optional frontends + monitoring) with reproducible SQLx offline metadata.
 
 ---
+
 ## 0. Supported Host Environment
 
 Tested on:
@@ -32,7 +33,6 @@ Rust components automatically pulled:
 
 ## 2. One-Time Git Clone
 
- 
 ```powershell
 cd C:\Projects
 git clone https://github.com/datawrangler05/novapos.git
@@ -57,7 +57,6 @@ Pick the mode that suits the workflow:
 
 ### 4.1 Start Minimal Infra (recommended first run)
 
- 
 ```powershell
 ./Makefile.ps1 Start-Infra
 ```
@@ -70,7 +69,6 @@ Verifies Docker works and exposes services on:
 
 ### 4.2 Build All Rust Services
 
- 
 ```powershell
 ./Makefile.ps1 Build-Services
 ```
@@ -166,13 +164,16 @@ curl http://localhost:8081/healthz
 ## 5. Daily Dev Reset / Clean Cycle
 
 Typical morning routine:
+
 ```powershell
 git pull
 ./regenerate-sqlx-data.ps1 -Prune  # pick up schema/query changes
 ./Makefile.ps1 Start-Infra          # if not already running
 ./Makefile.ps1 Run-Service -Name product-service
 ```
+
 If schema changes:
+
 ```powershell
 ./migrate-all.ps1
 ./regenerate-sqlx-data.ps1 -Prune
@@ -188,6 +189,7 @@ If schema changes:
 ## 7. Full Rebuild From Absolute Scratch (Nuclear Option)
 
 Use if metadata drift, compiled artifacts corruption, or major tool upgrades.
+
 ```powershell
 # Stop everything
 ./Makefile.ps1 Stop-Infra
@@ -203,6 +205,7 @@ pushd services; cargo clean; popd
 # Rebuild
 ./Makefile.ps1 Build-Services
 ```
+
 Then either run services individually or `docker compose up --build`.
 
 ## 8. Choosing Compose Mode vs Native Run
@@ -293,6 +296,7 @@ docker compose down
 
 ---
 **Single-Line TL;DR (First Time):**
+
 ```powershell
 git clone https://github.com/datawrangler05/novapos.git; cd novapos; ./Makefile.ps1 Start-Infra; ./migrate-all.ps1; ./regenerate-sqlx-data.ps1 -Prune; ./Makefile.ps1 Run-Service -Name auth-service
 ```
