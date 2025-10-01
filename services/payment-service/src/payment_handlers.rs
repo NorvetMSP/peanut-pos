@@ -7,7 +7,7 @@ use axum::{
 use common_auth::{ensure_role, tenant_id_from_request, AuthContext};
 use serde::{Deserialize, Serialize};
 use bigdecimal::BigDecimal;
-use common_money::{normalize_scale, Money};
+use common_money::Money; // normalize_scale not needed here
 use std::time::Duration;
 use tokio::time::sleep;
 
@@ -15,6 +15,7 @@ use tokio::time::sleep;
 pub struct PaymentRequest {
     #[serde(rename = "orderId")]
     pub order_id: String,
+    #[allow(dead_code)]
     pub method: String,
     pub amount: BigDecimal,
 }
@@ -29,6 +30,7 @@ pub struct PaymentResponse {
 pub struct VoidPaymentRequest {
     #[serde(rename = "orderId")]
     pub order_id: String,
+    #[allow(dead_code)]
     pub method: String,
     pub amount: BigDecimal,
     pub reason: Option<String>,

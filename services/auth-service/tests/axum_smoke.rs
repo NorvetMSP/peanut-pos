@@ -71,7 +71,7 @@ struct JwksResponse {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires embedded Postgres binary download"]
+#[cfg_attr(not(feature = "integration"), ignore = "enable with --features integration (requires Postgres: embedded or external)")]
 async fn axum_smoke_tests_core_routes() -> Result<()> {
     let Some(db) = TestDatabase::setup().await? else {
         return Ok(());

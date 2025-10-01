@@ -69,3 +69,20 @@ Week 4: Tasks 12–14 + RFC review.
 
 Maintainer: TBD
 Status: Planned (no implementation yet for Phase 2 tasks at time of creation).
+
+---
+
+### Update (Integration Test Gating Implemented)
+
+An `integration` Cargo feature has been added to affected service crates (`auth-service`, `customer-service`, `loyalty-service`). All previously `#[ignore]`d DB / stack tests are now surfaced with:
+
+```rust
+#[cfg_attr(not(feature = "integration"), ignore = "enable with --features integration (requires infra)")]
+```
+
+Supporting artifacts:
+
+- Docs: `docs/tests/integration.md` (run instructions, guidelines, CI plan)
+- Workflow stub: `.github/workflows/integration-tests.yml` (currently draft / commented trigger)
+
+Rationale: preserves discoverability while avoiding slow tests in default `cargo test` runs and enables CI matrix extension later without code edits.

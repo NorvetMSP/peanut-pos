@@ -374,7 +374,7 @@ struct LoginArtifacts {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "launches the auth-service binary"]
+#[cfg_attr(not(feature = "integration"), ignore = "enable with --features integration (launches auth-service binary)")]
 async fn stack_smoke_happy_path() -> Result<()> {
     log_step("starting stack_smoke_happy_path");
     let Some(mut fixture) = StackFixture::bootstrap().await? else {

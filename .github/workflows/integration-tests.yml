@@ -1,0 +1,121 @@
+# Draft workflow: Integration Tests (Feature-Gated)
+# This is a stub and may be adjusted before enabling. Uncomment 'on' section to activate.
+
+name: integration-tests
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'services/**'
+      - '.github/workflows/integration-tests.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  integration:
+    name: Run integration tests (feature=integration)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: novapos
+          POSTGRES_USER: novapos
+          POSTGRES_DB: novapos
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U novapos" \
+          --health-interval 5s \
+          --health-timeout 5s \
+          --health-retries 12
+      kafka:
+        image: confluentinc/cp-kafka:7.5.0
+        env:
+          KAFKA_BROKER_ID: 1
+          KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+          KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092
+          KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+          KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+        ports: ["9092:9092"]
+      zookeeper:
+        image: confluentinc/cp-zookeeper:7.5.0
+        env:
+          ZOOKEEPER_CLIENT_PORT: 2181
+          ZOOKEEPER_TICK_TIME: 2000
+        ports: ["2181:2181"]
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+
+    env:
+      RUSTFLAGS: '-D warnings'
+      CARGO_TERM_COLOR: always
+      DATABASE_URL: postgres://novapos:novapos@localhost:5432/novapos
+      # Some tests default to this if embedded Postgres isn't used
+      AUTH_TEST_DATABASE_URL: postgres://novapos:novapos@localhost:5432/novapos
+      # Uncomment to force embedded pg for auth-service instead of docker:
+      # AUTH_TEST_USE_EMBED: 1
+      # AUTH_TEST_APPLY_MIGRATIONS: 1
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Install sqlx-cli (for migrations)
+        run: cargo install sqlx-cli --no-default-features --features native-tls,postgres || true
+
+      - name: Wait for Postgres health
+        run: |
+          for i in {1..30}; do
+            pg_isready -h localhost -U novapos && exit 0
+            sleep 2
+          done
+          echo 'Postgres not ready in time' >&2
+          exit 1
+
+      - name: Apply service migrations (best-effort)
+        run: |
+          set -e
+          for svc in auth-service customer-service loyalty-service product-service order-service inventory-service analytics-service integration-gateway payment-service; do
+            if [ -d "services/$svc/migrations" ]; then
+              echo "== Migrating $svc =="
+              sqlx migrate run --source services/$svc/migrations --ignore-missing || exit 1
+            fi
+          done
+
+      - name: Run integration test suite
+        run: |
+          cargo test --manifest-path services/Cargo.toml --features integration --all-targets --no-fail-fast -- --nocapture
+
+      - name: Show ignored tests (for visibility)
+        if: always()
+        run: |
+          cargo test --manifest-path services/Cargo.toml -- --ignored --list
+
+      - name: Postgres logs (on failure)
+        if: failure()
+        run: docker logs $(docker ps -q --filter expose=5432) || true
+
+      - name: Kafka logs (on failure)
+        if: failure()
+        run: docker logs $(docker ps -q --filter expose=9092) || true
+
+      - name: Summary
+        if: success()
+        run: echo "Integration tests completed with feature flag 'integration' enabled."

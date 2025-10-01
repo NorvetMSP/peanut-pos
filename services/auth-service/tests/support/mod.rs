@@ -110,8 +110,25 @@ impl TestDatabase {
             .connect(&database_url)
             .await?;
 
-        if embedded.is_some() || env_flag_enabled("AUTH_TEST_APPLY_MIGRATIONS") {
-            run_migrations(&pool).await?;
+        // Auto-run migrations when:
+        //  * Using embedded Postgres, OR
+        //  * Explicit opt-in flag AUTH_TEST_APPLY_MIGRATIONS is set, OR
+        //  * We are using the default docker DSN (heuristic: matches DEFAULT_DOCKER_DATABASE_URL)
+        // Unless explicit opt-out flag AUTH_TEST_SKIP_AUTO_MIGRATIONS is present.
+        let default_docker = database_url.starts_with(DEFAULT_DOCKER_DATABASE_URL);
+        if !env_flag_enabled("AUTH_TEST_SKIP_AUTO_MIGRATIONS")
+            && (embedded.is_some()
+                || env_flag_enabled("AUTH_TEST_APPLY_MIGRATIONS")
+                || default_docker)
+        {
+            if let Err(e) = run_migrations(&pool).await {
+                eprintln!("[auth-service test] migration error: {e}");
+                return Err(e);
+            }
+        } else {
+            eprintln!(
+                "[auth-service test] skipping migrations (set AUTH_TEST_APPLY_MIGRATIONS=1 or unset AUTH_TEST_SKIP_AUTO_MIGRATIONS)"
+            );
         }
 
         Ok(Some(Self {
@@ -201,7 +218,35 @@ pub async fn run_migrations(pool: &PgPool) -> Result<()> {
             if trimmed.is_empty() {
                 continue;
             }
-            sqlx::query(trimmed).execute(pool).await?;
+            // Attempt execution; ignore idempotent object-exists errors so reruns don't fail.
+            match sqlx::query(trimmed).execute(pool).await {
+                Ok(_) => {}
+                Err(e) => {
+                    let upper = trimmed.to_uppercase();
+                    let msg = e.to_string();
+                    // Detect postgres duplicate object / already exists style errors.
+                    let mut duplicate = msg.contains("already exists")
+                        || msg.contains("duplicate key value violates unique constraint");
+                    // Inspect database error code when available (42710 = duplicate_object).
+                    if let sqlx::Error::Database(db_err) = &e {
+                        if let Some(code) = db_err.code() {
+                            if code == "42710" || code == "42P07" { // duplicate_object, duplicate_table
+                                duplicate = true;
+                            }
+                        }
+                    }
+                    // Treat CREATE or ALTER TABLE ADD CONSTRAINT as idempotent if duplicate.
+                    let is_schema_change = upper.starts_with("CREATE ")
+                        || upper.starts_with("ALTER TABLE")
+                        || upper.starts_with("CREATE INDEX")
+                        || upper.starts_with("CREATE UNIQUE INDEX");
+                    if duplicate && is_schema_change {
+                        eprintln!("[auth-service test] ignoring duplicate schema element error: {msg}");
+                        continue;
+                    }
+                    return Err(e.into());
+                }
+            }
         }
     }
 

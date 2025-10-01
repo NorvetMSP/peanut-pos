@@ -19,5 +19,9 @@ sqlx = { version = "0.6", features = ["runtime-tokio-native-tls", "postgres", "m
 tokio = { version = "1", features = ["full"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 
+[features]
+# Enables running integration tests that require external services (e.g., Postgres, Kafka)
+integration = []
+
 [target.'cfg(target_os = "windows")'.dependencies]
 libz-sys = { version = "1.1.22", features = ["static"] }

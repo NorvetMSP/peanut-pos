@@ -1,5 +1,5 @@
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires embedded Postgres binary download"]
+#[cfg_attr(not(feature = "integration"), ignore = "enable with --features integration (requires Postgres: embedded or external)")]
 async fn with_embedded_postgres() -> Result<()> {
     let Some(db) = TestDatabase::setup().await? else {
         return Ok(());
@@ -263,7 +263,7 @@ impl LoginResult {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires embedded Postgres binary download"]
+#[cfg_attr(not(feature = "integration"), ignore = "enable with --features integration (requires Postgres: embedded or external)")]
 async fn login_flow_sets_refresh_cookie_and_persists_session() -> Result<()> {
     let Some(ctx) = TestContext::bootstrap().await? else {
         return Ok(());
@@ -289,7 +289,7 @@ async fn login_flow_sets_refresh_cookie_and_persists_session() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires embedded Postgres binary download"]
+#[cfg_attr(not(feature = "integration"), ignore = "enable with --features integration (requires Postgres: embedded or external)")]
 async fn refresh_session_rotates_cookie_and_refresh_token() -> Result<()> {
     let Some(ctx) = TestContext::bootstrap().await? else {
         return Ok(());
@@ -344,7 +344,7 @@ async fn refresh_session_rotates_cookie_and_refresh_token() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires embedded Postgres binary download"]
+#[cfg_attr(not(feature = "integration"), ignore = "enable with --features integration (requires Postgres: embedded or external)")]
 async fn logout_revokes_refresh_token_and_clears_cookie() -> Result<()> {
     let Some(ctx) = TestContext::bootstrap().await? else {
         return Ok(());
@@ -383,7 +383,7 @@ async fn logout_revokes_refresh_token_and_clears_cookie() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires embedded Postgres binary download"]
+#[cfg_attr(not(feature = "integration"), ignore = "enable with --features integration (requires Postgres: embedded or external)")]
 async fn login_locks_account_after_repeated_failures() -> Result<()> {
     let Some(ctx) = TestContext::bootstrap().await? else {
         return Ok(());
@@ -425,7 +425,7 @@ async fn login_locks_account_after_repeated_failures() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires embedded Postgres binary download"]
+#[cfg_attr(not(feature = "integration"), ignore = "enable with --features integration (requires Postgres: embedded or external)")]
 async fn login_requires_mfa_when_enforced() -> Result<()> {
     let Some(ctx) = TestContext::bootstrap_with_options(TestOptions {
         require_mfa: true,
@@ -458,7 +458,7 @@ async fn login_requires_mfa_when_enforced() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires embedded Postgres binary download"]
+#[cfg_attr(not(feature = "integration"), ignore = "enable with --features integration (requires Postgres: embedded or external)")]
 async fn login_rejects_previously_locked_account() -> Result<()> {
     let Some(ctx) = TestContext::bootstrap_with_options(TestOptions {
         failed_attempts: 5,
@@ -492,7 +492,7 @@ async fn login_rejects_previously_locked_account() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires embedded Postgres binary download"]
+#[cfg_attr(not(feature = "integration"), ignore = "enable with --features integration (requires Postgres: embedded or external)")]
 async fn refresh_session_rejects_reused_cookie() -> Result<()> {
     let Some(ctx) = TestContext::bootstrap().await? else {
         return Ok(());
@@ -518,7 +518,7 @@ async fn refresh_session_rejects_reused_cookie() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires embedded Postgres binary download"]
+#[cfg_attr(not(feature = "integration"), ignore = "enable with --features integration (requires Postgres: embedded or external)")]
 async fn logout_clears_cookie_and_prevents_refresh() -> Result<()> {
     let Some(ctx) = TestContext::bootstrap().await? else {
         return Ok(());

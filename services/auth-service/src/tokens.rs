@@ -304,12 +304,16 @@ impl TokenSigner {
 
         let hash = Self::hash_refresh_token(token);
         let mut tx = self.pool.begin().await?;
-
+        // NOTE: We previously relied on a nullable revoked_at column to soft-revoke tokens.
+        // Some environments (or older migrations) may lack that column, resulting in 500s during
+        // /session refresh. To remain backward compatible we now perform an explicit SELECT then
+        // DELETE (hard revoke) inside the same transaction. This preserves one-time semantics
+        // without schema coupling.
         let row = sqlx::query_as::<_, RefreshTokenRow>(
-            "SELECT r.jti, r.user_id, r.tenant_id, r.expires_at, u.name, u.email, u.role, u.is_active, u.created_at, u.updated_at, u.last_password_reset, u.force_password_reset \\
-             FROM auth_refresh_tokens r \\
+            "SELECT r.jti, r.user_id, r.tenant_id, r.expires_at, u.name, u.email, u.role, u.is_active, u.created_at, u.updated_at, u.last_password_reset, u.force_password_reset \
+             FROM auth_refresh_tokens r \
              JOIN users u ON u.id = r.user_id \
-             WHERE r.token_hash = $1 AND r.revoked_at IS NULL \
+             WHERE r.token_hash = $1 \
              FOR UPDATE",
         )
         .bind(hash.as_slice())
@@ -318,22 +322,14 @@ impl TokenSigner {
 
         let account = if let Some(row) = row {
             let now = Utc::now();
-
-            if row.expires_at <= now {
-                sqlx::query(
-                    "UPDATE auth_refresh_tokens SET revoked_at = NOW() WHERE jti = $1 AND revoked_at IS NULL"
-                )
+            // Hard delete regardless; token is single-use.
+            sqlx::query("DELETE FROM auth_refresh_tokens WHERE jti = $1")
                 .bind(row.jti)
                 .execute(&mut tx)
                 .await?;
+            if row.expires_at <= now {
                 None
             } else {
-                sqlx::query(
-                    "UPDATE auth_refresh_tokens SET revoked_at = NOW() WHERE jti = $1 AND revoked_at IS NULL"
-                )
-                .bind(row.jti)
-                .execute(&mut tx)
-                .await?;
                 Some(RefreshTokenAccount {
                     jti: row.jti,
                     user_id: row.user_id,

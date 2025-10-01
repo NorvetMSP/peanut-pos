@@ -18,7 +18,7 @@ use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sqlx::{FromRow, Postgres, QueryBuilder};
-use tracing::{error, info, warn};
+use tracing::{error, info, warn, instrument, Span};
 use uuid::Uuid;
 
 use crate::config::AuthConfig;
@@ -1098,26 +1098,41 @@ pub async fn login_user(
     Ok(reply)
 }
 
+#[instrument(name = "refresh_session", skip(state, headers), fields(outcome = "pending"))]
 pub async fn refresh_session(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Response, AuthError> {
     let Some(raw_cookie) = extract_refresh_cookie(&headers, state.config.as_ref()) else {
+        tracing::debug!("missing refresh cookie");
+        Span::current().record("outcome", &tracing::field::display("missing_cookie"));
         return Err(AuthError::session_expired());
     };
 
-    let consumed = state
-        .token_signer
-        .consume_refresh_token(&raw_cookie)
-        .await
-        .map_err(|err| {
-            error!(error = ?err, "Failed to consume refresh token");
-            AuthError::internal_error("Unable to refresh session.")
-        })?;
+    let consumed = state.token_signer.consume_refresh_token(&raw_cookie).await;
+    let consumed = match consumed {
+        Ok(c) => c,
+        Err(err) => {
+            // Distinguish between an invalid/expired token vs infrastructure error.
+            // If token parsing/validation failed we surface session_expired (401) instead of 500.
+            let err_str = err.to_string();
+            if err_str.contains("expired") || err_str.contains("invalid") {
+                warn!(error = %err, "refresh token invalid or expired");
+                Span::current().record("outcome", &tracing::field::display("invalid_refresh"));
+                return Err(AuthError::session_expired());
+            }
+            error!(error = %err, "Failed to consume refresh token (infrastructure error)");
+            Span::current().record("outcome", &tracing::field::display("error"));
+            return Err(AuthError::internal_error("Unable to refresh session."));
+        }
+    };
 
     let account = match consumed {
         Some(account) => account,
-        None => return Err(AuthError::session_expired()),
+        None => {
+            Span::current().record("outcome", &tracing::field::display("not_found"));
+            return Err(AuthError::session_expired());
+        }
     };
 
     let user = User {
@@ -1139,14 +1154,11 @@ pub async fn refresh_session(
         roles: vec![user.role.clone()],
     };
 
-    let issued = state
-        .token_signer
-        .issue_tokens(subject)
-        .await
-        .map_err(|err| {
-            error!(user_id = %user.id, error = %err, "Failed to issue tokens during session refresh");
-            AuthError::internal_error("Unable to refresh session.")
-        })?;
+    let issued = state.token_signer.issue_tokens(subject).await.map_err(|err| {
+        error!(user_id = %user.id, error = %err, "Failed to issue tokens during session refresh");
+        Span::current().record("outcome", &tracing::field::display("issue_error"));
+        AuthError::internal_error("Unable to refresh session.")
+    })?;
 
     let IssuedTokens {
         access_token,
@@ -1186,6 +1198,7 @@ pub async fn refresh_session(
         }
     }
 
+    Span::current().record("outcome", &tracing::field::display("success"));
     Ok(reply)
 }
 

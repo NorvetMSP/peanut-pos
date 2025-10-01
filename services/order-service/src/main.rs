@@ -52,6 +52,7 @@ impl FromRef<AppState> for Arc<JwtVerifier> {
 struct PaymentCompletedEvent {
     pub order_id: Uuid,
     pub tenant_id: Uuid,
+    #[allow(dead_code)]
     pub amount: BigDecimal,
 }
 

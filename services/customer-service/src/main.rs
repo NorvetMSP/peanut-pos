@@ -1058,7 +1058,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires Postgres database with customer-service schema"]
+    #[cfg_attr(not(feature = "integration"), ignore = "enable with --features integration (requires Postgres schema migrations)")]
     async fn update_customer_allows_editing_contact_fields(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let database_url = match require_database_url() {

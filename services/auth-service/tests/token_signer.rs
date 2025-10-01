@@ -52,7 +52,7 @@ async fn seed_user(pool: &PgPool) -> Result<(Uuid, Uuid)> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires embedded Postgres binary download"]
+#[cfg_attr(not(feature = "integration"), ignore = "enable with --features integration (requires Postgres: embedded or external)")]
 async fn token_signer_new_requires_signing_key() -> Result<()> {
     let Some(db) = TestDatabase::setup().await? else {
         return Ok(());
@@ -74,7 +74,7 @@ async fn token_signer_new_requires_signing_key() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires embedded Postgres binary download"]
+#[cfg_attr(not(feature = "integration"), ignore = "enable with --features integration (requires Postgres: embedded or external)")]
 async fn jwks_returns_fallback_when_no_active_db_keys() -> Result<()> {
     let Some(db) = TestDatabase::setup().await? else {
         return Ok(());
@@ -97,7 +97,7 @@ async fn jwks_returns_fallback_when_no_active_db_keys() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires embedded Postgres binary download"]
+#[cfg_attr(not(feature = "integration"), ignore = "enable with --features integration (requires Postgres: embedded or external)")]
 async fn consume_refresh_token_returns_none_for_unknown_token() -> Result<()> {
     let Some(db) = TestDatabase::setup().await? else {
         return Ok(());
@@ -120,7 +120,7 @@ async fn consume_refresh_token_returns_none_for_unknown_token() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires embedded Postgres binary download"]
+#[cfg_attr(not(feature = "integration"), ignore = "enable with --features integration (requires Postgres: embedded or external)")]
 async fn consume_refresh_token_revokes_on_second_use() -> Result<()> {
     let Some(db) = TestDatabase::setup().await? else {
         return Ok(());
