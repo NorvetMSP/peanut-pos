@@ -25,15 +25,31 @@ impl RoundingMode {
 
 // Global rounding mode (initialized once from env) defaulting to HalfUp.
 static ROUNDING_MODE: OnceLock<RoundingMode> = OnceLock::new();
+#[cfg(feature = "prometheus-metrics")]
+static PROM_REGISTRY: OnceLock<prometheus::Registry> = OnceLock::new();
+#[cfg(feature = "prometheus-metrics")]
+static ROUNDING_MODE_GAUGE: OnceLock<prometheus::IntGauge> = OnceLock::new();
 
 /// Initialize rounding mode from the MONEY_ROUNDING env variable (idempotent).
 /// Falls back to HalfUp if unset or invalid.
 pub fn init_rounding_mode_from_env() -> RoundingMode {
     if let Some(mode) = ROUNDING_MODE.get() { return *mode; }
-    let selected = std::env::var("MONEY_ROUNDING").ok()
-        .and_then(|v| RoundingMode::parse(&v))
-        .unwrap_or(RoundingMode::HalfUp);
+    let raw = std::env::var("MONEY_ROUNDING").ok();
+    let mut warned = false;
+    let selected = if let Some(val) = raw.clone() {
+        match RoundingMode::parse(&val) {
+            Some(m) => m,
+            None => { warned = true; RoundingMode::HalfUp }
+        }
+    } else { RoundingMode::HalfUp };
     let _ = ROUNDING_MODE.set(selected); // ignore error if already set race (same value semantics)
+    if warned {
+        tracing::warn!(invalid_value = ?raw, fallback = ?selected, "Invalid MONEY_ROUNDING value; falling back to default");
+    }
+    #[cfg(feature = "prometheus-metrics")]
+    {
+        init_metrics_once(selected);
+    }
     selected
 }
 
@@ -58,15 +74,40 @@ pub fn log_rounding_mode_once() {
 
 /// Apply configured rounding to scale=2 using Half-Up (away from zero on .5).
 fn round_scale_2(value: &BigDecimal) -> BigDecimal {
-    match current_rounding_mode() {
+    let out = match current_rounding_mode() {
         RoundingMode::HalfUp => half_up(value, 2),
         RoundingMode::Truncate => truncate(value, 2),
         RoundingMode::Bankers => bankers(value, 2),
-    }
+    };
+    trace_rounding_event(value, &out);
+    out
 }
 
 /// Public normalization entrypoint (round + enforce scale 2)
 pub fn normalize_scale(value: &BigDecimal) -> BigDecimal { round_scale_2(value) }
+
+#[inline]
+fn trace_rounding_event(original: &BigDecimal, rounded: &BigDecimal) {
+    // Lightweight debug-only instrumentation; can be swapped for metrics crate later.
+    if cfg!(debug_assertions) {
+        tracing::debug!(orig = %original, out = %rounded, mode = ?current_rounding_mode(), "money.normalize");
+    }
+}
+
+#[cfg(feature = "prometheus-metrics")]
+fn init_metrics_once(mode: RoundingMode) {
+    if ROUNDING_MODE_GAUGE.get().is_some() { return; }
+    let registry = prometheus::Registry::new();
+    let gauge = prometheus::IntGauge::new("money_rounding_mode", "Active configured rounding mode (1=HalfUp,2=Truncate,3=Bankers)").expect("gauge");
+    let val = match mode { RoundingMode::HalfUp => 1, RoundingMode::Truncate => 2, RoundingMode::Bankers => 3 };
+    gauge.set(val);
+    registry.register(Box::new(gauge.clone())).ok();
+    let _ = PROM_REGISTRY.set(registry);
+    let _ = ROUNDING_MODE_GAUGE.set(gauge);
+}
+
+#[cfg(feature = "prometheus-metrics")]
+pub fn registry() -> Option<&'static prometheus::Registry> { PROM_REGISTRY.get() }
 
 /// Half-up rounding helper: scale target digits; positive & negative symmetrical.
 fn half_up(value: &BigDecimal, scale: i32) -> BigDecimal {
@@ -295,6 +336,13 @@ impl<'a> std::iter::Sum<&'a Money> for Money {
 impl From<BigDecimal> for Money { fn from(v: BigDecimal) -> Self { Money::new(v) } }
 impl From<Money> for BigDecimal { fn from(m: Money) -> Self { m.0 } }
 
+/// Aggregate rounding strategy: sums raw BigDecimals then rounds once at end.
+/// Compare with summing Money values (incremental rounding) for potential biases.
+pub fn aggregate_rounding_sum(values: &[BigDecimal]) -> Money {
+    let total_raw = values.iter().fold(BigDecimal::from(0), |acc, v| acc + v);
+    Money::new(total_raw)
+}
+
 // --- sqlx integration (Postgres) ---
 impl Type<Postgres> for Money {
     fn type_info() -> PgTypeInfo { <BigDecimal as Type<Postgres>>::type_info() }
@@ -485,5 +533,34 @@ mod tests {
         if current_rounding_mode() == RoundingMode::HalfUp { let _ = init_rounding_mode_from_env(); }
         // We can't assert strictly due to OnceLock single-set semantics; main path is covered by earlier tests.
         assert!(matches!(current_rounding_mode(), RoundingMode::HalfUp | RoundingMode::Truncate | RoundingMode::Bankers));
+    }
+
+    #[test]
+    fn test_aggregate_rounding_sum_bias_example() {
+        // Values chosen so that half-up incremental vs aggregate differ
+        // e.g. three values each with third of a cent beyond 2 decimals
+        let parts = vec![
+            BigDecimal::from_str("1.001").unwrap(),
+            BigDecimal::from_str("1.001").unwrap(),
+            BigDecimal::from_str("1.001").unwrap(),
+        ];
+        // Incremental: each rounds to 1.00 => 3.00 total
+        let incremental: Money = parts.iter().cloned().map(Money::from).sum();
+        assert_eq!(incremental.inner().to_string(), "3.00");
+        // Aggregate raw: sum = 3.003 -> rounds to 3.00 still (in this case equal)
+        let aggregate = aggregate_rounding_sum(&parts);
+        assert_eq!(aggregate.inner().to_string(), "3.00");
+
+        // Different case where aggregate differs: values around .005 boundary
+        let parts2 = vec![
+            BigDecimal::from_str("0.005").unwrap(),
+            BigDecimal::from_str("0.005").unwrap(),
+        ];
+        let incremental2: Money = parts2.iter().cloned().map(Money::from).sum(); // each 0.01 => 0.02
+        assert_eq!(incremental2.inner().to_string(), "0.02");
+        let aggregate2 = aggregate_rounding_sum(&parts2); // raw 0.010 -> 0.01
+        assert_eq!(aggregate2.inner().to_string(), "0.01");
+        // Demonstrate bias direction (incremental >= aggregate in half-up)
+        assert!(incremental2.as_cents() >= aggregate2.as_cents());
     }
 }

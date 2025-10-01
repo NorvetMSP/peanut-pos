@@ -1,0 +1,69 @@
+name: sqlx-offline
+
+on:
+  pull_request:
+    paths:
+      - 'services/**'
+      - 'regenerate-sqlx-data.ps1'
+      - 'scripts/convert-sqlx-runtime-to-macro.ps1'
+      - 'docs/development/sqlx-offline.md'
+  push:
+    branches: [ main ]
+    paths:
+      - 'services/**'
+      - 'regenerate-sqlx-data.ps1'
+
+jobs:
+  regen-and-offline-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+      - name: Start Postgres
+        uses: ankane/setup-postgres@v1
+        with:
+          postgres-version: 15
+      - name: Create database
+        run: |
+          psql -h localhost -U postgres -c "CREATE USER novapos WITH PASSWORD 'novapos';" || true
+          psql -h localhost -U postgres -c "CREATE DATABASE novapos OWNER novapos;" || true
+        env:
+          PGPASSWORD: postgres
+      - name: Install sqlx-cli
+        run: cargo install sqlx-cli --version 0.8.6 --no-default-features --features native-tls,postgres
+      - name: Regenerate offline metadata (diff)
+        run: pwsh ./regenerate-sqlx-data.ps1 -Prune -Diff -FailOnDrift -Features integration
+        env:
+          DATABASE_URL: postgres://novapos:novapos@localhost:5432/novapos
+      - name: Verify no unstaged changes after regen
+        run: |
+          git update-index -q --refresh
+          if ! git diff --quiet --exit-code; then
+            echo "ERROR: Regeneration produced unstaged changes (did you forget to commit updated .sqlx metadata?)." >&2
+            git --no-pager diff --name-only
+            exit 1
+          fi
+      - name: Offline test parse (no run)
+        run: |
+          echo "Parsing tests under SQLX_OFFLINE (no execution)"
+          SQLX_OFFLINE=1 cargo test --workspace --all-targets --no-run
+      - name: Offline build gate
+        run: |
+          echo "Enforcing SQLX_OFFLINE build"
+          SQLX_OFFLINE=1 cargo build --workspace --all-targets
+      - name: Clippy (optional)
+        run: cargo clippy --workspace --all-targets -- -D warnings
