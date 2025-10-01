@@ -1,4 +1,6 @@
-﻿# Ignore files
+﻿sqlx-query-report.json
+sqlx-runtime-macro-suggestions.json
+# Ignore files
 node_modules/
 dist/
 target/

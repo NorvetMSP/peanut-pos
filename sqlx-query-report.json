@@ -1,0 +1,100 @@
+﻿{
+    "generated_at":  "2025-10-01T12:56:41.7547735-04:00",
+    "database_url":  "postgres://novapos:novapos@localhost:5432/novapos",
+    "services":  {
+                     "order-service":  {
+                                           "classification":  "no-sqlx",
+                                           "count":  2,
+                                           "added":  [
+
+                                                     ],
+                                           "removed":  [
+
+                                                       ]
+                                       },
+                     "payment-service":  {
+                                             "classification":  "no-sqlx",
+                                             "count":  0,
+                                             "added":  [
+
+                                                       ],
+                                             "removed":  [
+
+                                                         ]
+                                         },
+                     "auth-service":  {
+                                          "classification":  "no-sqlx",
+                                          "count":  7,
+                                          "added":  [
+
+                                                    ],
+                                          "removed":  [
+
+                                                      ]
+                                      },
+                     "customer-service":  {
+                                              "classification":  "no-sqlx",
+                                              "count":  6,
+                                              "added":  [
+
+                                                        ],
+                                              "removed":  [
+
+                                                          ]
+                                          },
+                     "integration-gateway":  {
+                                                 "classification":  "no-sqlx",
+                                                 "count":  0,
+                                                 "added":  [
+
+                                                           ],
+                                                 "removed":  [
+
+                                                             ]
+                                             },
+                     "product-service":  {
+                                             "classification":  "no-sqlx",
+                                             "count":  0,
+                                             "added":  [
+
+                                                       ],
+                                             "removed":  [
+
+                                                         ]
+                                         },
+                     "loyalty-service":  {
+                                             "classification":  "no-sqlx",
+                                             "count":  2,
+                                             "added":  [
+
+                                                       ],
+                                             "removed":  [
+
+                                                         ]
+                                         },
+                     "inventory-service":  {
+                                               "classification":  "no-sqlx",
+                                               "count":  9,
+                                               "added":  [
+
+                                                         ],
+                                               "removed":  [
+
+                                                           ]
+                                           },
+                     "analytics-service":  {
+                                               "classification":  "no-sqlx",
+                                               "count":  0,
+                                               "added":  [
+
+                                                         ],
+                                               "removed":  [
+
+                                                           ]
+                                           }
+                 },
+    "diff":  {
+                 "total_added":  0,
+                 "total_removed":  0
+             }
+}

@@ -49,20 +49,6 @@ pub struct TokenSubject {
 }
 
 #[derive(FromRow)]
-struct RefreshTokenRow {
-    jti: Uuid,
-    user_id: Uuid,
-    tenant_id: Uuid,
-    expires_at: DateTime<Utc>,
-    name: String,
-    email: String,
-    role: String,
-    is_active: bool,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
-    last_password_reset: Option<DateTime<Utc>>,
-    force_password_reset: bool,
-}
 
 #[derive(Debug, Clone)]
 pub struct RefreshTokenAccount {
@@ -304,36 +290,33 @@ impl TokenSigner {
 
         let hash = Self::hash_refresh_token(token);
         let mut tx = self.pool.begin().await?;
-
-        let row = sqlx::query_as::<_, RefreshTokenRow>(
-            "SELECT r.jti, r.user_id, r.tenant_id, r.expires_at, u.name, u.email, u.role, u.is_active, u.created_at, u.updated_at, u.last_password_reset, u.force_password_reset \\
-             FROM auth_refresh_tokens r \\
-             JOIN users u ON u.id = r.user_id \
-             WHERE r.token_hash = $1 AND r.revoked_at IS NULL \
-             FOR UPDATE",
+        // NOTE: We previously relied on a nullable revoked_at column to soft-revoke tokens.
+        // Some environments (or older migrations) may lack that column, resulting in 500s during
+        // /session refresh. To remain backward compatible we now perform an explicit SELECT then
+        // DELETE (hard revoke) inside the same transaction. This preserves one-time semantics
+        // without schema coupling.
+        let row = sqlx::query!(
+            r#"SELECT r.jti, r.user_id, r.tenant_id, r.expires_at,
+                       u.name, u.email, u.role, u.is_active,
+                       u.created_at, u.updated_at, u.last_password_reset, u.force_password_reset
+                FROM auth_refresh_tokens r
+                JOIN users u ON u.id = r.user_id
+                WHERE r.token_hash = $1
+                FOR UPDATE"#,
+            hash.as_slice()
         )
-        .bind(hash.as_slice())
-        .fetch_optional(&mut tx)
+        .fetch_optional(&mut *tx)
         .await?;
 
         let account = if let Some(row) = row {
             let now = Utc::now();
-
-            if row.expires_at <= now {
-                sqlx::query(
-                    "UPDATE auth_refresh_tokens SET revoked_at = NOW() WHERE jti = $1 AND revoked_at IS NULL"
-                )
-                .bind(row.jti)
-                .execute(&mut tx)
+            // Hard delete regardless; token is single-use.
+            sqlx::query!("DELETE FROM auth_refresh_tokens WHERE jti = $1", row.jti)
+                .execute(&mut *tx)
                 .await?;
+            if row.expires_at <= now {
                 None
             } else {
-                sqlx::query(
-                    "UPDATE auth_refresh_tokens SET revoked_at = NOW() WHERE jti = $1 AND revoked_at IS NULL"
-                )
-                .bind(row.jti)
-                .execute(&mut tx)
-                .await?;
                 Some(RefreshTokenAccount {
                     jti: row.jti,
                     user_id: row.user_id,

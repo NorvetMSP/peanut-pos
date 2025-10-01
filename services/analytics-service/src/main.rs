@@ -12,6 +12,7 @@ use axum::{
     Router,
 };
 use common_auth::{JwtConfig, JwtVerifier};
+use common_money::log_rounding_mode_once;
 use futures_util::StreamExt;
 use rdkafka::consumer::{Consumer, StreamConsumer};
 use rdkafka::producer::{FutureProducer, FutureRecord};
@@ -75,6 +76,7 @@ async fn health() -> &'static str {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().with_env_filter("info").init();
+    log_rounding_mode_once();
 
     let database_url = env::var("DATABASE_URL")?;
     let db = PgPool::connect(&database_url).await?;

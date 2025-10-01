@@ -1,0 +1,57 @@
+name: Windows Rust Service Build
+
+on:
+  pull_request:
+    paths:
+      - 'services/**'
+      - '.github/workflows/windows-build.yml'
+  push:
+    branches: [ main ]
+    paths:
+      - 'services/**'
+      - '.github/workflows/windows-build.yml'
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        service: [auth-service, product-service]
+    env:
+      RUSTFLAGS: "-C target-feature=+crt-static"
+      SQLX_OFFLINE: 'true'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('services/**/Cargo.toml') }}
+
+      - name: Install system deps (vcpkg zlib shim)
+        shell: pwsh
+        run: |
+          choco install -y cmake ninja
+
+      - name: Install sqlx-cli
+        shell: pwsh
+        run: cargo install sqlx-cli --no-default-features --features native-tls,postgres
+
+      - name: Prepare offline metadata (selected service)
+        shell: pwsh
+        run: |
+          $svc = "${{ matrix.service }}"
+          pwsh ./regenerate-sqlx-data.ps1 -Services $svc -SkipMigrations
+
+      - name: Build service
+        shell: pwsh
+        run: |
+          cargo build -p ${{ matrix.service }} --release

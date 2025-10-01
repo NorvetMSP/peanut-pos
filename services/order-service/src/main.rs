@@ -1,4 +1,5 @@
 use anyhow::Context;
+use bigdecimal::BigDecimal;
 use axum::{
     extract::FromRef,
     http::{
@@ -23,6 +24,7 @@ use tokio::net::TcpListener;
 use tokio::time::{interval, MissedTickBehavior};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tracing::{debug, info, warn};
+use common_money::log_rounding_mode_once;
 use uuid::Uuid;
 
 mod order_handlers;
@@ -50,7 +52,8 @@ impl FromRef<AppState> for Arc<JwtVerifier> {
 struct PaymentCompletedEvent {
     pub order_id: Uuid,
     pub tenant_id: Uuid,
-    pub amount: f64,
+    #[allow(dead_code)]
+    pub amount: BigDecimal,
 }
 
 #[derive(serde::Deserialize, Debug)]
@@ -63,7 +66,7 @@ struct PaymentFailedEvent {
 
 #[derive(sqlx::FromRow)]
 struct OrderFinancialSummary {
-    total: Option<f64>,
+    total: Option<BigDecimal>,
     customer_id: Option<Uuid>,
     offline: bool,
     payment_method: String,
@@ -73,8 +76,8 @@ struct OrderFinancialSummary {
 struct OrderItemFinancialRow {
     product_id: Uuid,
     quantity: i32,
-    unit_price: f64,
-    line_total: f64,
+    unit_price: BigDecimal,
+    line_total: BigDecimal,
 }
 
 async fn health() -> &'static str {
@@ -84,6 +87,7 @@ async fn health() -> &'static str {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().with_env_filter("info").init();
+    log_rounding_mode_once();
 
     let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
     let db = PgPool::connect(&database_url).await?;
@@ -363,7 +367,10 @@ async fn main() -> anyhow::Result<()> {
                                                                         "order_id": evt.order_id,
                                                                         "tenant_id": evt.tenant_id,
                                                                         "items": event_items,
-                                                                        "total": order_row.total.unwrap_or(0.0),
+                                                                        "total": order_row
+                                                                            .total
+                                                                            .clone()
+                                                                            .unwrap_or_else(|| BigDecimal::from(0)),
                                                                         "customer_id": order_row.customer_id,
                                                                         "offline": order_row.offline,
                                                                         "payment_method": order_row.payment_method,

@@ -12,12 +12,13 @@ use common_auth::{
     ensure_role, tenant_id_from_request, AuthContext, JwtConfig, JwtVerifier, ROLE_ADMIN,
     ROLE_CASHIER, ROLE_MANAGER, ROLE_SUPER_ADMIN,
 };
+use common_money::log_rounding_mode_once;
 use futures::StreamExt;
 use rdkafka::consumer::{Consumer, StreamConsumer};
 use rdkafka::producer::{FutureProducer, FutureRecord};
 use rdkafka::Message;
 use serde::Deserialize;
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 use std::{
     collections::HashMap,
     env,
@@ -70,32 +71,28 @@ async fn get_points(
             "customer_id required".into(),
         ))?;
 
-    let rec =
-        sqlx::query("SELECT points FROM loyalty_points WHERE customer_id =  AND tenant_id = ")
-            .bind(cust_id)
-            .bind(tenant_id)
-            .fetch_one(&state.db)
-            .await
-            .map_err(|e| {
-                (
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("DB error: {}", e),
-                )
-            })?;
-
-    let points: i32 = rec.try_get("points").map_err(|e| {
+    let rec = sqlx::query!(
+        r#"SELECT points FROM loyalty_points WHERE customer_id = $1 AND tenant_id = $2"#,
+        cust_id,
+        tenant_id
+    )
+    .fetch_one(&state.db)
+    .await
+    .map_err(|e| {
         (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             format!("DB error: {}", e),
         )
     })?;
 
-    Ok(points.to_string())
+    // query! macro creates a struct with a `points` field directly
+    Ok(rec.points.to_string())
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().with_env_filter("info").init();
+    log_rounding_mode_once();
 
     let database_url = env::var("DATABASE_URL")?;
     let db_pool = PgPool::connect(&database_url).await?;
@@ -192,42 +189,102 @@ async fn handle_completed_event(
     };
 
     if delta != 0 {
-        let _ = sqlx::query(
-            "INSERT INTO loyalty_points (customer_id, tenant_id, points)
-             VALUES (, , )
-             ON CONFLICT (customer_id) DO UPDATE
-             SET points = loyalty_points.points + EXCLUDED.points",
+        let _ = sqlx::query!(
+            r#"INSERT INTO loyalty_points (customer_id, tenant_id, points)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (customer_id, tenant_id) DO UPDATE
+                SET points = loyalty_points.points + EXCLUDED.points"#,
+            cust_id,
+            evt.tenant_id,
+            delta
         )
-        .bind(cust_id)
-        .bind(evt.tenant_id)
-        .bind(delta)
         .execute(db)
         .await;
     }
 
-    if let Ok(record) = sqlx::query("SELECT points FROM loyalty_points WHERE customer_id = ")
-        .bind(cust_id)
-        .fetch_one(db)
-        .await
+    if let Ok(record) = sqlx::query!(
+        r#"SELECT points FROM loyalty_points WHERE customer_id = $1 AND tenant_id = $2"#,
+        cust_id,
+        evt.tenant_id
+    )
+    .fetch_one(db)
+    .await
     {
-        if let Ok(new_balance) = record.try_get::<i32, _>("points") {
-            let loyalty_event = serde_json::json!({
-                "order_id": evt.order_id,
-                "customer_id": cust_id,
-                "tenant_id": evt.tenant_id,
-                "points_delta": delta,
-                "new_balance": new_balance
-            });
+        let new_balance = record.points;
+        let loyalty_event = serde_json::json!({
+            "order_id": evt.order_id,
+            "customer_id": cust_id,
+            "tenant_id": evt.tenant_id,
+            "points_delta": delta,
+            "new_balance": new_balance
+        });
+        let _ = producer
+            .send(
+                FutureRecord::to("loyalty.updated")
+                    .payload(&loyalty_event.to_string())
+                    .key(&evt.tenant_id.to_string()),
+                Duration::from_secs(0),
+            )
+            .await;
+    }
+}
 
-            let _ = producer
-                .send(
-                    FutureRecord::to("loyalty.updated")
-                        .payload(&loyalty_event.to_string())
-                        .key(&evt.tenant_id.to_string()),
-                    Duration::from_secs(0),
-                )
-                .await;
-        }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::{Executor, PgPool};
+    use rdkafka::producer::FutureProducer;
+
+    async fn test_pool() -> PgPool {
+        let url = std::env::var("TEST_DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://novapos:novapos@localhost:5432/novapos_test".into());
+        let pool = PgPool::connect(&url).await.expect("connect test db");
+        // Minimal schema for points table
+        pool.execute(
+            r#"CREATE TABLE IF NOT EXISTS loyalty_points (
+                customer_id UUID NOT NULL,
+                tenant_id UUID NOT NULL,
+                points INT NOT NULL DEFAULT 0,
+                PRIMARY KEY (customer_id, tenant_id)
+            )"#,
+        )
+        .await
+        .expect("create table");
+        pool
+    }
+
+    fn dummy_producer() -> FutureProducer {
+        // Use a local bootstrap that may not exist; we won't rely on send success in this test.
+        rdkafka::ClientConfig::new()
+            .set("bootstrap.servers", "localhost:9092")
+            .create()
+            .expect("create producer")
+    }
+
+    #[tokio::test]
+    #[cfg_attr(not(feature = "integration"), ignore = "enable with --features integration (requires Postgres TEST_DATABASE_URL or local novapos_test)")]
+    async fn test_handle_completed_event_upserts_points() {
+        let pool = test_pool().await;
+        let producer = dummy_producer();
+        let customer_id = Uuid::new_v4();
+        let tenant_id = Uuid::new_v4();
+        let evt = CompletedEvent {
+            order_id: Uuid::new_v4(),
+            tenant_id,
+            total: 42.75,
+            customer_id: Some(customer_id),
+        };
+        handle_completed_event(&evt, customer_id, &pool, &producer).await;
+
+        let rec = sqlx::query!(
+            r#"SELECT points FROM loyalty_points WHERE customer_id = $1 AND tenant_id = $2"#,
+            customer_id,
+            tenant_id
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("fetch points");
+        assert!(rec.points > 0, "points should have been incremented");
     }
 }
 

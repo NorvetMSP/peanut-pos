@@ -27,7 +27,8 @@ use std::{
 use tokio::net::TcpListener;
 use tokio::time::{interval, MissedTickBehavior};
 use tower_http::cors::{AllowOrigin, CorsLayer};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn, error};
+use common_money::log_rounding_mode_once;
 use uuid::Uuid;
 
 const CUSTOMER_WRITE_ROLES: &[&str] = &[ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_MANAGER, ROLE_CASHIER];
@@ -55,6 +56,13 @@ struct NewCustomer {
     name: String,
     email: Option<String>,
     phone: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct UpdateCustomerRequest {
+    name: Option<String>,
+    email: Option<Option<String>>,
+    phone: Option<Option<String>>,
 }
 
 #[derive(Serialize)]
@@ -149,6 +157,7 @@ struct SearchParams {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().with_env_filter("info").init();
+    log_rounding_mode_once();
 
     let database_url = env::var("DATABASE_URL")?;
     let db_pool = PgPool::connect(&database_url).await?;
@@ -180,7 +189,7 @@ async fn main() -> anyhow::Result<()> {
                 .filter_map(|origin| origin.parse::<HeaderValue>().ok())
                 .collect::<Vec<_>>(),
         ))
-        .allow_methods([Method::GET, Method::POST])
+        .allow_methods([Method::GET, Method::POST, Method::PUT])
         .allow_headers([
             ACCEPT,
             CONTENT_TYPE,
@@ -190,7 +199,7 @@ async fn main() -> anyhow::Result<()> {
 
     let app = Router::new()
         .route("/customers", post(create_customer).get(search_customers))
-        .route("/customers/:id", get(get_customer))
+        .route("/customers/:id", get(get_customer).put(update_customer))
         .route("/customers/:id/gdpr/export", post(gdpr_export_customer))
         .route("/customers/:id/gdpr/delete", post(gdpr_delete_customer))
         .route("/healthz", get(|| async { "ok" }))
@@ -418,6 +427,207 @@ async fn get_customer(
     )
     .bind(tenant_id)
     .bind(customer_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(internal_err)?
+    .ok_or((StatusCode::NOT_FOUND, "Customer not found".into()))?;
+
+    let customer = hydrate_customer_row(row, &mut key_cache).await?;
+    Ok(Json(customer))
+}
+
+async fn update_customer(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    headers: HeaderMap,
+    Path(customer_id): Path<Uuid>,
+    Json(payload): Json<UpdateCustomerRequest>,
+) -> ApiResult<Json<Customer>> {
+    ensure_role(&auth, CUSTOMER_WRITE_ROLES)?;
+    let tenant_id = tenant_id_from_request(&headers, &auth)?;
+    let mut key_cache = TenantKeyCache::new(&state, tenant_id);
+
+    let existing = sqlx::query!(
+        r#"
+        SELECT
+            id,
+            tenant_id,
+            name,
+            email,
+            phone,
+            email_encrypted,
+            phone_encrypted,
+            email_hash,
+            phone_hash,
+            pii_key_version,
+            pii_encrypted_at,
+            created_at
+        FROM customers
+        WHERE tenant_id = $1 AND id = $2
+        "#,
+        tenant_id,
+        customer_id
+    )
+    .fetch_optional(&state.db)
+    .await
+    .map_err(internal_err)?
+    .ok_or((StatusCode::NOT_FOUND, "Customer not found".into()))?;
+
+    let UpdateCustomerRequest { name, email, phone } = payload;
+
+    let mut existing_email = existing.email.clone();
+    if existing_email.is_none() {
+        existing_email = decrypt_optional_field(
+            existing.email_encrypted.clone(),
+            existing.pii_key_version,
+            &mut key_cache,
+        )
+        .await?;
+    }
+
+    let mut existing_phone = existing.phone.clone();
+    if existing_phone.is_none() {
+        existing_phone = decrypt_optional_field(
+            existing.phone_encrypted.clone(),
+            existing.pii_key_version,
+            &mut key_cache,
+        )
+        .await?;
+    }
+
+    let mut final_name = existing.name.clone();
+    let mut name_changed = false;
+    if let Some(candidate) = name.as_ref() {
+        let trimmed = candidate.trim();
+        if trimmed.is_empty() {
+            return Err((StatusCode::BAD_REQUEST, "Name must not be empty".into()));
+        }
+        if trimmed != existing.name {
+            final_name = trimmed.to_string();
+            name_changed = true;
+        }
+    }
+
+    let final_email = match email {
+        Some(value) => sanitize_optional(value),
+        None => existing_email.clone(),
+    };
+    let final_phone = match phone {
+        Some(value) => sanitize_optional(value),
+        None => existing_phone.clone(),
+    };
+
+    let email_changed = final_email != existing_email;
+    let phone_changed = final_phone != existing_phone;
+
+    if !name_changed && !email_changed && !phone_changed {
+        let row = CustomerRow {
+            id: existing.id,
+            tenant_id: existing.tenant_id,
+            name: existing.name.clone(),
+            email: existing.email.clone(),
+            phone: existing.phone.clone(),
+            email_encrypted: existing.email_encrypted.clone(),
+            phone_encrypted: existing.phone_encrypted.clone(),
+            pii_key_version: existing.pii_key_version,
+            created_at: existing.created_at,
+        };
+        let customer = hydrate_customer_row(row, &mut key_cache).await?;
+        return Ok(Json(customer));
+    }
+
+    let (
+        email_encrypted_param,
+        email_hash_param,
+        phone_encrypted_param,
+        phone_hash_param,
+        pii_key_version_param,
+        pii_encrypted_at_param,
+    ) = if final_email.is_some() || final_phone.is_some() {
+        let active_key = key_cache.active().await?;
+        let key_bytes = active_key.key;
+
+        let (enc_email, hash_email) = match final_email.as_ref() {
+            Some(value) => {
+                let encrypted = encrypt_field(&key_bytes, value.as_bytes()).map_err(crypto_err)?;
+                let normalized = normalize_email(value);
+                let hash = if normalized.is_empty() {
+                    None
+                } else {
+                    Some(
+                        deterministic_hash(&key_bytes, normalized.as_bytes())
+                            .map_err(crypto_err)?,
+                    )
+                };
+                (Some(encrypted), hash)
+            }
+            None => (None, None),
+        };
+
+        let (enc_phone, hash_phone) = match final_phone.as_ref() {
+            Some(value) => {
+                let encrypted = encrypt_field(&key_bytes, value.as_bytes()).map_err(crypto_err)?;
+                let normalized = normalize_phone(value);
+                let hash = if normalized.is_empty() {
+                    None
+                } else {
+                    Some(
+                        deterministic_hash(&key_bytes, normalized.as_bytes())
+                            .map_err(crypto_err)?,
+                    )
+                };
+                (Some(encrypted), hash)
+            }
+            None => (None, None),
+        };
+
+        (
+            enc_email,
+            hash_email,
+            enc_phone,
+            hash_phone,
+            Some(active_key.version),
+            Some(Utc::now()),
+        )
+    } else {
+        (None, None, None, None, None, None)
+    };
+
+    let row = sqlx::query_as!(
+        CustomerRow,
+        r#"
+        UPDATE customers
+        SET name = $1,
+            email = NULL,
+            phone = NULL,
+            email_encrypted = $2,
+            phone_encrypted = $3,
+            email_hash = $4,
+            phone_hash = $5,
+            pii_key_version = $6,
+            pii_encrypted_at = $7
+        WHERE tenant_id = $8 AND id = $9
+        RETURNING
+            id,
+            tenant_id,
+            name,
+            email,
+            phone,
+            email_encrypted,
+            phone_encrypted,
+            pii_key_version,
+            created_at
+        "#,
+        final_name,
+        email_encrypted_param.as_deref(),
+        phone_encrypted_param.as_deref(),
+        email_hash_param.as_deref(),
+        phone_hash_param.as_deref(),
+        pii_key_version_param,
+        pii_encrypted_at_param,
+        tenant_id,
+        customer_id
+    )
     .fetch_optional(&state.db)
     .await
     .map_err(internal_err)?
@@ -824,4 +1034,165 @@ fn spawn_jwks_refresh(verifier: Arc<JwtVerifier>) {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{
+        extract::{Path, State},
+        http::{HeaderMap, HeaderValue},
+    };
+    use chrono::{Duration, Utc};
+    use common_auth::{AuthContext, Claims, JwtConfig, JwtVerifier, ROLE_ADMIN};
+    use common_crypto::{generate_dek, MasterKey};
+    use serde_json::json;
+    use sqlx::{migrate::MigrateError, PgPool};
+    use std::{io, sync::Arc};
+    use uuid::Uuid;
+
+    fn require_database_url() -> Option<String> {
+        std::env::var("CUSTOMER_TEST_DATABASE_URL")
+            .ok()
+            .or_else(|| std::env::var("DATABASE_URL").ok())
+    }
+
+    #[tokio::test]
+    #[cfg_attr(not(feature = "integration"), ignore = "enable with --features integration (requires Postgres schema migrations)")]
+    async fn update_customer_allows_editing_contact_fields(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let database_url = match require_database_url() {
+            Some(url) => url,
+            None => {
+                eprintln!("Skipping customer update test because DATABASE_URL is not set.");
+                return Ok(());
+            }
+        };
+
+        let pool = PgPool::connect(&database_url).await?;
+        if let Err(err) = sqlx::migrate!("./migrations").run(&pool).await {
+            if !matches!(err, MigrateError::VersionMissing(_)) {
+                return Err(err.into());
+            }
+        }
+
+        let master_key = MasterKey::from_bytes([3u8; 32])?;
+        let jwt_verifier = Arc::new(JwtVerifier::new(JwtConfig::new(
+            "test-issuer",
+            "test-audience",
+        )));
+        let state = AppState {
+            db: pool.clone(),
+            jwt_verifier,
+            master_key: Arc::new(master_key.clone()),
+        };
+
+        let tenant_id = Uuid::new_v4();
+        let actor_id = Uuid::new_v4();
+        let dek = generate_dek();
+        let encrypted_key = master_key.encrypt_tenant_dek(&dek)?;
+
+        sqlx::query!(
+            "INSERT INTO tenant_data_keys (id, tenant_id, key_version, encrypted_key, active)
+             VALUES ($1, $2, $3, $4, TRUE)",
+            Uuid::new_v4(),
+            tenant_id,
+            1i32,
+            encrypted_key
+        )
+        .execute(&pool)
+        .await?;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-tenant-id",
+            HeaderValue::from_str(&tenant_id.to_string())?,
+        );
+
+        let claims = Claims {
+            subject: actor_id,
+            tenant_id,
+            roles: vec![ROLE_ADMIN.to_string()],
+            expires_at: Utc::now() + Duration::hours(1),
+            issued_at: Some(Utc::now()),
+            issuer: "test-issuer".to_string(),
+            audience: vec!["test-audience".to_string()],
+            raw: json!({}),
+        };
+        let auth = AuthContext {
+            claims,
+            token: "test-token".to_string(),
+        };
+        let created = create_customer(
+            State(state.clone()),
+            auth.clone(),
+            headers.clone(),
+            Json(NewCustomer {
+                name: "Alice Example".to_string(),
+                email: Some("alice@example.com".to_string()),
+                phone: Some("+15550001".to_string()),
+            }),
+        )
+        .await
+        .map_err(|(status, body)| {
+            io::Error::new(
+                io::ErrorKind::Other,
+                format!("create_customer failed: {status} {body}"),
+            )
+        })?
+        .0;
+
+        let customer_id = created.id;
+
+        let updated = update_customer(
+            State(state.clone()),
+            auth.clone(),
+            headers.clone(),
+            Path(customer_id),
+            Json(UpdateCustomerRequest {
+                name: Some("Alice Cooper".to_string()),
+                email: Some(Some("alice.cooper@example.com".to_string())),
+                phone: Some(None),
+            }),
+        )
+        .await
+        .map_err(|(status, body)| {
+            io::Error::new(
+                io::ErrorKind::Other,
+                format!("update_customer failed: {status} {body}"),
+            )
+        })?
+        .0;
+
+        assert_eq!(updated.name, "Alice Cooper");
+        assert_eq!(updated.email.as_deref(), Some("alice.cooper@example.com"));
+        assert!(updated.phone.is_none());
+
+        let row = sqlx::query!(
+            "SELECT email_encrypted, phone_encrypted, email_hash, phone_hash, pii_key_version
+             FROM customers
+             WHERE id = $1",
+            customer_id
+        )
+        .fetch_one(&pool)
+        .await?;
+
+        assert!(row.email_encrypted.is_some());
+        assert!(row.email_hash.is_some());
+        assert!(row.phone_encrypted.is_none());
+        assert!(row.phone_hash.is_none());
+        assert_eq!(row.pii_key_version, Some(1));
+
+        sqlx::query!("DELETE FROM customers WHERE id = $1", customer_id)
+            .execute(&pool)
+            .await?;
+        sqlx::query!(
+            "DELETE FROM tenant_data_keys WHERE tenant_id = $1",
+            tenant_id
+        )
+        .execute(&pool)
+        .await?;
+
+        Ok(())
+    }
 }

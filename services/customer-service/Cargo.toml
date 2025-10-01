@@ -7,6 +7,7 @@ edition = "2021"
 clap = { version = "4", features = ["derive"] }
 common-auth = { path = "../common/auth" }
 common-crypto = { path = "../common/crypto" }
+common-money = { path = "../common/money" }
 tower-http = { version = "0.5", features = ["cors"] }
 anyhow = "1"
 tracing = "0.1"
@@ -15,6 +16,11 @@ axum = "0.7"
 chrono = { version = "0.4", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sqlx = { version = "0.6", features = ["runtime-tokio-native-tls", "postgres", "macros", "uuid", "chrono"] }
+sqlx = { version = "0.7", features = ["runtime-tokio-native-tls", "postgres", "macros", "uuid", "chrono", "bigdecimal"] }
 tokio = { version = "1", features = ["full"] }
 uuid = { version = "1", features = ["v4", "serde"] }
+
+[features]
+# Enables running integration tests requiring a live Postgres and other infra.
+integration = []
+# (No explicit offline feature; controlled via SQLX_OFFLINE env var.)

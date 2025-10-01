@@ -1,0 +1,39 @@
+#!/usr/bin/env pwsh
+<#!
+Pre-commit guard for SQLx offline metadata.
+1. Detect added/modified Rust files containing sqlx::query( or query! macros.
+2. If macros present but no .sqlx changes staged, warn and abort (unless override env set).
+Set BYPASS_SQLX_HOOK=1 to skip.
+#>
+
+if ($env:BYPASS_SQLX_HOOK) { exit 0 }
+
+# Get staged relevant files (.rs only)
+$staged = git diff --cached --name-only --diff-filter=ACM | Where-Object { $_ -match '\.rs$' }
+if (-not $staged) { exit 0 }
+
+$needsSqlx = $false
+foreach ($f in $staged) {
+  try {
+    $text = Get-Content -- $f -Raw -ErrorAction Stop
+    if ($text -match 'sqlx::query!\(' -or $text -match 'query!\(' -or $text -match 'query_as!\(' -or $text -match 'query_scalar!\(' -or $text -match 'sqlx::query\(') {
+      $needsSqlx = $true
+      break
+    }
+  } catch {
+    # ignore file read errors
+  }
+}
+
+if (-not $needsSqlx) { exit 0 }
+
+# Check staged .sqlx metadata changes (any path segment ".sqlx/...")
+$sqlxStaged = git diff --cached --name-only --diff-filter=ACM | Where-Object { $_ -match '\.sqlx/.*query-.*\.json$' }
+if (-not $sqlxStaged) {
+  Write-Host "SQLx: Detected query-related changes but no .sqlx metadata updates staged." -ForegroundColor Yellow
+  Write-Host "Run: pwsh ./regenerate-sqlx-data.ps1 -Prune -Diff -Features integration" -ForegroundColor Yellow
+  Write-Host "Or set BYPASS_SQLX_HOOK=1 to override." -ForegroundColor Yellow
+  exit 1
+}
+
+exit 0

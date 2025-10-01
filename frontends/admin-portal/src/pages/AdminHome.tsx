@@ -17,6 +17,7 @@ const AdminHome: React.FC = () => {
 
   const canManageCatalog = useHasAnyRole(MANAGER_ROLES);
   const canManageOrders = useHasAnyRole(MANAGER_ROLES);
+  const canManageCustomers = useHasAnyRole(MANAGER_ROLES);
   const canManageUsers = useHasAnyRole(ADMIN_ROLES);
   const canManageSettings = useHasAnyRole(SUPER_ADMIN_ROLES);
 
@@ -93,6 +94,20 @@ const AdminHome: React.FC = () => {
               </div>
               <button className="admin-home-card-btn" type="button">
                 Go to Orders
+              </button>
+            </div>
+          )}
+          {canManageCustomers && (
+            <div
+              className="admin-home-card"
+              onClick={handleNavigate("/customers")}
+            >
+              <div className="admin-home-card-title">Customers</div>
+              <div className="admin-home-card-desc">
+                Look up profiles and keep customer info up to date.
+              </div>
+              <button className="admin-home-card-btn" type="button">
+                Go to Customers
               </button>
             </div>
           )}

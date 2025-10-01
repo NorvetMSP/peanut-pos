@@ -11,6 +11,8 @@ use common_auth::{
 use rdkafka::producer::FutureRecord;
 use serde::ser::{SerializeStruct, Serializer};
 use serde::{Deserialize, Serialize};
+use bigdecimal::BigDecimal;
+use common_money::{normalize_scale, Money};
 use serde_json::{json, Value};
 use sqlx::{query, query_as, PgPool};
 use std::{env, time::Duration};
@@ -20,7 +22,7 @@ const INVENTORY_DEFAULT_THRESHOLD: i32 = 5;
 #[derive(Deserialize)]
 pub struct UpdateProduct {
     pub name: String,
-    pub price: f64,
+    pub price: BigDecimal, // accept raw for backward compatibility; wrapped into Money
     pub description: String,
     pub active: bool,
     #[serde(default)]
@@ -138,7 +140,7 @@ impl Serialize for Product {
         state.serialize_field("id", &self.id)?;
         state.serialize_field("tenant_id", &self.tenant_id)?;
         state.serialize_field("name", &self.name)?;
-        state.serialize_field("price", &self.price)?;
+    state.serialize_field("price", &self.price.inner())?;
         state.serialize_field("description", &self.description)?;
         state.serialize_field("image", &self.image)?;
         state.serialize_field("image_url", &self.image)?;
@@ -157,7 +159,7 @@ pub async fn update_product(
     let tenant_id = tenant_id_from_request(&headers, &auth)?;
     let actor = extract_actor(&headers, &auth);
     let existing = query_as::<_, Product>(
-        "SELECT id, tenant_id, name, price::FLOAT8 as price, description, image, active FROM products WHERE id = $1 AND tenant_id = $2",
+    "SELECT id, tenant_id, name, price, description, image, active FROM products WHERE id = $1 AND tenant_id = $2",
     )
     .bind(product_id)
     .bind(tenant_id)
@@ -170,10 +172,10 @@ pub async fn update_product(
     };
     let image = normalize_image_input(upd.image);
     let product = query_as::<_, Product>(
-        "UPDATE products SET name = $1, price = $2, description = $3, active = $4, image = COALESCE($5, image)\n         WHERE id = $6 AND tenant_id = $7\n         RETURNING id, tenant_id, name, price::FLOAT8 as price, description, image, active"
+    "UPDATE products SET name = $1, price = $2, description = $3, active = $4, image = COALESCE($5, image)\n         WHERE id = $6 AND tenant_id = $7\n         RETURNING id, tenant_id, name, price, description, image, active"
     )
     .bind(upd.name)
-    .bind(upd.price)
+    .bind(normalize_scale(&upd.price))
     .bind(upd.description)
     .bind(upd.active)
     .bind(image)
@@ -193,7 +195,7 @@ pub async fn update_product(
 #[derive(Deserialize)]
 pub struct NewProduct {
     pub name: String,
-    pub price: f64,
+    pub price: BigDecimal, // accept raw then normalize via Money
     pub description: Option<String>,
     #[serde(default)]
     pub image: Option<String>,
@@ -204,7 +206,7 @@ pub struct Product {
     pub id: Uuid,
     pub tenant_id: Uuid,
     pub name: String,
-    pub price: f64,
+    pub price: Money,
     pub description: String,
     pub image: String,
     pub active: bool,
@@ -231,12 +233,12 @@ pub async fn create_product(
     let image = normalize_image_input(image).unwrap_or_else(default_product_image);
 
     let product = query_as::<_, Product>(
-        "INSERT INTO products (id, tenant_id, name, price, description, active, image) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id, tenant_id, name, price::FLOAT8 as price, description, image, active"
+    "INSERT INTO products (id, tenant_id, name, price, description, active, image) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id, tenant_id, name, price, description, image, active"
     )
     .bind(product_id)
     .bind(tenant_id)
     .bind(name)
-    .bind(price)
+    .bind(normalize_scale(&price))
     .bind(desc)
     .bind(true)
     .bind(image)
@@ -279,7 +281,7 @@ pub async fn list_products(
     let tenant_id = tenant_id_from_request(&headers, &auth)?;
 
     let products = query_as::<_, Product>(
-        "SELECT id, tenant_id, name, price::FLOAT8 as price, description, image, active FROM products WHERE tenant_id = $1",
+        "SELECT id, tenant_id, name, price, description, image, active FROM products WHERE tenant_id = $1",
     )
     .bind(tenant_id)
     .fetch_all(&state.db)
@@ -305,7 +307,7 @@ pub async fn delete_product(
     let actor = extract_actor(&headers, &auth);
 
     let existing = query_as::<_, Product>(
-        "SELECT id, tenant_id, name, price::FLOAT8 as price, description, image, active FROM products WHERE id = $1 AND tenant_id = $2",
+        "SELECT id, tenant_id, name, price, description, image, active FROM products WHERE id = $1 AND tenant_id = $2",
     )
     .bind(product_id)
     .bind(tenant_id)

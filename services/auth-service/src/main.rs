@@ -7,7 +7,7 @@ use axum::{
         HeaderName, HeaderValue, Method, StatusCode,
     },
     response::Response,
-    routing::{get, patch, post},
+    routing::{get, post, put},
     Json, Router,
 };
 use common_auth::{JwtConfig, JwtVerifier};
@@ -22,6 +22,7 @@ use tokio::{
 };
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tracing::{debug, info, warn};
+use common_money::log_rounding_mode_once;
 
 use auth_service::config::load_auth_config;
 use auth_service::metrics::AuthMetrics;
@@ -58,6 +59,7 @@ async fn metrics_endpoint(State(state): State<AppState>) -> Response {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().with_env_filter("info").init();
+    log_rounding_mode_once();
 
     let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
     let db_pool = PgPool::connect(&database_url).await?;
@@ -113,7 +115,13 @@ async fn main() -> anyhow::Result<()> {
             HeaderValue::from_static("http://localhost:3001"),
             HeaderValue::from_static("http://localhost:5173"),
         ]))
-        .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::OPTIONS,
+        ])
         .allow_headers([
             ACCEPT,
             CONTENT_TYPE,
@@ -133,7 +141,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/mfa/enroll", post(begin_mfa_enrollment))
         .route("/mfa/verify", post(verify_mfa_enrollment))
         .route("/users", post(create_user).get(list_users))
-        .route("/users/:user_id", patch(update_user))
+        .route("/users/:user_id", put(update_user).patch(update_user))
         .route("/users/:user_id/reset-password", post(reset_user_password))
         .route("/roles", get(list_roles))
         .route("/tenants", post(create_tenant).get(list_tenants))

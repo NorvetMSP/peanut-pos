@@ -8,7 +8,7 @@ interface RoleGuardOptions {
   fallbackContent?: React.ReactNode;
 }
 
-export function withRoleGuard<P>(
+export function withRoleGuard<P extends object>(
   Component: React.ComponentType<P>,
   allowedRoles: readonly string[],
   options?: RoleGuardOptions,

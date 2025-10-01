@@ -18,7 +18,7 @@ use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sqlx::{FromRow, Postgres, QueryBuilder};
-use tracing::{error, info, warn};
+use tracing::{error, info, warn, instrument, Span};
 use uuid::Uuid;
 
 use crate::config::AuthConfig;
@@ -705,10 +705,10 @@ pub async fn login_user(
             return Err(AuthError::account_locked(Some(locked_until)));
         }
 
-        if let Err(err) = sqlx::query(
-            "UPDATE users SET failed_attempts = 0, mfa_failed_attempts = 0, locked_until = NULL WHERE id = $1",
+        if let Err(err) = sqlx::query!(
+            r#"UPDATE users SET failed_attempts = 0, mfa_failed_attempts = 0, locked_until = NULL WHERE id = $1"#,
+            auth_data.id
         )
-        .bind(auth_data.id)
         .execute(&state.db)
         .await
         {
@@ -732,12 +732,13 @@ pub async fn login_user(
             if auth_data.password_hash == password {
                 match hash_password(&password) {
                     Ok(new_hash) => {
-                        if let Err(err) =
-                            sqlx::query("UPDATE users SET password_hash = $1 WHERE id = $2")
-                                .bind(&new_hash)
-                                .bind(auth_data.id)
-                                .execute(&state.db)
-                                .await
+                        if let Err(err) = sqlx::query!(
+                            r#"UPDATE users SET password_hash = $1 WHERE id = $2"#,
+                            new_hash,
+                            auth_data.id
+                        )
+                        .execute(&state.db)
+                        .await
                         {
                             warn!(
                                 user_id = %auth_data.id,
@@ -775,13 +776,14 @@ pub async fn login_user(
             None
         };
 
-        if let Err(err) =
-            sqlx::query("UPDATE users SET failed_attempts = $1, locked_until = $2 WHERE id = $3")
-                .bind(new_attempts)
-                .bind(lock_until)
-                .bind(auth_data.id)
-                .execute(&state.db)
-                .await
+        if let Err(err) = sqlx::query!(
+            r#"UPDATE users SET failed_attempts = $1, locked_until = $2 WHERE id = $3"#,
+            new_attempts,
+            lock_until,
+            auth_data.id
+        )
+        .execute(&state.db)
+        .await
         {
             warn!(
                 user_id = %auth_data.id,
@@ -798,11 +800,12 @@ pub async fn login_user(
     }
 
     if auth_data.failed_attempts != 0 || auth_data.locked_until.is_some() {
-        if let Err(err) =
-            sqlx::query("UPDATE users SET failed_attempts = 0, locked_until = NULL WHERE id = $1")
-                .bind(auth_data.id)
-                .execute(&state.db)
-                .await
+        if let Err(err) = sqlx::query!(
+            r#"UPDATE users SET failed_attempts = 0, locked_until = NULL WHERE id = $1"#,
+            auth_data.id
+        )
+        .execute(&state.db)
+        .await
         {
             warn!(
                 user_id = %auth_data.id,
@@ -1095,26 +1098,41 @@ pub async fn login_user(
     Ok(reply)
 }
 
+#[instrument(name = "refresh_session", skip(state, headers), fields(outcome = "pending"))]
 pub async fn refresh_session(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Response, AuthError> {
     let Some(raw_cookie) = extract_refresh_cookie(&headers, state.config.as_ref()) else {
+        tracing::debug!("missing refresh cookie");
+        Span::current().record("outcome", &tracing::field::display("missing_cookie"));
         return Err(AuthError::session_expired());
     };
 
-    let consumed = state
-        .token_signer
-        .consume_refresh_token(&raw_cookie)
-        .await
-        .map_err(|err| {
-            error!(error = ?err, "Failed to consume refresh token");
-            AuthError::internal_error("Unable to refresh session.")
-        })?;
+    let consumed = state.token_signer.consume_refresh_token(&raw_cookie).await;
+    let consumed = match consumed {
+        Ok(c) => c,
+        Err(err) => {
+            // Distinguish between an invalid/expired token vs infrastructure error.
+            // If token parsing/validation failed we surface session_expired (401) instead of 500.
+            let err_str = err.to_string();
+            if err_str.contains("expired") || err_str.contains("invalid") {
+                warn!(error = %err, "refresh token invalid or expired");
+                Span::current().record("outcome", &tracing::field::display("invalid_refresh"));
+                return Err(AuthError::session_expired());
+            }
+            error!(error = %err, "Failed to consume refresh token (infrastructure error)");
+            Span::current().record("outcome", &tracing::field::display("error"));
+            return Err(AuthError::internal_error("Unable to refresh session."));
+        }
+    };
 
     let account = match consumed {
         Some(account) => account,
-        None => return Err(AuthError::session_expired()),
+        None => {
+            Span::current().record("outcome", &tracing::field::display("not_found"));
+            return Err(AuthError::session_expired());
+        }
     };
 
     let user = User {
@@ -1136,14 +1154,11 @@ pub async fn refresh_session(
         roles: vec![user.role.clone()],
     };
 
-    let issued = state
-        .token_signer
-        .issue_tokens(subject)
-        .await
-        .map_err(|err| {
-            error!(user_id = %user.id, error = %err, "Failed to issue tokens during session refresh");
-            AuthError::internal_error("Unable to refresh session.")
-        })?;
+    let issued = state.token_signer.issue_tokens(subject).await.map_err(|err| {
+        error!(user_id = %user.id, error = %err, "Failed to issue tokens during session refresh");
+        Span::current().record("outcome", &tracing::field::display("issue_error"));
+        AuthError::internal_error("Unable to refresh session.")
+    })?;
 
     let IssuedTokens {
         access_token,
@@ -1183,6 +1198,7 @@ pub async fn refresh_session(
         }
     }
 
+    Span::current().record("outcome", &tracing::field::display("success"));
     Ok(reply)
 }
 

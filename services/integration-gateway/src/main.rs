@@ -13,6 +13,7 @@ use axum::{
 };
 use chrono::Utc;
 use common_auth::{JwtConfig, JwtVerifier};
+use common_money::log_rounding_mode_once;
 use rdkafka::producer::FutureProducer;
 use reqwest::Client;
 use sha2::{Digest, Sha256};
@@ -182,6 +183,7 @@ async fn metrics_endpoint(State(state): State<AppState>) -> Response {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().with_env_filter("info").init();
+    log_rounding_mode_once();
 
     let database_url =
         env::var("DATABASE_URL").expect("DATABASE_URL must be set for integration-gateway");

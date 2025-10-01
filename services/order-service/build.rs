@@ -1,3 +1,4 @@
+// NOTE: Single build script variant retained (below) that copies runtime DLLs and links zlib.
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};

@@ -16,3 +16,5 @@ anyhow = "1"
 thiserror = "1"
 hyper = "1"
 uuid = { version = "1", features = ["v4", "serde"] }
+bigdecimal = { version = "0.3", features = ["serde"] }
+common-money = { path = "../common/money" }

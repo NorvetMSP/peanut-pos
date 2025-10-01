@@ -5,6 +5,10 @@ WORKDIR /repo
 # system deps for SQLx/Postgres
 RUN apt-get update && apt-get install -y libssl-dev pkg-config cmake g++ && rm -rf /var/lib/apt/lists/*
 
+# Enable SQLx offline mode so query! / query_as! macros compile without needing a live DATABASE_URL
+# The corresponding `sqlx-data.json` for this service is already copied below as part of the full `services/` tree.
+ENV SQLX_OFFLINE=true
+
 # Leverage caching by copying manifests first
 COPY services/Cargo.toml services/Cargo.lock ./
 COPY services/auth-service/Cargo.toml services/auth-service/Cargo.toml
