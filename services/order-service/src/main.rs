@@ -1,7 +1,7 @@
 use anyhow::Context;
 use bigdecimal::BigDecimal;
 use axum::{
-    extract::FromRef,
+    extract::{FromRef, State},
     http::{
         header::{ACCEPT, CONTENT_TYPE},
         HeaderName, HeaderValue, Method, StatusCode,
@@ -41,7 +41,7 @@ pub struct AppState {
     pub jwt_verifier: Arc<JwtVerifier>,
     pub http_client: Client,
     pub inventory_base_url: String,
-    pub audit_producer: Option<common_audit::AuditProducer<common_audit::KafkaAuditSink>>,
+    pub audit_producer: Option<Arc<common_audit::BufferedAuditProducer<common_audit::KafkaAuditSink>>>,
 }
 
 impl FromRef<AppState> for Arc<JwtVerifier> {
@@ -115,7 +115,13 @@ async fn main() -> anyhow::Result<()> {
         jwt_verifier,
         http_client: http_client.clone(),
         inventory_base_url: inventory_base_url.clone(),
-    audit_producer: Some(common_audit::AuditProducer::new(common_audit::KafkaAuditSink::new(kafka_producer.clone(), common_audit::AuditProducerConfig { topic: env::var("AUDIT_TOPIC").unwrap_or_else(|_| "audit.events".to_string()) }))),
+    audit_producer: Some(Arc::new(common_audit::BufferedAuditProducer::new(
+        common_audit::AuditProducer::new(common_audit::KafkaAuditSink::new(
+            kafka_producer.clone(),
+            common_audit::AuditProducerConfig { topic: env::var("AUDIT_TOPIC").unwrap_or_else(|_| "audit.events".to_string()) }
+        )),
+        1024,
+    ))),
     };
     tracing::info!(topic = %env::var("AUDIT_TOPIC").unwrap_or_else(|_| "audit.events".to_string()), "Audit producer initialized");
 
@@ -154,6 +160,38 @@ async fn main() -> anyhow::Result<()> {
             .collect::<Vec<_>>(),
         );
 
+    async fn audit_metrics(State(state): State<AppState>) -> axum::Json<serde_json::Value> {
+        if let Some(buf) = &state.audit_producer {
+            let snap = buf.snapshot();
+            axum::Json(serde_json::json!({
+                "queued": snap.queued,
+                "emitted": snap.emitted,
+                "dropped": snap.dropped
+            }))
+        } else { axum::Json(serde_json::json!({"queued":0,"emitted":0,"dropped":0})) }
+    }
+
+    async fn metrics(State(state): State<AppState>) -> (StatusCode, String) {
+        let mut out = String::with_capacity(256);
+        if let Some(buf) = &state.audit_producer {
+            let snap = buf.snapshot();
+            out.push_str("# HELP audit_buffer_queued Current in-memory buffered audit events\n");
+            out.push_str("# TYPE audit_buffer_queued gauge\n");
+            out.push_str(&format!("audit_buffer_queued {}\n", snap.queued));
+            out.push_str("# HELP audit_buffer_emitted_total Total audit events emitted from buffer\n");
+            out.push_str("# TYPE audit_buffer_emitted_total counter\n");
+            out.push_str(&format!("audit_buffer_emitted_total {}\n", snap.emitted));
+            out.push_str("# HELP audit_buffer_dropped_total Total audit events dropped due to full buffer\n");
+            out.push_str("# TYPE audit_buffer_dropped_total counter\n");
+            out.push_str(&format!("audit_buffer_dropped_total {}\n", snap.dropped));
+        } else {
+            out.push_str("# HELP audit_buffer_queued Current in-memory buffered audit events\n# TYPE audit_buffer_queued gauge\naudit_buffer_queued 0\n");
+            out.push_str("# HELP audit_buffer_emitted_total Total audit events emitted from buffer\n# TYPE audit_buffer_emitted_total counter\naudit_buffer_emitted_total 0\n");
+            out.push_str("# HELP audit_buffer_dropped_total Total audit events dropped due to full buffer\n# TYPE audit_buffer_dropped_total counter\naudit_buffer_dropped_total 0\n");
+        }
+        (StatusCode::OK, out)
+    }
+
     let app = Router::new()
         .route("/healthz", get(health))
         .route("/orders", post(create_order).get(list_orders))
@@ -163,7 +201,9 @@ async fn main() -> anyhow::Result<()> {
         .route("/orders/:order_id/void", post(void_order))
         .route("/orders/refund", post(refund_order))
         .route("/returns", get(list_returns))
-        .route("/audit/events", get(audit_search))
+    .route("/audit/events", get(audit_search))
+    .route("/internal/audit_metrics", get(audit_metrics))
+    .route("/internal/metrics", get(metrics))
         .with_state(state.clone())
         .layer(cors);
 

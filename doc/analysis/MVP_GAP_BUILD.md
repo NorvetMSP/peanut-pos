@@ -328,6 +328,7 @@ Risks / Considerations:
 | 2025-10-01 | INV-ML-2 | Reservation lifecycle (expiration) | 🌓→✅ | TTL + sweeper + audit + events |
 | 2025-10-01 | INV-ML-3 | Low-stock alerts & audit | ⛔→🌓 | Event emission implemented; UI pending |
 | 2025-10-01 | SEC-AUD-1 | Tenancy & audit foundations | ⛔→🌓 | Added common-security, audit schema v1, sink abstraction, product+order integration |
+| 2025-10-01 | SEC-AUD-2 | Audit consumer foundations | ⛔→🌓 | Created audit_events table + audit-consumer service ingesting Kafka with basic metrics |
 
 ## 8. Open Questions / Decisions To Record
 

@@ -1,13 +1,13 @@
 use crate::AppState;
 use axum::{
     extract::{Path, Query, State},
-    http::{HeaderMap, StatusCode},
+    http::StatusCode,
     Json,
 };
 use chrono::{DateTime, Utc};
-use common_auth::{AuthContext, ROLE_ADMIN, ROLE_MANAGER, ROLE_SUPER_ADMIN};
-use common_security::{SecurityCtxExtractor, ensure_role as ensure_role_new, Role};
-use common_audit::{extract_actor_from_headers, AuditActor as SharedAuditActor};
+// AuthContext no longer required in handlers; SecurityCtxExtractor provides actor & tenant.
+use common_security::{SecurityCtxExtractor, Role};
+use common_audit::AuditActor as SharedAuditActor;
 use rdkafka::producer::FutureRecord;
 use serde::ser::{SerializeStruct, Serializer};
 use serde::{Deserialize, Serialize};
@@ -55,12 +55,7 @@ pub struct AuditActor { // local representation for legacy DB audit table
     pub email: Option<String>,
 }
 
-const PRODUCT_WRITE_ROLES: &[&str] = &[ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_MANAGER]; // legacy; to be removed once all handlers migrated
-
-fn extract_actor(headers: &HeaderMap, auth: &AuthContext) -> AuditActor {
-    let shared = extract_actor_from_headers(headers, &auth.claims.raw, auth.claims.subject);
-    AuditActor { id: shared.id, name: shared.name, email: shared.email }
-}
+// Legacy role constant removed; all role checks now rely on Role enum via SecurityCtxExtractor.
 
 fn shared(actor: &AuditActor) -> SharedAuditActor {
     SharedAuditActor { id: actor.id, name: actor.name.clone(), email: actor.email.clone() }

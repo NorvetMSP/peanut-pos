@@ -3,6 +3,9 @@ use chrono::Utc;
 use uuid::Uuid;
 #[cfg(feature = "kafka")] use rdkafka::producer::{FutureProducer, FutureRecord};
 #[cfg(feature = "kafka")] use std::time::Duration;
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
+use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
 
 #[derive(Debug, Clone)]
 pub struct AuditProducerConfig { pub topic: String }
@@ -74,6 +77,91 @@ impl<S: AuditSink> AuditProducer<S> {
         self.sink.emit(event.clone()).await?;
         Ok(event)
     }
+}
+
+/// Buffered wrapper around an inner AuditProducer to reduce per-request latency.
+pub struct BufferedAuditProducer<S: AuditSink> {
+    inner: Arc<AuditProducer<S>>,
+    tx: mpsc::Sender<AuditEvent>,
+    _bg: JoinHandle<()>,
+    pub queued: Arc<AtomicU64>,
+    pub dropped: Arc<AtomicU64>,
+    pub emitted: Arc<AtomicU64>,
+}
+
+impl<S: AuditSink> BufferedAuditProducer<S> {
+    pub fn new(inner: AuditProducer<S>, capacity: usize) -> Self {
+        let inner = Arc::new(inner);
+        let (tx, mut rx) = mpsc::channel::<AuditEvent>(capacity);
+        let queued = Arc::new(AtomicU64::new(0));
+        let dropped = Arc::new(AtomicU64::new(0));
+        let emitted = Arc::new(AtomicU64::new(0));
+        let q_clone = queued.clone();
+        let e_clone = emitted.clone();
+        let clone = inner.clone();
+        let bg = tokio::spawn(async move {
+            while let Some(event) = rx.recv().await {
+                if let Err(e) = clone.sink.emit(event).await { tracing::warn!(?e, "audit buffer emit failed"); }
+                e_clone.fetch_add(1, Ordering::Relaxed);
+                q_clone.fetch_sub(1, Ordering::Relaxed);
+            }
+        });
+        Self { inner, tx, _bg: bg, queued, dropped, emitted }
+    }
+
+    /// Return a point-in-time snapshot of internal counters for external metrics scraping.
+    pub fn snapshot(&self) -> BufferedAuditSnapshot {
+        BufferedAuditSnapshot {
+            queued: self.queued.load(Ordering::Relaxed),
+            dropped: self.dropped.load(Ordering::Relaxed),
+            emitted: self.emitted.load(Ordering::Relaxed),
+        }
+    }
+
+    pub async fn emit(
+        &self,
+        tenant_id: Uuid,
+        actor: AuditActor,
+        entity_type: impl Into<String>,
+        entity_id: Option<Uuid>,
+        action: impl Into<String>,
+        source_service: &str,
+        severity: AuditSeverity,
+        trace_id: Option<Uuid>,
+        payload: serde_json::Value,
+        meta: serde_json::Value,
+    ) -> AuditResult<()> {
+        let event = AuditEvent {
+            event_id: Uuid::new_v4(),
+            event_version: AUDIT_EVENT_VERSION,
+            tenant_id,
+            actor,
+            entity_type: entity_type.into(),
+            entity_id,
+            action: action.into(),
+            occurred_at: chrono::Utc::now(),
+            source_service: source_service.to_string(),
+            severity,
+            trace_id,
+            payload,
+            meta,
+        };
+        if let Err(_e) = self.tx.try_send(event) {
+            self.dropped.fetch_add(1, Ordering::Relaxed);
+            tracing::warn!("audit buffer full; dropping event");
+        }
+        else {
+            self.queued.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(())
+    }
+}
+
+/// Plain snapshot structure for Prometheus exposition without holding references.
+pub struct BufferedAuditSnapshot {
+    pub queued: u64,
+    pub dropped: u64,
+    pub emitted: u64,
 }
 
 pub fn extract_actor_from_headers(headers: &axum::http::HeaderMap, claims_raw: &serde_json::Value, subject: uuid::Uuid) -> AuditActor {

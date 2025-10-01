@@ -38,17 +38,17 @@ Status: Planned | In-Progress | Done | Blocked | Deferred
 
 | ID | Title | Category | Status | Depends | Notes |
 |----|-------|----------|--------|---------|-------|
-| TA-FND-1 | Remove legacy role constants & helpers | FND | Planned | — | Delete unused ensure_role patterns |
-| TA-FND-2 | Add trace_id auto-generation in extractor | FND | Planned | — | Generate UUID if header absent |
+| TA-FND-1 | Remove legacy role constants & helpers | FND | Done | — | Completed: product-service cleanup |
+| TA-FND-2 | Add trace_id auto-generation in extractor | FND | Done | — | Implemented in SecurityCtxExtractor |
 | TA-ROL-1 | Apply SecurityCtxExtractor to inventory-service | ROL | Planned | TA-FND-1 | Inventory mutating endpoints |
 | TA-ROL-2 | Apply SecurityCtxExtractor to loyalty-service | ROL | Planned | TA-FND-1 | Align role mapping |
 | TA-ROL-3 | Apply SecurityCtxExtractor to payment-service | ROL | Planned | TA-FND-1 | Pre-req payment intent model |
 | TA-ROL-4 | Apply SecurityCtxExtractor to customer-service | ROL | Planned | TA-FND-1 | Remove per-handler tenant parsing |
 | TA-ROL-5 | Apply SecurityCtxExtractor to integration-gateway | ROL | Planned | TA-FND-1 | Propagate trace & roles downstream |
 | TA-FND-3 | Unified auth error JSON shape | FND | Planned | TA-FND-1 | {code,missing_role,trace_id} |
-| TA-AUD-1 | Buffered AuditProducer (async channel) | AUD | Planned | TA-FND-2 | Reduce handler latency |
-| TA-OPS-1 | Metrics: queue length & emit failures | OPS | Planned | TA-AUD-1 | Prometheus exporter |
-| TA-AUD-2 | Audit consumer + Postgres read model | AUD | Planned | TA-AUD-1 | MVP storage for queries |
+| TA-AUD-1 | Buffered AuditProducer (async channel) | AUD | Done | TA-FND-2 | Integrated in product & order services |
+| TA-OPS-1 | Metrics: queue length & emit failures | OPS | Done | TA-AUD-1 | Prometheus /internal/metrics + JSON legacy endpoint (deprecate after dashboards) |
+| TA-AUD-2 | Audit consumer + Postgres read model | AUD | In-Progress | TA-AUD-1 | Dedicated migration, feature flag, lag+latency metrics |
 | TA-AUD-3 | /audit/events query endpoint | AUD | Planned | TA-AUD-2 | Filters: tenant, actor, action, status |
 | TA-AUD-4 | Coverage scanner tool | AUD | Planned | TA-AUD-1 | Detect missing emits |
 | TA-AUD-5 | Retention policy (TTL purge job) | AUD | Planned | TA-AUD-2 | Configurable default 30d |
