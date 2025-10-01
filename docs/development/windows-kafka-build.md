@@ -1,57 +1,111 @@
-# Windows Build Notes for Kafka (rdkafka)
+# Windows Kafka (rdkafka + zlib) Linking Notes
 
-Windows linking errors (e.g. `__imp_crc32`, `__imp_deflate`, `__imp_inflate`) occur when `rdkafka` cannot find zlib symbols. The fix we applied:
+## Summary
 
-## Changes Implemented
+After enabling Kafka on Windows (MSVC toolchain), the `auth-service` binary failed to link with unresolved `__imp_crc32`, `__imp_deflate*`, and `__imp_inflate*` symbols from `librdkafka` objects. These indicate the linker expected the **zlib import library** (`zlib.lib` / `zlibd.lib`) but it was missing from the link line.
 
-- Added `libz-static` feature to every `rdkafka` dependency line.
-- Disabled default features where not already disabled and explicitly enabled `tokio` + `cmake-build`.
-- Added a Windows-only dependency block:
+## Root Cause
 
-  ```toml
-  [target.'cfg(target_os = "windows")'.dependencies]
-  libz-sys = { version = "1.1.22", features = ["static"] }
-  ```
+`rdkafka-sys` (CMake + vcpkg) did build and stage zlib under its private tree:
 
-## Why This Works
-
-`librdkafka` depends on zlib for compression. On Linux the system zlib is available in the build image. On Windows (MSVC toolchain) static linking requires explicitly pulling in `libz-sys` with `static` feature; the `libz-static` rdkafka feature wires that up, but some crates still need the explicit `libz-sys` stanza for consistent resolution across all service crates.
-
-## Clean Rebuild Steps (Windows)
-
-```powershell
-# From repo root
-cargo clean
-# (Optional) ensure you have a recent CMake and Visual Studio Build Tools installed
-cargo build -p auth-service
+```text
+target/<profile>/build/rdkafka-sys-<hash>/out/build/vcpkg_installed/x64-windows/{lib,debug/lib}/
 ```
 
-If you still see unresolved symbols, verify that `vcpkg` or system-wide zlib is not interfering; ensure no stale build artifacts remain under `target/`.
+Cargo did not emit a `cargo:rustc-link-search` or `cargo:rustc-link-lib=zlib` for that location, so the final link step never saw the import library.
 
-## Adding a New Kafka Service
+## Failed Attempts (Chronology)
 
-1. Add dependency:
+1. Added `libz`, `libz-static` rdkafka features plus env vars `LIBZ_SYS_STATIC=1`, `ZLIB_STATIC=1`.
+2. Forced internal build with `RDKAFKA_BUILD_ZLIB=1`.
+3. Added `.cargo/config.toml` rustflags `/LIBPATH:` pointing at a `libz-sys` output.
+4. Emitted `cargo:rustc-link-lib=static=z` (mismatched naming vs import lib) via early build script.
+5. Removed/added explicit `libz-sys` dependencies multiple times.
+
+All failed because none injected the actual vcpkg zlib import library directory for the final crate link.
+
+## Working Solution
+
+Introduce a crate-local `build.rs` (currently in `auth-service`) that:
+
+- Scans `target/<profile>/build/rdkafka-sys-*` directories (sorted by modified time) to find the most recent.
+- Searches for `zlibd.lib` (debug) or `zlib.lib` (release) under `.../vcpkg_installed/x64-windows/`.
+- Emits:
+  - `cargo:rustc-link-search=native=<that dir>`
+  - `cargo:rustc-link-lib=zlib`
+
+Result: MSVC linker resolves zlib symbols; build succeeds.
+
+### Why Not Just `static=z`?
+
+The unresolved names were `__imp_*` thunks (import address table). That means the build expected a DLL import library, not a purely static archive. The name `z` (used on some GNU toolchains) did not map to the produced `zlib.lib` on Windows.
+
+## Current State
+
+Build now succeeds. A follow‑up will harden the script (see below) and replicate logic for other Kafka-using services if/when needed.
+
+## Actionable Steps for New Kafka Service on Windows
+
+1. Add dependency (minimal feature set):
 
    ```toml
-   rdkafka = { version = "0.29", default-features = false, features = ["cmake-build", "tokio", "libz-static"] }
+   rdkafka = { version = "0.29", default-features = false, features = ["cmake-build", "tokio", "libz", "libz-static"] }
    ```
 
-2. Ensure the Windows block (above) exists or add `libz-sys` if absent.
-3. Run a quick build:
+2. Copy (or abstract) the `build.rs` logic OR depend on a shared internal crate once created.
+3. Build verbosely to verify: `cargo build -p your-service -vv` (confirm `-l zlib`).
 
-   ```powershell
-   cargo build -p your-new-service
-   ```
+## Clean Rebuild (Troubleshooting)
 
-## Troubleshooting
+```powershell
+cargo clean -p auth-service
+cargo build -p auth-service -vv
+```
 
-| Symptom | Cause | Fix |
-|---------|-------|-----|
-| `__imp_crc32` unresolved | Missing static zlib | Ensure `libz-static` + `libz-sys` static feature present |
-| `link.exe` cannot find `zlib.lib` | Visual Studio build tools/zlib not found | Install VS Build Tools, keep using static feature to embed |
-| Build hangs on `cmake` step | Missing CMake | Install CMake or add it to PATH |
+Check that the link arguments contain both `-L ...vcpkg_installed\x64-windows\lib` and `-l zlib`.
 
-## Future Improvements
+## Troubleshooting Matrix
 
-- Introduce a shared `[workspace.dependencies]` section (Rust 1.64+) to centralize rdkafka+zlib settings.
-- Add a CI matrix job (Windows) that builds one Kafka service to guard against regressions.
+| Symptom | Likely Cause | Resolution |
+|---------|--------------|-----------|
+| `__imp_crc32` unresolved | Missing import lib on link line | Ensure build script emits link-search + `-l zlib` |
+| `link.exe` cannot open `zlib.lib` | Path incorrect or build cleaned | Re-run build with `-vv`, verify directory exists |
+| Multiple `libz-sys-*` dirs | Normal (hash per build) | Harmless; only search path with import lib matters |
+| Build script seemingly ignored | Cargo cache not invalidated | Touch `build.rs` or `cargo clean -p <crate>` |
+
+## Environment Variables No Longer Required
+
+These were exploratory and can be removed (validate in CI):
+
+`LIBZ_SYS_STATIC`, `ZLIB_STATIC`, `RDKAFKA_BUILD_ZLIB`.
+
+## Future Hardening (Planned)
+
+- Distinguish debug vs release and prefer `zlibd.lib` in debug.
+- Emit `cargo:warning=linked zlib from <path>` for traceability.
+- Panic early with a clear message if no import library is found.
+- Extract shared helper crate (e.g. `build-support-kafka-link`) for reuse.
+- Add Windows CI matrix job building one Kafka consumer/producer binary.
+
+## Reference Errors (Pre-Fix)
+
+```text
+error LNK2019: unresolved external symbol __imp_crc32
+error LNK2019: unresolved external symbol __imp_deflate
+error LNK2019: unresolved external symbol __imp_inflate
+```
+
+## Verification
+
+After applying `build.rs`, `cargo build -p auth-service -vv` shows:
+
+```text
+cargo:rustc-link-search=native=...\rdkafka-sys-<hash>\out\build\vcpkg_installed\x64-windows\lib
+cargo:rustc-link-lib=zlib
+```
+
+And the link step finishes without unresolved symbols.
+
+---
+
+Last updated: 2025-10-01

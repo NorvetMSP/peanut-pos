@@ -71,6 +71,21 @@ If you need to re-run only a subset manually, you can still invoke `sqlx migrate
 
 Idempotency: The auth-service test harness tolerates re-running migrations; benign "already exists" create errors are logged and ignored so repeated integration test runs against a shared local Postgres won't fail.
 
+### Refresh Token Revocation Strategy
+
+Refresh tokens are single-use. The `consume_refresh_token` function now performs a `SELECT ... FOR UPDATE` followed by a hard `DELETE` of the matched row instead of updating a `revoked_at` column. This was changed to:
+
+- Avoid schema drift / missing `revoked_at` column causing 500s in older environments.
+- Guarantee one-time semantics without relying on soft-revoke metadata.
+
+Implications:
+
+- No historical audit trail of refresh token revocations by default.
+- Reuse attempts simply appear as `session_expired` (401) since the row is gone.
+- If future auditing is needed, we can reintroduce soft revocation behind a feature flag or log sink.
+
+Dedicated micro test `session_flow` validates: login → refresh OK → logout → refresh 401 for fast feedback without running the full smoke suite.
+
 ---
 
 ## Why a Feature Flag Instead of #[ignore]
@@ -92,9 +107,9 @@ Previously tests were permanently `#[ignore]`, which hid them from normal workfl
 #[cfg_attr(not(feature = "integration"), ignore = "enable with --features integration (requires <resource>)")]
 ```
 
-3. Avoid leaking external state: create tenants, users, etc., uniquely (UUIDs) and clean up if practical.
-4. Prefer shared helpers (see `auth-service/tests/support`).
-5. Keep fast unit tests (pure logic, no network/database) outside this gating to maintain quick feedback cycles.
+1. Avoid leaking external state: create tenants, users, etc., uniquely (UUIDs) and clean up if practical.
+1. Prefer shared helpers (see `auth-service/tests/support`).
+1. Keep fast unit tests (pure logic, no network/database) outside this gating to maintain quick feedback cycles.
 
 ---
 
@@ -110,7 +125,7 @@ A future GitHub Actions workflow (`integration-tests.yml`) will:
 cargo test --manifest-path services/Cargo.toml --features integration --all-targets --no-fail-fast
 ```
 
-4. Archive logs / test reports as artifacts.
+1. Archive logs / test reports as artifacts.
 
 ---
 

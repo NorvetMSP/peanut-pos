@@ -49,20 +49,6 @@ pub struct TokenSubject {
 }
 
 #[derive(FromRow)]
-struct RefreshTokenRow {
-    jti: Uuid,
-    user_id: Uuid,
-    tenant_id: Uuid,
-    expires_at: DateTime<Utc>,
-    name: String,
-    email: String,
-    role: String,
-    is_active: bool,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
-    last_password_reset: Option<DateTime<Utc>>,
-    force_password_reset: bool,
-}
 
 #[derive(Debug, Clone)]
 pub struct RefreshTokenAccount {
@@ -309,15 +295,17 @@ impl TokenSigner {
         // /session refresh. To remain backward compatible we now perform an explicit SELECT then
         // DELETE (hard revoke) inside the same transaction. This preserves one-time semantics
         // without schema coupling.
-        let row = sqlx::query_as::<_, RefreshTokenRow>(
-            "SELECT r.jti, r.user_id, r.tenant_id, r.expires_at, u.name, u.email, u.role, u.is_active, u.created_at, u.updated_at, u.last_password_reset, u.force_password_reset \
-             FROM auth_refresh_tokens r \
-             JOIN users u ON u.id = r.user_id \
-             WHERE r.token_hash = $1 \
-             FOR UPDATE",
+        let row = sqlx::query!(
+            r#"SELECT r.jti, r.user_id, r.tenant_id, r.expires_at,
+                       u.name, u.email, u.role, u.is_active,
+                       u.created_at, u.updated_at, u.last_password_reset, u.force_password_reset
+                FROM auth_refresh_tokens r
+                JOIN users u ON u.id = r.user_id
+                WHERE r.token_hash = $1
+                FOR UPDATE"#,
+            hash.as_slice()
         )
-        .bind(hash.as_slice())
-        .fetch_optional(&mut tx)
+        .fetch_optional(&mut *tx)
         .await?;
 
         let account = if let Some(row) = row {
@@ -325,7 +313,7 @@ impl TokenSigner {
             // Hard delete regardless; token is single-use.
             sqlx::query("DELETE FROM auth_refresh_tokens WHERE jti = $1")
                 .bind(row.jti)
-                .execute(&mut tx)
+                .execute(&mut *tx)
                 .await?;
             if row.expires_at <= now {
                 None

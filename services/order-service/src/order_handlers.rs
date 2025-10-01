@@ -16,6 +16,7 @@ use bigdecimal::BigDecimal;
 use common_money::{nearly_equal, Money};
 // Removed unused FromStr import after BigDecimal migration
 use sqlx::{Postgres, QueryBuilder, Row, Transaction};
+use sqlx::Acquire; // acquire a connection handle within a transaction for sqlx 0.7 executor compatibility
 use std::collections::HashMap;
 use std::time::Duration;
 use uuid::Uuid;
@@ -352,6 +353,10 @@ async fn insert_order_items(
     items: &[OrderItem],
 ) -> Result<(), (StatusCode, String)> {
     for item in items {
+    let conn = tx
+            .acquire()
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to acquire transaction connection: {e}")))?;
         sqlx::query!(
             r#"INSERT INTO order_items (id, order_id, product_id, quantity, unit_price, line_total, product_name)
                 VALUES ($1, $2, $3, $4, $5, $6, $7)"#,
@@ -363,7 +368,7 @@ async fn insert_order_items(
             item.line_total.inner(),
             item.product_name.as_deref()
         )
-        .execute(&mut *tx)
+        .execute(&mut *conn)
         .await
         .map_err(|e| {
             (
@@ -513,24 +518,30 @@ pub async fn create_order(
         }
     };
 
-    let order = match sqlx::query_as::<_, Order>(
-        "INSERT INTO orders (id, tenant_id, total, status, customer_id, customer_name, customer_email, store_id, offline, payment_method, idempotency_key)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-         RETURNING id, tenant_id, total, status, customer_id, customer_name, customer_email, store_id, created_at, offline, payment_method, idempotency_key"
-    )
-    .bind(order_id)
-    .bind(tenant_id)
-    .bind(&new_order.total)
-    .bind(status)
-    .bind(customer_uuid)
-    .bind(customer_name.as_deref())
-    .bind(customer_email.as_deref())
-    .bind(store_id)
-    .bind(offline_flag)
-    .bind(&payment_method)
-    .bind(idempotency_key.as_deref())
-    .fetch_one(&mut tx)
-    .await {
+    let order = match {
+    let conn = tx
+            .acquire()
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to acquire transaction connection: {e}")))?;
+        sqlx::query_as::<_, Order>(
+            "INSERT INTO orders (id, tenant_id, total, status, customer_id, customer_name, customer_email, store_id, offline, payment_method, idempotency_key)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+             RETURNING id, tenant_id, total, status, customer_id, customer_name, customer_email, store_id, created_at, offline, payment_method, idempotency_key"
+        )
+        .bind(order_id)
+        .bind(tenant_id)
+        .bind(&new_order.total)
+        .bind(status)
+        .bind(customer_uuid)
+        .bind(customer_name.as_deref())
+        .bind(customer_email.as_deref())
+        .bind(store_id)
+        .bind(offline_flag)
+        .bind(&payment_method)
+        .bind(idempotency_key.as_deref())
+        .fetch_one(&mut *conn)
+        .await
+    } {
         Ok(order) => order,
         Err(e) => {
             if let Err(release_err) = release_inventory(
@@ -779,20 +790,26 @@ pub async fn refund_order(
         )
     })?;
 
-    let order_snapshot = sqlx::query_as::<_, OrderStatusSnapshot>(
-    "SELECT status, payment_method, customer_id, offline, total FROM orders WHERE id = $1 AND tenant_id = $2 FOR UPDATE",
-    )
-    .bind(req.order_id)
-    .bind(tenant_id)
-    .fetch_optional(&mut tx)
-    .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to load order for refund: {}", e),
+    let order_snapshot = {
+    let conn = tx
+            .acquire()
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to acquire transaction connection: {e}")))?;
+        sqlx::query_as::<_, OrderStatusSnapshot>(
+            "SELECT status, payment_method, customer_id, offline, total FROM orders WHERE id = $1 AND tenant_id = $2 FOR UPDATE",
         )
-    })?
-    .ok_or((StatusCode::NOT_FOUND, "Order not found".to_string()))?;
+        .bind(req.order_id)
+        .bind(tenant_id)
+        .fetch_optional(&mut *conn)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to load order for refund: {}", e),
+            )
+        })?
+        .ok_or((StatusCode::NOT_FOUND, "Order not found".to_string()))?
+    };
 
     match order_snapshot.status.as_str() {
         "PENDING" | "VOIDED" | "NOT_ACCEPTED" => {
@@ -807,18 +824,24 @@ pub async fn refund_order(
         _ => {}
     }
 
-    let db_rows = sqlx::query(
-    "SELECT id, product_id, quantity, returned_quantity, unit_price FROM order_items WHERE order_id = $1 FOR UPDATE"
-    )
-    .bind(req.order_id)
-    .fetch_all(&mut tx)
-    .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to load order items for refund: {}", e),
+    let db_rows = {
+    let conn = tx
+            .acquire()
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to acquire transaction connection: {e}")))?;
+        sqlx::query(
+            "SELECT id, product_id, quantity, returned_quantity, unit_price FROM order_items WHERE order_id = $1 FOR UPDATE",
         )
-    })?;
+        .bind(req.order_id)
+        .fetch_all(&mut *conn)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to load order items for refund: {}", e),
+            )
+        })?
+    };
 
     if db_rows.is_empty() {
         return Err((
@@ -953,12 +976,16 @@ pub async fn refund_order(
     }
 
     for update in &updates {
+    let conn = tx
+            .acquire()
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to acquire transaction connection: {e}")))?;
         sqlx::query(
             "UPDATE order_items SET returned_quantity = returned_quantity + $1 WHERE id = $2",
         )
         .bind(update.quantity)
         .bind(update.order_item_id)
-        .execute(&mut tx)
+        .execute(&mut *conn)
         .await
         .map_err(|e| {
             (
@@ -979,33 +1006,43 @@ pub async fn refund_order(
 
     let return_id = Uuid::new_v4();
 
-    sqlx::query(
-        "INSERT INTO order_returns (id, order_id, tenant_id, total, reason) VALUES ($1, $2, $3, $4, $5)"
-    )
-    .bind(return_id)
-    .bind(req.order_id)
-    .bind(tenant_id)
-    .bind(&refund_total)
-    .bind(reason_text.as_deref())
-    .execute(&mut tx)
-    .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to record order return: {}", e),
+    {
+    let conn = tx
+            .acquire()
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to acquire transaction connection: {e}")))?;
+        sqlx::query(
+            "INSERT INTO order_returns (id, order_id, tenant_id, total, reason) VALUES ($1, $2, $3, $4, $5)",
         )
-    })?;
+        .bind(return_id)
+        .bind(req.order_id)
+        .bind(tenant_id)
+        .bind(&refund_total)
+        .bind(reason_text.as_deref())
+        .execute(&mut *conn)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to record order return: {}", e),
+            )
+        })?;
+    }
 
     for update in &updates {
+    let conn = tx
+            .acquire()
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to acquire transaction connection: {e}")))?;
         sqlx::query(
-            "INSERT INTO order_return_items (id, return_id, order_item_id, quantity, line_total) VALUES ($1, $2, $3, $4, $5)"
+            "INSERT INTO order_return_items (id, return_id, order_item_id, quantity, line_total) VALUES ($1, $2, $3, $4, $5)",
         )
         .bind(Uuid::new_v4())
         .bind(return_id)
         .bind(update.order_item_id)
         .bind(update.quantity)
-    .bind(&update.line_total)
-        .execute(&mut tx)
+        .bind(&update.line_total)
+        .execute(&mut *conn)
         .await
         .map_err(|e| {
             (
@@ -1024,21 +1061,27 @@ pub async fn refund_order(
         "PARTIAL_REFUNDED"
     };
 
-    let updated_order = sqlx::query_as::<_, Order>(
-        "UPDATE orders SET status = $3 WHERE id = $1 AND tenant_id = $2
-         RETURNING id, tenant_id, total, status, customer_id, customer_name, customer_email, store_id, created_at, offline, payment_method, idempotency_key"
-    )
-    .bind(req.order_id)
-    .bind(tenant_id)
-    .bind(new_status)
-    .fetch_one(&mut tx)
-    .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to update order status: {}", e),
+    let updated_order = {
+    let conn = tx
+            .acquire()
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to acquire transaction connection: {e}")))?;
+        sqlx::query_as::<_, Order>(
+            "UPDATE orders SET status = $3 WHERE id = $1 AND tenant_id = $2
+             RETURNING id, tenant_id, total, status, customer_id, customer_name, customer_email, store_id, created_at, offline, payment_method, idempotency_key",
         )
-    })?;
+        .bind(req.order_id)
+        .bind(tenant_id)
+        .bind(new_status)
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to update order status: {}", e),
+            )
+        })?
+    };
 
     tx.commit().await.map_err(|e| {
         (

@@ -1,0 +1,7 @@
+[target.x86_64-pc-windows-msvc]
+rustflags = [
+    "-C", "link-arg=/LIBPATH:C:/RustBuild/target/debug/build/libz-sys-887383000df4d209/out/lib",
+]
+
+[build]
+rustflags = ["-C", "link-arg=/LIBPATH:C:/RustBuild/target/debug/build/libz-sys-887383000df4d209/out/lib"]
