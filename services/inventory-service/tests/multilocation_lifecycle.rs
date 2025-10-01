@@ -6,6 +6,8 @@ use reqwest::Client;
 use std::{env, time::Duration};
 use tokio::process::Command;
 use sqlx::{PgPool, Row};
+mod test_utils;
+use test_utils::{seed_inventory_basics, create_reservation_http};
 use testcontainers::{runners::AsyncRunner, ContainerAsync, GenericImage};
 use testcontainers::core::WaitFor;
 
@@ -58,69 +60,17 @@ async fn reservation_expires_and_restocks() {
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
 
-    // Seed product & legacy inventory directly (simulate product.created)
-    let tenant_id = Uuid::new_v4();
-    let product_id = Uuid::new_v4();
+    // Seed core inventory artifacts (product, legacy row, location, inventory_items)
     let pool = PgPool::connect(&db_url).await.unwrap();
-    // Best-effort migrate (if already applied it will be idempotent)
-    // Optional: if migrations embedded: sqlx::migrate!("../../inventory-service/migrations").run(&pool).await.ok();
-    // Insert legacy inventory
-    sqlx::query("INSERT INTO inventory (product_id, tenant_id, quantity, threshold) VALUES ($1,$2,$3,$4)")
-        .bind(product_id)
-        .bind(tenant_id)
-        .bind(10)
-        .bind(5)
-        .execute(&pool)
-        .await
-        .unwrap();
-    // Backfill default location (simulate migration 4005)
-    sqlx::query("INSERT INTO locations (tenant_id, code, name, timezone) VALUES ($1,'DEFAULT','Default','UTC') ON CONFLICT DO NOTHING")
-        .bind(tenant_id)
-        .execute(&pool)
-        .await
-        .unwrap();
-    let loc = sqlx::query("SELECT id FROM locations WHERE tenant_id = $1 AND code='DEFAULT'")
-        .bind(tenant_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap()
-        .get::<uuid::Uuid,_>("id");
-    sqlx::query("INSERT INTO inventory_items (tenant_id, product_id, location_id, quantity, threshold) VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING")
-        .bind(tenant_id)
-        .bind(product_id)
-        .bind(loc)
-        .bind(10)
-        .bind(5)
-        .execute(&pool)
-        .await
-        .unwrap();
+    let (tenant_id, product_id, loc) = seed_inventory_basics(&pool).await;
 
-    // Prepare authenticated reservation creation via HTTP using a dev-signed JWT
-    let order_id = Uuid::new_v4();
-    // Provide JWT config env vars so the service verifier accepts our token.
+    // Provide JWT config env vars so the service verifier accepts our token (must be set before service start ideally; here for test simplicity).
     env::set_var("JWT_ISSUER", "itest-issuer");
     env::set_var("JWT_AUDIENCE", "itest-aud");
-    // Inject dev public key so verifier can use it
     let public_pem = std::fs::read_to_string("jwt-dev.pub.pem").expect("read dev public key");
     env::set_var("JWT_DEV_PUBLIC_KEY_PEM", public_pem);
-
-    // Issue a JWT using private key material
-    let private_pem = std::fs::read_to_string("jwt-dev.pem").expect("read dev private key");
-    let token = issue_dev_jwt(&private_pem, tenant_id, &["admin"], "itest-issuer", "itest-aud");
-
-    let reservation_body = serde_json::json!({
-        "order_id": order_id,
-        "items": [ { "product_id": product_id, "quantity": 3, "location_id": loc } ]
-    });
-    let resp = client
-        .post("http://127.0.0.1:48087/inventory/reservations")
-        .header("authorization", format!("Bearer {}", token))
-        .header("x-tenant-id", tenant_id.to_string())
-        .json(&reservation_body)
-        .send()
-        .await
-        .expect("send reservation request");
-    assert!(resp.status().is_success(), "reservation creation failed: {:?}", resp.text().await.ok());
+    let base_url = "http://127.0.0.1:48087";
+    let _order_id = create_reservation_http(&client, base_url, tenant_id, product_id, loc).await;
 
     // Wait for sweeper (1s sweep + TTL 2s)
     tokio::time::sleep(Duration::from_secs(4)).await;
@@ -175,32 +125,4 @@ async fn reservation_expires_and_restocks() {
     let _ = child.kill().await; // cleanup
 }
 
-fn issue_dev_jwt(private_pem: &str, tenant_id: Uuid, roles: &[&str], issuer: &str, audience: &str) -> String {
-    use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
-    use chrono::Utc;
-    #[derive(serde::Serialize)]
-    struct Claims<'a> {
-        sub: &'a str,
-        #[serde(rename = "tid")] tid: &'a str,
-        roles: Vec<String>,
-        iss: &'a str,
-        aud: &'a str,
-        exp: i64,
-        iat: i64,
-    }
-    let subject = Uuid::new_v4();
-    let now = Utc::now().timestamp();
-    let claims = Claims {
-        sub: &subject.to_string(),
-        tid: &tenant_id.to_string(),
-        roles: roles.iter().map(|r| r.to_string()).collect(),
-        iss: issuer,
-        aud: audience,
-        exp: now + 600,
-        iat: now,
-    };
-    let mut header = Header::new(Algorithm::RS256);
-    header.kid = Some("local-dev".to_string());
-    let key = EncodingKey::from_rsa_pem(private_pem.as_bytes()).expect("valid private key");
-    encode(&header, &claims, &key).expect("jwt encode")
-}
+// issue_dev_jwt moved to test_utils

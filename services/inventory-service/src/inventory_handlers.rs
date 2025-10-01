@@ -16,11 +16,8 @@ use uuid::Uuid;
 pub(crate) const LIST_INVENTORY_SQL: &str =
     "SELECT product_id, tenant_id, quantity, threshold FROM inventory WHERE tenant_id = $1";
 
-// Multi-location variants (aggregation + per-location)
-pub(crate) const LIST_INVENTORY_ITEMS_AGG_SQL: &str =
-    "SELECT product_id, tenant_id, SUM(quantity) AS quantity, MIN(threshold) AS threshold FROM inventory_items WHERE tenant_id = $1 GROUP BY product_id, tenant_id";
-pub(crate) const LIST_INVENTORY_ITEMS_BY_LOC_SQL: &str =
-    "SELECT product_id, tenant_id, quantity, threshold FROM inventory_items WHERE tenant_id = $1 AND location_id = $2";
+// (Previously had LIST_INVENTORY_ITEMS_* constants; removed to silence dead code warnings.
+// Query strings are now inlined in branch logic for flexibility during schema iteration.)
 
 pub(crate) const INVENTORY_VIEW_ROLES: &[&str] =
     &[ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_MANAGER, ROLE_CASHIER];
