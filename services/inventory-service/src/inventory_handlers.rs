@@ -127,6 +127,7 @@ mod tests {
     use common_auth::{Claims, JwtConfig, JwtVerifier};
     use sqlx::postgres::PgPoolOptions;
     use std::sync::Arc;
+    use common_observability::InventoryMetrics;
 
     #[test]
     fn list_inventory_query_uses_parameter_placeholder() {
@@ -155,7 +156,7 @@ mod tests {
             reservation_expiry_sweep: std::time::Duration::from_secs(60),
             dual_write_enabled: false,
             kafka_producer: producer,
-            metrics: std::sync::Arc::new(crate::Metrics::new()),
+            metrics: Arc::new(InventoryMetrics::new()),
         };
 
         let tenant_id = Uuid::new_v4();

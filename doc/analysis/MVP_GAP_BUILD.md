@@ -44,10 +44,10 @@ Legend: ✅ Done | 🌓 Partial | ⛔ Missing
 | D Security | GDPR/retention (non-customer) | ⛔ | — | Extend tombstones, purge jobs |
 | D Security | Network segmentation | ⛔ | `docker-compose.yml` flat network | Define ingress/egress profiles |
 | D Security | Timezone/reporting strategy | ⛔ | — | Store tz + conversion utils |
-| E Inventory | Per-location inventory model | ⛔ | — | Schema migration needed |
-| E Inventory | Reservation lifecycle (basic) | 🌓 | `inventory-service/src/main.rs` routes | Add expiry, reason codes |
-| E Inventory | Adjustment & transfer APIs | ⛔ | — | New endpoints + audit |
-| E Inventory | Low-stock alerts & audit | ⛔ | — | Threshold config + topic |
+| E Inventory | Per-location inventory model | ✅ | `inventory-service` migrations 4003–4005; code in `inventory_handlers.rs` | Multi-location tables + aggregation queries implemented |
+| E Inventory | Reservation lifecycle (basic) | ✅ | `reservation_handlers.rs`, sweeper in `main.rs` | TTL + expiration sweeper + audit + Kafka events |
+| E Inventory | Adjustment & transfer APIs | ⛔ | — | New endpoints + audit (not started) |
+| E Inventory | Low-stock alerts & audit | 🌓 | `main.rs` low_stock emission; audit events in sweeper | UI & threshold mgmt panel pending |
 | E Inventory | Event dedupe semantics | ⛔ | — | Idempotent keys / hashes |
 | F Returns | Basic return initiation UI | 🌓 | `admin-portal/ReturnsPage.tsx` | Backend policies missing |
 | F Returns | Policy module (fees, conditions) | ⛔ | — | `return_policies` table |
@@ -116,11 +116,11 @@ Legend: Done = implemented & exercised, Partial = foundations exist but gaps / b
 
 ### E. Inventory
 
-- Per-location / channel inventory model: Missing (no `location_id` columns evident in inventory queries; only global inventory endpoints).
-- Reservation / hold lifecycle: Partial (reservation endpoints exist in inventory-service for create & release; no expiration or multi-channel semantics).
-- Adjustment & transfer APIs: Missing (no adjustment/transfer routes).
-- Low-stock alerts & audit trails: Missing (no low-stock logic, no UI).
-- Event semantics clarity (dedupe): Missing (not documented in code; risk noted in analysis).
+- Per-location inventory model: Done. New tables `locations`, `inventory_items` added via migrations (4003_create_locations.sql, 4004_create_inventory_items_multilocation.sql, 4005_backfill_inventory_items.sql) with dual-write validation logic and aggregated query paths in `inventory_handlers.rs`.
+- Reservation lifecycle: Done. Create & release endpoints plus expiration sweeper (periodic task in `main.rs`) enforcing TTL via `expires_at` and emitting both domain (`inventory.reservation.expired`) and audit (`audit.events`) Kafka messages; integration test (`multilocation_lifecycle.rs`) validates restock + events.
+- Low-stock alerts & audit: Partial. Emission of `inventory.low_stock` events implemented after order completion when quantity <= threshold. UI surfacing, threshold management UX, and alert tuning still pending.
+- Adjustment & transfer APIs: Missing (no routes for manual adjustments or inter-location transfers yet).
+- Event dedupe semantics: Missing (no idempotency keys / hash-based suppression on emitted events beyond Kafka topic semantics).
 
 ### F. Returns & Exchanges
 
@@ -182,9 +182,9 @@ Legend: Done = implemented & exercised, Partial = foundations exist but gaps / b
 
 ### Epic: Inventory Multi-Location Foundation
 
-- Design & migration: add `locations`, augment `inventory_items(location_id)`, backfill.
-- Update reservation endpoints to accept `location_id`; add expiration job.
-- Publish low-stock event prototype.
+- Design & migration: add `locations`, augment `inventory_items(location_id)`, backfill. — ✅ Completed (migrations 4003–4005 applied; backfill script logic executed during startup/tests).
+- Update reservation endpoints to accept `location_id`; add expiration job. — ✅ Completed (handlers updated; sweeper task with TTL + audit + restock implemented).
+- Publish low-stock event prototype. — 🌓 Implemented event emission to `inventory.low_stock`; pending admin/UI consumption & threshold management tooling.
 
 ### Epic: Tenancy & Audit Unification
 
@@ -303,6 +303,9 @@ Legend: Done = implemented & exercised, Partial = foundations exist but gaps / b
 | Date | PR/Ref | Capability | Change | Notes |
 |------|--------|-----------|--------|-------|
 | 2025-10-01 | INIT | Document created | — | Baseline statuses captured |
+| 2025-10-01 | INV-ML-1 | Per-location inventory model | ⛔→✅ | Migrations + handlers + aggregation queries |
+| 2025-10-01 | INV-ML-2 | Reservation lifecycle (expiration) | 🌓→✅ | TTL + sweeper + audit + events |
+| 2025-10-01 | INV-ML-3 | Low-stock alerts & audit | ⛔→🌓 | Event emission implemented; UI pending |
 
 ## 8. Open Questions / Decisions To Record
 
