@@ -44,7 +44,7 @@ jobs:
         env:
           PGPASSWORD: postgres
       - name: Install sqlx-cli
-        run: cargo install sqlx-cli --version 0.8.6 --no-default-features --features native-tls,postgres
+        run: cargo install sqlx-cli --version 0.7.4 --no-default-features --features native-tls,postgres
       - name: Regenerate offline metadata (diff)
         run: pwsh ./regenerate-sqlx-data.ps1 -Prune -Diff -FailOnDrift -Features integration
         env:

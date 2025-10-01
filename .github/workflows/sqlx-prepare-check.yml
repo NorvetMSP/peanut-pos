@@ -47,7 +47,7 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('services/**/Cargo.toml') }}
 
       - name: Install sqlx-cli
-        run: cargo install sqlx-cli --no-default-features --features native-tls,postgres
+        run: cargo install sqlx-cli --version 0.7.4 --no-default-features --features native-tls,postgres
 
       - name: Run migrations (all services)
         run: |
@@ -56,15 +56,15 @@ jobs:
       - name: Check sqlx prepare drift
         run: |
           set -e
-          # Capture current state
-          git add services/*/sqlx-data.json
-          git diff --cached --quiet || (echo "Unexpected pre-existing changes to sqlx-data.json" && git diff --cached && exit 1)
+          # Capture current state of per-query SQLx offline metadata (generated under .sqlx/*.json)
+          git add services/*/.sqlx/*.json 2>/dev/null || true
+          git diff --cached --quiet || (echo "Unexpected pre-existing changes to .sqlx/*.json metadata files" && git diff --cached && exit 1)
           # Run prepare in check mode (simulate by regenerating and diffing)
           pwsh ./regenerate-sqlx-data.ps1
-          # Stage and diff again
-          git add services/*/sqlx-data.json
+          # Stage updated per-query metadata files and diff again
+          git add services/*/.sqlx/*.json 2>/dev/null || true
           if ! git diff --cached --quiet; then
-            echo 'ERROR: sqlx-data.json out of date. Run ./regenerate-sqlx-data.ps1 locally and commit.'
+            echo 'ERROR: SQLx offline metadata (.sqlx/*.json) is out of date. Run ./regenerate-sqlx-data.ps1 locally and commit.'
             git diff --cached
             exit 1
           fi
