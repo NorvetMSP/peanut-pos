@@ -21,5 +21,8 @@ rdkafka = { version = "0.29", default-features = false, features = ["cmake-build
 futures-util = "0.3"
 sqlx = { version = "0.7", features = ["runtime-tokio-native-tls", "postgres", "macros", "uuid", "bigdecimal"] }
 
+[features]
+# (No explicit offline feature; controlled via SQLX_OFFLINE env var.)
+
 
 

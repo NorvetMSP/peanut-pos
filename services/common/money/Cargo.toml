@@ -10,5 +10,8 @@ path = "src/lib.rs"
 bigdecimal = { version = "0.3", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 thiserror = "1"
-sqlx = { version = "0.7", default-features = false, features = ["runtime-tokio-native-tls", "macros", "postgres", "bigdecimal"] }
 tracing = "0.1"
+sqlx = { version = "0.7", default-features = false, features = ["runtime-tokio-native-tls", "macros", "postgres", "bigdecimal"] }
+
+[features]
+# (Removed offline placeholder; sqlx 0.7 does not expose an 'offline' feature flag. Use SQLX_OFFLINE env var.)

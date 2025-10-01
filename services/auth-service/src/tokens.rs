@@ -311,8 +311,7 @@ impl TokenSigner {
         let account = if let Some(row) = row {
             let now = Utc::now();
             // Hard delete regardless; token is single-use.
-            sqlx::query("DELETE FROM auth_refresh_tokens WHERE jti = $1")
-                .bind(row.jti)
+            sqlx::query!("DELETE FROM auth_refresh_tokens WHERE jti = $1", row.jti)
                 .execute(&mut *tx)
                 .await?;
             if row.expires_at <= now {

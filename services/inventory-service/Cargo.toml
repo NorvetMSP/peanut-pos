@@ -22,6 +22,9 @@ sqlx = { version = "0.7", features = ["runtime-tokio-native-tls", "postgres", "m
 rdkafka = { version = "0.29", default-features = false, features = ["cmake-build", "tokio", "libz", "libz-static"] }
 
 
+[features]
+# (No explicit offline feature; controlled via SQLX_OFFLINE env var.)
+
 [dev-dependencies]
 chrono = "0.4"
 

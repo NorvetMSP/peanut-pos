@@ -22,4 +22,5 @@ uuid = { version = "1", features = ["v4", "serde"] }
 [features]
 # Enables running integration tests that require external services (e.g., Postgres, Kafka)
 integration = []
+# (No explicit offline feature; controlled via SQLX_OFFLINE env var.)
 

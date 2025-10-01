@@ -1,0 +1,89 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            id,\n            tenant_id,\n            name,\n            email,\n            phone,\n            email_encrypted,\n            phone_encrypted,\n            email_hash,\n            phone_hash,\n            pii_key_version,\n            pii_encrypted_at,\n            created_at\n        FROM customers\n        WHERE tenant_id = $1 AND id = $2\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "tenant_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "email",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "phone",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "email_encrypted",
+        "type_info": "Bytea"
+      },
+      {
+        "ordinal": 6,
+        "name": "phone_encrypted",
+        "type_info": "Bytea"
+      },
+      {
+        "ordinal": 7,
+        "name": "email_hash",
+        "type_info": "Bytea"
+      },
+      {
+        "ordinal": 8,
+        "name": "phone_hash",
+        "type_info": "Bytea"
+      },
+      {
+        "ordinal": 9,
+        "name": "pii_key_version",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 10,
+        "name": "pii_encrypted_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 11,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "01e21b1ae51e03e760044b7901baa0419deb247ffe08cf831e8d280ab3c9e466"
+}
