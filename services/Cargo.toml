@@ -15,5 +15,6 @@ members = [
   "inventory-service",
   "customer-service",
   "loyalty-service"
+  ,"audit-coverage"
 ]
 resolver = "2"

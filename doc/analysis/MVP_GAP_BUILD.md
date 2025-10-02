@@ -329,6 +329,9 @@ Risks / Considerations:
 | 2025-10-01 | INV-ML-3 | Low-stock alerts & audit | ⛔→🌓 | Event emission implemented; UI pending |
 | 2025-10-01 | SEC-AUD-1 | Tenancy & audit foundations | ⛔→🌓 | Added common-security, audit schema v1, sink abstraction, product+order integration |
 | 2025-10-01 | SEC-AUD-2 | Audit consumer foundations | ⛔→🌓 | Created audit_events table + audit-consumer service ingesting Kafka with basic metrics |
+| 2025-10-01 | SEC-AUD-3 | /audit/events endpoint | ⛔→🌓 | Product-service implements filtered, paginated audit read API (tenant-scoped) |
+| 2025-10-01 | SEC-AUD-3 | /audit/events endpoint | 🌓→✅ | Added entity_id filter, event_id cursor tie-breaker, severity normalization |
+| 2025-10-01 | SEC-AUD-4 | Audit coverage scanner | ⛔→✅ | Added audit-coverage crate (syn AST parsing, config file, Prometheus metrics file, CI min ratio gate) replacing initial heuristic |
 
 ## 8. Open Questions / Decisions To Record
 

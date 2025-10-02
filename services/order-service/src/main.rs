@@ -172,7 +172,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     async fn metrics(State(state): State<AppState>) -> (StatusCode, String) {
-        let mut out = String::with_capacity(256);
+        let mut out = String::with_capacity(512);
         if let Some(buf) = &state.audit_producer {
             let snap = buf.snapshot();
             out.push_str("# HELP audit_buffer_queued Current in-memory buffered audit events\n");
@@ -188,6 +188,10 @@ async fn main() -> anyhow::Result<()> {
             out.push_str("# HELP audit_buffer_queued Current in-memory buffered audit events\n# TYPE audit_buffer_queued gauge\naudit_buffer_queued 0\n");
             out.push_str("# HELP audit_buffer_emitted_total Total audit events emitted from buffer\n# TYPE audit_buffer_emitted_total counter\naudit_buffer_emitted_total 0\n");
             out.push_str("# HELP audit_buffer_dropped_total Total audit events dropped due to full buffer\n# TYPE audit_buffer_dropped_total counter\naudit_buffer_dropped_total 0\n");
+        }
+        if let Ok(cov) = std::fs::read_to_string("../audit_coverage_metrics.prom") {
+            out.push_str("\n# Audit coverage metrics\n");
+            out.push_str(&cov);
         }
         (StatusCode::OK, out)
     }

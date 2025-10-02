@@ -49,8 +49,8 @@ Status: Planned | In-Progress | Done | Blocked | Deferred
 | TA-AUD-1 | Buffered AuditProducer (async channel) | AUD | Done | TA-FND-2 | Integrated in product & order services |
 | TA-OPS-1 | Metrics: queue length & emit failures | OPS | Done | TA-AUD-1 | Prometheus /internal/metrics + JSON legacy endpoint (deprecate after dashboards) |
 | TA-AUD-2 | Audit consumer + Postgres read model | AUD | In-Progress | TA-AUD-1 | Dedicated migration, feature flag, lag+latency metrics |
-| TA-AUD-3 | /audit/events query endpoint | AUD | Planned | TA-AUD-2 | Filters: tenant, actor, action, status |
-| TA-AUD-4 | Coverage scanner tool | AUD | Planned | TA-AUD-1 | Detect missing emits |
+| TA-AUD-3 | /audit/events query endpoint | AUD | Done | TA-AUD-2 | Added filters, event_id cursor, severity normalization |
+| TA-AUD-4 | Coverage scanner tool | AUD | Done | TA-AUD-1 | AST-based (syn) parser, per-service config, JSON report, Prometheus metrics file, CI 90% ratio gate |
 | TA-AUD-5 | Retention policy (TTL purge job) | AUD | Planned | TA-AUD-2 | Configurable default 30d |
 | TA-AUD-6 | Redaction tagging + masking layer | AUD | Planned | TA-AUD-2 | Field sensitivity taxonomy |
 | TA-AUD-7 | Role-based redacted view | AUD | Planned | TA-AUD-6 | Hide PII from non-admin roles |
