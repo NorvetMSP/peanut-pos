@@ -1,11 +1,12 @@
 use axum::{Router, routing::post, http::{Request, StatusCode, HeaderValue}};
+use common_security::test_request_headers; // macro
 use payment_service::{payment_handlers::process_card_payment, AppState};
 use common_auth::{JwtVerifier, JwtConfig};
 use std::sync::Arc;
 use tower::ServiceExt;
 
 fn state() -> AppState {
-    AppState { jwt_verifier: Arc::new(JwtVerifier::new(JwtConfig::new("issuer","aud"))) }
+    AppState { jwt_verifier: Arc::new(JwtVerifier::new(JwtConfig::new("issuer","aud"))) , #[cfg(feature="kafka")] audit_producer: None }
 }
 
 #[tokio::test]
@@ -34,10 +35,7 @@ async fn forbidden_role_403() {
         .header("content-type","application/json")
         .body(axum::body::Body::from(json_body))
         .unwrap();
-    let h = req.headers_mut();
-    h.insert("X-Tenant-ID", HeaderValue::from_static("11111111-1111-1111-1111-111111111111"));
-    h.insert("X-Roles", HeaderValue::from_static("support"));
-    h.insert("X-User-ID", HeaderValue::from_static("22222222-2222-2222-2222-222222222222"));
+    test_request_headers!(req, roles="support", tenant="11111111-1111-1111-1111-111111111111", user="22222222-2222-2222-2222-222222222222");
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     assert_eq!(resp.headers().get("X-Error-Code").unwrap(), "missing_role");

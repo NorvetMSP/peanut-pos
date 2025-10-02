@@ -15,7 +15,7 @@ use chrono::Utc;
 use common_auth::{JwtConfig, JwtVerifier};
 use common_http_errors::{ApiError};
 use common_money::log_rounding_mode_once;
-use rdkafka::producer::FutureProducer;
+#[cfg(feature = "kafka")] use rdkafka::producer::FutureProducer;
 use reqwest::Client;
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Row};
@@ -26,6 +26,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
 use tokio::sync::RwLock;
+use tokio::sync::mpsc;
 use tokio::time::{interval, MissedTickBehavior};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tracing::{debug, info, warn};
@@ -41,7 +42,8 @@ mod rate_limiter;
 mod usage;
 mod webhook_handlers;
 
-use crate::alerts::{post_alert_webhook, publish_rate_limit_alert, RateLimitAlertEvent};
+use crate::alerts::{post_alert_webhook, RateLimitAlertEvent};
+#[cfg(feature = "kafka")] use crate::alerts::publish_rate_limit_alert;
 use crate::config::GatewayConfig;
 use crate::metrics::GatewayMetrics;
 use crate::rate_limiter::RateLimiter;
@@ -50,14 +52,14 @@ use crate::usage::UsageTracker;
 use integration_handlers::{
     handle_external_order, process_payment, void_payment, ForwardedAuthHeader,
 };
-use common_security::SecurityCtxExtractor; // ensure dependency in Cargo.toml if not present
-use common_security::roles::Role;
+#[allow(unused_imports)] use common_security::SecurityCtxExtractor; // may be unused in some test/feature combinations
+#[allow(unused_imports)] use common_security::roles::Role; // may be unused under certain feature sets
 use webhook_handlers::handle_coinbase_webhook;
 
 /// Shared application state
 #[derive(Clone)]
 pub struct AppState {
-    pub kafka_producer: FutureProducer,
+    #[cfg(feature = "kafka")] pub kafka_producer: FutureProducer,
     pub rate_limiter: RateLimiter,
     pub key_cache: Arc<RwLock<HashMap<String, CachedKey>>>,
     pub jwt_verifier: Arc<JwtVerifier>,
@@ -93,17 +95,14 @@ impl AppState {
         if current < threshold {
             return;
         }
-
         let alert_key = key_hash
             .map(|hash| format!("api:{}", hash))
             .unwrap_or_else(|| format!("identity:{}", identity));
-
         {
             let mut guard = self.alert_state.lock().unwrap();
             let now = Instant::now();
             if let Some(last) = guard.get(&alert_key) {
-                if now.duration_since(*last).as_secs() < self.config.rate_limit_alert_cooldown_secs
-                {
+                if now.duration_since(*last).as_secs() < self.config.rate_limit_alert_cooldown_secs {
                     return;
                 }
             }
@@ -133,7 +132,8 @@ impl AppState {
             "Rate limit burst detected"
         );
 
-        let event = RateLimitAlertEvent {
+    #[allow(unused_variables)]
+    let event = RateLimitAlertEvent {
             action: "gateway.rate_limit.alert",
             tenant_id,
             key_hash: key_hash.map(|value| value.to_string()),
@@ -145,10 +145,8 @@ impl AppState {
             occurred_at: Utc::now(),
             message: message.clone(),
         };
-
-        if let Err(err) =
-            publish_rate_limit_alert(&self.kafka_producer, &self.config.alert_topic, &event).await
-        {
+        #[cfg(feature = "kafka")]
+        if let Err(err) = publish_rate_limit_alert(&self.kafka_producer, &self.config.alert_topic, &event).await {
             warn!(?err, "Failed to publish rate limit alert");
         }
 
@@ -238,6 +236,29 @@ async fn main() -> anyhow::Result<()> {
     .await?;
 
     let metrics = Arc::new(GatewayMetrics::new()?);
+    // Create a small bounded channel representing an internal work queue (placeholder for real queue) and instrument it.
+    let (tx, mut rx) = mpsc::channel::<()>(100);
+    metrics.set_channel_capacity(100);
+    // Spawn a task to drain the channel slowly to simulate work and update depth gauge.
+    {
+        let metrics_clone = metrics.clone();
+        tokio::spawn(async move {
+            use tokio::time::sleep;
+            use std::time::Duration;
+            loop {
+                // Periodically measure depth by peeking (rx capacity not exposed; derive via internal len approximation if available in future)
+                // For now we simply set depth to 0 when empty and update on receive events.
+                if let Some(_) = rx.recv().await {
+                    // After each item, pretend current depth decreases by 1.
+                    // In a real implementation we'd capture length via a wrapper.
+                    metrics_clone.update_channel_depth(0);
+                    sleep(Duration::from_millis(50)).await;
+                } else {
+                    break;
+                }
+            }
+        });
+    }
     let http_client = Client::builder()
         .build()
         .context("Failed to build HTTP client")?;
@@ -246,7 +267,8 @@ async fn main() -> anyhow::Result<()> {
     let jwt_verifier = build_jwt_verifier_from_env().await?;
     spawn_jwks_refresh(jwt_verifier.clone());
 
-    // Initialize Kafka producer
+    // Initialize Kafka producer (feature gated)
+    #[cfg(feature = "kafka")]
     let producer: FutureProducer = rdkafka::ClientConfig::new()
         .set(
             "bootstrap.servers",
@@ -254,11 +276,18 @@ async fn main() -> anyhow::Result<()> {
         )
         .create()
         .expect("failed to create kafka producer");
+    #[cfg(not(feature = "kafka"))]
+    tracing::warn!("kafka feature DISABLED: events & alerts will not be published (TA-FND-5)");
 
-    let usage = UsageTracker::new(config.clone(), db_pool.clone(), producer.clone());
+    let usage = UsageTracker::new(
+        config.clone(),
+        db_pool.clone(),
+        #[cfg(feature = "kafka")] Some(producer.clone()),
+        #[cfg(not(feature = "kafka"))] None,
+    );
     usage.spawn_background_tasks();
     let state = AppState {
-        kafka_producer: producer,
+        #[cfg(feature = "kafka")] kafka_producer: producer,
         rate_limiter,
         key_cache,
         jwt_verifier,
@@ -319,6 +348,21 @@ async fn main() -> anyhow::Result<()> {
     .layer(middleware::from_fn(http_error_metrics_adapter)) // existing adapter for ApiError mapping
     .layer(middleware::from_fn(http_error_metrics_layer("integration-gateway")))
         .layer(cors);
+
+    // Best-effort: push a few items to the queue periodically to exercise depth metric (dev visibility only)
+    {
+        let tx_clone = tx.clone();
+        let metrics_clone = metrics.clone();
+        tokio::spawn(async move {
+            use tokio::time::{sleep, Duration};
+            loop {
+                // simulate burst of 3 items
+                for _ in 0..3 { let _ = tx_clone.send(()).await; }
+                metrics_clone.update_channel_depth(3);
+                sleep(Duration::from_secs(10)).await;
+            }
+        });
+    }
 
     // Start server (bind host/port from env or defaults)
     let host = env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
@@ -398,6 +442,7 @@ async fn auth_middleware(
         return Err(ApiError::Forbidden { trace_id: None });
     };
 
+    let rl_start = Instant::now();
     let decision = state
         .rate_limiter
         .check(&limiter_key, state.config.rate_limit_rpm)
@@ -406,6 +451,10 @@ async fn auth_middleware(
             warn!(?err, "Rate limiter failure");
             ApiError::Internal { trace_id: None, message: Some("Rate limiter failure".into()) }
         })?;
+
+    // Record window usage metric and rough latency (TA-PERF-3)
+    state.metrics.set_rate_window_usage(decision.current);
+    state.metrics.observe_rate_limiter_latency(rl_start.elapsed().as_secs_f64());
 
     state
         .metrics

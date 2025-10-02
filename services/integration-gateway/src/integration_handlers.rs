@@ -1,7 +1,7 @@
 use axum::extract::{Extension, State};
 use axum::{Json};
 use common_http_errors::{ApiError, ApiResult};
-use rdkafka::producer::{FutureProducer, FutureRecord};
+#[cfg(feature = "kafka")] use rdkafka::producer::{FutureProducer, FutureRecord};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -9,10 +9,12 @@ use std::time::Duration;
 use tokio::time::sleep;
 use uuid::Uuid;
 
+#[allow(unused_imports)]
 use crate::{
-    events::{PaymentCompletedEvent, PaymentFailedEvent, PaymentVoidedEvent},
+    events::{PaymentCompletedEvent, PaymentVoidedEvent},
     AppState,
 };
+#[cfg(feature = "kafka")] use crate::events::PaymentFailedEvent;
 
 #[derive(Clone)]
 pub struct ForwardedAuthHeader(pub String);
@@ -75,7 +77,7 @@ pub async fn process_payment(
         if use_stub {
             let hosted_url = format!("https://stub.coinbase.local/charges/{}", Uuid::new_v4());
             tracing::info!(order_id = %order_id, "Generated stub Coinbase charge");
-            let producer = state.kafka_producer.clone();
+            #[cfg(feature = "kafka")] let producer = state.kafka_producer.clone();
             let tenant_key = tenant_id.to_string();
             let amount = req.amount;
             tokio::spawn(async move {
@@ -86,27 +88,30 @@ pub async fn process_payment(
                     method: "crypto".to_string(),
                     amount,
                 };
-                match serde_json::to_string(&completion) {
-                    Ok(payload) => {
-                        if let Err(err) = producer
-                            .send(
-                                FutureRecord::to("payment.completed")
-                                    .payload(&payload)
-                                    .key(&tenant_key),
-                                Duration::from_secs(0),
-                            )
-                            .await
-                        {
-                            tracing::error!(?err, order_id = %order_id, "Failed to emit stub payment.completed");
-                        } else {
-                            tracing::info!(order_id = %order_id, "Stub crypto payment auto-confirmed");
+                #[cfg(feature = "kafka")]
+                {
+                    match serde_json::to_string(&completion) {
+                        Ok(payload) => {
+                            if let Err(err) = producer
+                                .send(
+                                    FutureRecord::to("payment.completed")
+                                        .payload(&payload)
+                                        .key(&tenant_key),
+                                    Duration::from_secs(0),
+                                )
+                                .await
+                            {
+                                tracing::error!(?err, order_id = %order_id, "Failed to emit stub payment.completed");
+                            } else {
+                                tracing::info!(order_id = %order_id, "Stub crypto payment auto-confirmed");
+                            }
                         }
+                        Err(err) => tracing::error!(?err, order_id = %order_id, "Failed to serialize stub payment.completed"),
                     }
-                    Err(err) => tracing::error!(
-                        ?err,
-                        order_id = %order_id,
-                        "Failed to serialize stub payment.completed"
-                    ),
+                }
+                #[cfg(not(feature = "kafka"))]
+                {
+                    tracing::info!(order_id = %order_id, "Stub crypto payment completed (kafka disabled)");
                 }
             });
             return Ok(Json(PaymentResult {
@@ -260,18 +265,21 @@ pub async fn process_payment(
         amount: req.amount,
     };
     let payload = serde_json::to_string(&pay_event).unwrap();
-    if let Err(err) = state
-        .kafka_producer
-        .send(
-            FutureRecord::to("payment.completed")
-                .payload(&payload)
-                .key(&tenant_id.to_string()),
-            Duration::from_secs(0),
-        )
-        .await
+    #[cfg(feature = "kafka")]
     {
-        tracing::error!("Failed to send payment.completed: {:?}", err);
-        return Err(ApiError::Internal { trace_id: None, message: Some("Failed to notify payment completion".into()) });
+        if let Err(err) = state
+            .kafka_producer
+            .send(
+                FutureRecord::to("payment.completed")
+                    .payload(&payload)
+                    .key(&tenant_id.to_string()),
+                Duration::from_secs(0),
+            )
+            .await
+        {
+            tracing::error!("Failed to send payment.completed: {:?}", err);
+            return Err(ApiError::Internal { trace_id: None, message: Some("Failed to notify payment completion".into()) });
+        }
     }
 
     Ok(Json(PaymentResult {
@@ -281,7 +289,7 @@ pub async fn process_payment(
 }
 
 pub async fn void_payment(
-    State(state): State<AppState>,
+    #[allow(unused_variables)] State(state): State<AppState>,
     SecurityCtxExtractor(sec): SecurityCtxExtractor,
     forwarded_auth: Option<Extension<ForwardedAuthHeader>>,
     Json(req): Json<PaymentVoidRequest>,
@@ -318,6 +326,7 @@ pub async fn void_payment(
         tracing::info!(order_id = %order_id, "Stub crypto void processed");
     }
 
+    #[cfg(feature = "kafka")]
     let pay_event = PaymentVoidedEvent {
         order_id,
         tenant_id,
@@ -325,19 +334,23 @@ pub async fn void_payment(
         amount: req.amount,
         reason: req.reason.clone(),
     };
+    #[cfg(feature = "kafka")]
     let payload = serde_json::to_string(&pay_event).map_err(|err| ApiError::Internal { trace_id: None, message: Some(format!("Failed to serialize payment.voided: {err}")) })?;
 
-    if let Err(err) = state
-        .kafka_producer
-        .send(
-            FutureRecord::to("payment.voided")
-                .payload(&payload)
-                .key(&tenant_id.to_string()),
-            Duration::from_secs(0),
-        )
-        .await
+    #[cfg(feature = "kafka")]
     {
-        tracing::error!(?err, order_id = %order_id, "Failed to emit payment.voided");
+        if let Err(err) = state
+            .kafka_producer
+            .send(
+                FutureRecord::to("payment.voided")
+                    .payload(&payload)
+                    .key(&tenant_id.to_string()),
+                Duration::from_secs(0),
+            )
+            .await
+        {
+            tracing::error!(?err, order_id = %order_id, "Failed to emit payment.voided");
+        }
     }
 
     Ok(Json(PaymentResult {
@@ -346,13 +359,8 @@ pub async fn void_payment(
     }))
 }
 
-async fn emit_payment_failed(
-    producer: &FutureProducer,
-    tenant_id: Uuid,
-    order_id: Uuid,
-    method: &str,
-    reason: &str,
-) {
+#[cfg(feature = "kafka")]
+async fn emit_payment_failed(producer: &FutureProducer, tenant_id: Uuid, order_id: Uuid, method: &str, reason: &str) {
     let event = PaymentFailedEvent {
         order_id,
         tenant_id,
@@ -380,6 +388,9 @@ async fn emit_payment_failed(
         tracing::info!(order_id = %order_id, method, reason, "Emitted payment.failed");
     }
 }
+
+#[cfg(not(feature = "kafka"))]
+async fn emit_payment_failed(_producer: &(), _tenant_id: Uuid, _order_id: Uuid, _method: &str, _reason: &str) { /* no-op */ }
 
 /// Order payload from external systems (mirrors Order Service's NewOrder format)
 #[derive(Deserialize, Serialize)]

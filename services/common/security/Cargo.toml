@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
 
+[features]
+default = []
+# Forward kafka feature to common-audit for KafkaAuditSink type usage in emit_capability_denial_audit
+kafka = ["common-audit/kafka"]
+
 [dependencies]
 axum = { version = "0.7", features = ["macros"] }
 http = "0.2"
@@ -17,3 +22,5 @@ headers = "0.4"
 common-audit = { path = "../audit" }
 common-auth = { path = "../auth" }
 common-http-errors = { path = "../http-errors" }
+prometheus = "0.13"
+once_cell = "1"

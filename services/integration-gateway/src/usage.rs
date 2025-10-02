@@ -1,15 +1,16 @@
 use crate::config::GatewayConfig;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use rdkafka::producer::{FutureProducer, FutureRecord};
+#[cfg(feature = "kafka")] use rdkafka::producer::{FutureProducer, FutureRecord};
 use serde::Serialize;
 use sqlx::PgPool;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration as StdDuration;
+#[cfg(feature = "kafka")] use std::time::Duration as StdDuration;
 use tokio::sync::Mutex;
 use tokio::time::{interval, Duration, MissedTickBehavior};
-use tracing::{error, warn};
+#[cfg(feature = "kafka")] use tracing::error;
+use tracing::warn;
 use uuid::Uuid;
 
 #[derive(Clone)]
@@ -19,7 +20,7 @@ pub struct UsageTracker {
 
 struct UsageTrackerInner {
     pool: PgPool,
-    producer: FutureProducer,
+    #[cfg(feature = "kafka")] producer: FutureProducer,
     topic: String,
     flush_secs: u64,
     summary_secs: u64,
@@ -73,17 +74,16 @@ struct ApiKeyUsageSummary {
 }
 
 impl UsageTracker {
-    pub fn new(config: Arc<GatewayConfig>, pool: PgPool, producer: FutureProducer) -> Self {
-        Self {
-            inner: Arc::new(UsageTrackerInner {
-                pool,
-                producer,
-                topic: config.audit_topic.clone(),
-                flush_secs: config.api_usage_flush_secs,
-                summary_secs: config.api_usage_summary_secs,
-                data: Mutex::new(HashMap::new()),
-            }),
-        }
+    pub fn new(config: Arc<GatewayConfig>, pool: PgPool,
+        #[cfg(feature = "kafka")] producer: Option<FutureProducer>,
+        #[cfg(not(feature = "kafka"))] _producer: Option<()>
+    ) -> Self {
+        Self { inner: Arc::new(UsageTrackerInner { pool,
+            #[cfg(feature = "kafka")] producer: producer.expect("producer required when kafka feature enabled"),
+            topic: config.audit_topic.clone(),
+            flush_secs: config.api_usage_flush_secs,
+            summary_secs: config.api_usage_summary_secs,
+            data: Mutex::new(HashMap::new()), }) }
     }
 
     pub fn spawn_background_tasks(&self) {
@@ -228,35 +228,23 @@ impl UsageTracker {
             return Ok(());
         }
 
-        for summary in summaries {
-            let event = ApiKeyUsageSummary {
-                action: "api_key.usage.summary",
-                tenant_id: summary.tenant_id,
-                key_hash: summary.key_hash.clone(),
-                key_suffix: summary.key_suffix.clone(),
-                window_start: summary.window_start,
-                window_end: summary.window_end,
-                request_count: summary.request_count,
-                rejected_count: summary.rejected_count,
-            };
-            match serde_json::to_string(&event) {
-                Ok(payload) => {
-                    if let Err(err) = self
-                        .inner
-                        .producer
-                        .send(
-                            FutureRecord::to(&self.inner.topic)
-                                .payload(&payload)
-                                .key(&summary.tenant_id.to_string()),
-                            StdDuration::from_secs(0),
-                        )
-                        .await
-                    {
-                        error!(?err, tenant_id = %summary.tenant_id, key = %summary.key_hash, "Failed to publish API key usage summary");
+        #[cfg(feature = "kafka")]
+        {
+            for summary in summaries {
+                let event = ApiKeyUsageSummary { action: "api_key.usage.summary", tenant_id: summary.tenant_id, key_hash: summary.key_hash.clone(), key_suffix: summary.key_suffix.clone(), window_start: summary.window_start, window_end: summary.window_end, request_count: summary.request_count, rejected_count: summary.rejected_count };
+                match serde_json::to_string(&event) {
+                    Ok(payload) => {
+                        if let Err(err) = self.inner.producer.send(FutureRecord::to(&self.inner.topic).payload(&payload).key(&summary.tenant_id.to_string()), StdDuration::from_secs(0)).await {
+                            error!(?err, tenant_id = %summary.tenant_id, key = %summary.key_hash, "Failed to publish API key usage summary");
+                        }
                     }
+                    Err(err) => error!(?err, "Failed to serialize API key usage summary"),
                 }
-                Err(err) => error!(?err, "Failed to serialize API key usage summary"),
             }
+        }
+        #[cfg(not(feature = "kafka"))]
+        {
+            // No-op when kafka disabled.
         }
         Ok(())
     }

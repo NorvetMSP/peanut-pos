@@ -5,6 +5,7 @@ use axum::{
     Json,
 };
 use common_security::{SecurityCtxExtractor, Capability, ensure_capability};
+#[cfg(feature = "kafka")] use common_security::emit_capability_denial_audit;
 use common_http_errors::ApiError;
 use serde::{Deserialize, Serialize};
 use bigdecimal::BigDecimal;
@@ -43,14 +44,17 @@ pub struct VoidPaymentResponse {
     pub approval_code: String,
 }
 
+#[allow(unused_variables)]
 pub async fn process_card_payment(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     SecurityCtxExtractor(sec): SecurityCtxExtractor,
     _headers: HeaderMap,
     Json(req): Json<PaymentRequest>,
 ) -> Result<Json<PaymentResponse>, ApiError> {
-    ensure_capability(&sec, Capability::PaymentProcess)
-        .map_err(|_| ApiError::ForbiddenMissingRole { role: "payment_access", trace_id: sec.trace_id })?;
+    if let Err(_) = ensure_capability(&sec, Capability::PaymentProcess) {
+        #[cfg(feature = "kafka")] emit_capability_denial_audit(state.audit_producer.as_ref().map(|a| &**a), &sec, Capability::PaymentProcess, "payment-service").await;
+        return Err(ApiError::ForbiddenMissingRole { role: "payment_access", trace_id: sec.trace_id });
+    }
     let _tenant_id = sec.tenant_id;
 
     let amount_money = Money::new(req.amount.clone());
@@ -68,14 +72,17 @@ pub async fn process_card_payment(
     Ok(Json(response))
 }
 
+#[allow(unused_variables)]
 pub async fn void_card_payment(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     SecurityCtxExtractor(sec): SecurityCtxExtractor,
     _headers: HeaderMap,
     Json(req): Json<VoidPaymentRequest>,
 ) -> Result<Json<VoidPaymentResponse>, ApiError> {
-    ensure_capability(&sec, Capability::PaymentProcess)
-        .map_err(|_| ApiError::ForbiddenMissingRole { role: "payment_access", trace_id: sec.trace_id })?;
+    if let Err(_) = ensure_capability(&sec, Capability::PaymentProcess) {
+        #[cfg(feature = "kafka")] emit_capability_denial_audit(state.audit_producer.as_ref().map(|a| &**a), &sec, Capability::PaymentProcess, "payment-service").await;
+        return Err(ApiError::ForbiddenMissingRole { role: "payment_access", trace_id: sec.trace_id });
+    }
     let _tenant_id = sec.tenant_id;
 
     let amount_money = Money::new(req.amount.clone());

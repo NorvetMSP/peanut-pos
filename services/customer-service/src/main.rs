@@ -80,7 +80,7 @@ async fn render_metrics() -> Result<String, StatusCode> {
 // Legacy CUSTOMER_*_ROLES arrays retained only for tests until fallback fully removed.
 mod handlers;
 use handlers::{create_customer, get_customer, update_customer, search_customers};
-// GDPR management currently gated by CustomerWrite capability (future: distinct Capability::GdprManage)
+// GDPR management now gated by Capability::GdprManage (was CustomerWrite pre-refinement TA-POL-5)
 const GDPR_DELETED_NAME: &str = "[deleted]";
 
 #[derive(Clone)]
@@ -276,7 +276,7 @@ pub(crate) async fn create_customer_impl(
     sec: common_security::context::SecurityContext,
     new_cust: NewCustomer,
 ) -> ApiResult<Json<Customer>> {
-    ensure_capability(&sec, Capability::CustomerWrite)
+    ensure_capability(&sec, Capability::GdprManage)
         .map_err(|_| ApiError::ForbiddenMissingRole { role: "customer_write", trace_id: sec.trace_id })?;
     let tenant_id = sec.tenant_id;
     let customer_id = Uuid::new_v4();

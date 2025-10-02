@@ -388,3 +388,71 @@ Note: Main backlog table left unmodified per append-only governance; this sectio
 - Risk Reduction: Eliminated divergence between legacy role arrays and capability mapping; reduced test flakiness by isolating capability checks from DB dependencies (lazy harness paths).
 - Remaining (Next Sprint Targets): Kafka gating (TA-FND-5), backpressure & rate limiter metrics (TA-PERF-2/3), finalize role→cap matrix differentiation (TA-POL-5), overflow saturation telemetry (TA-OPS-9), policy engine spike (TA-POL-2).
 - Exit Criteria Met: All planned Sprint A stabilization tasks closed; no open legacy artifacts; regression matrix exercised uniformly (400/403/404/500) across services.
+
+2025-10-02 (Sprint B Kickoff – Kafka Gating TA-FND-5):
+
+- Scope: Introduced feature-gated Kafka integration for `integration-gateway` via Cargo feature `kafka`.
+- Changes:
+  - Made `rdkafka` dependency optional in `integration-gateway/Cargo.toml`.
+  - Wrapped producer initialization, alert publishing (`publish_rate_limit_alert`), API key usage summary emission, and payment event emission paths with `#[cfg(feature = "kafka")]`.
+  - Added no-op fallbacks (stubs) when feature disabled to maintain code paths without event side-effects.
+- Rationale: Enables lightweight local dev & CI runs without Kafka deps; reduces Windows build/link friction for contributors not exercising event flows.
+- Observability: When disabled, rate limit alerts and usage summaries are suppressed intentionally; future enhancement could buffer locally. Metrics unaffected.
+
+2025-10-02 (Capability Denial Metric & Audit Denial Emission – Observability Enhancement):
+
+- Added Prometheus counter `capability_denials_total{capability}` in `common-security::policy` incremented on every authorization failure in `ensure_capability`.
+- Motivation: Provide quantitative visibility into most frequently denied capabilities to guide policy refinement and potential UX improvements (e.g., surfaced guidance for Support attempting write operations).
+- Implementation Notes:
+  - Utilizes `once_cell::sync::Lazy` and `IntCounterVec`; registered with default registry at crate init.
+  - Label cardinality bounded by static `Capability` enum (currently 6 values) — low risk of explosion.
+  - Added `Capability::as_str()` canonical snake_case names to stabilize metric labels independent of enum variant case refactors.
+  - Feature-agnostic (always compiled) to ensure denial telemetry even when Kafka/audit features disabled.
+  - Complementary to existing audit denial emission (feature-gated under `kafka`) providing structured event trail; metric offers aggregate lens while audit events retain per-incident forensic detail.
+- Follow-Up Opportunities:
+  1. Add Grafana panel: top N denied capabilities (rate) + stacked area over time.
+  2. Derive denial rate (% of total attempts) once capability success counter exists (future `capability_checks_total{capability, outcome}` histogram/counter family).
+  3. Alert heuristic: sustained spike in a specific capability denies (could indicate misconfigured role assignment or attempted abuse).
+- Risk Assessment: Minimal — counter increment is O(1); contention negligible given low deny frequency expectation compared to read paths.
+- Backlog Mapping: Supports TA-OPS class observability goals; not adding new table row (append-only governance) — evidence recorded here.
+- Risk: Potential silent omission of expected events if production deploy omits `--features kafka`; mitigation: document run instructions & add CI check ensuring feature enabled for release profile.
+- Next: Proceed with TA-PERF-2 (backpressure metrics) and TA-PERF-3 (rate limiter metrics) instrumentation; then overflow saturation telemetry (TA-OPS-9).
+
+2025-10-02 (Sprint B – Performance Metrics TA-PERF-2 / TA-PERF-3):
+
+- Added backpressure gauges to integration-gateway metrics (`gateway_channel_depth`, `gateway_channel_capacity`, `gateway_channel_high_water`).
+- Implemented rate limiter instrumentation: histogram `gateway_rate_limiter_decision_seconds` and gauge `gateway_rate_window_usage` + existing counters.
+- Integrated precise latency timing around Redis decision path; window usage updated per request.
+- Temporary synthetic channel & periodic filler task added to exercise backpressure gauges (dev visibility; candidate for removal once real queues exist).
+- Next: TA-OPS-9 overflow saturation telemetry in `common-http-errors`; TA-POL-5 capability matrix refinement.
+
+2025-10-02 (Sprint B – Overflow Saturation Telemetry TA-OPS-9):
+
+- Added `http_error_code_saturation` gauge (integer percent of MAX_ERROR_CODES used) to `common-http-errors`.
+- Updated guard path to set saturation on each new distinct error code; overflow path unchanged (still increments `http_error_code_overflow_total`).
+- Helper exposed in test module `saturation_percent()` for future regression assertions.
+- Purpose: early warning for approaching cardinality limit before overflow events occur, enabling proactive consolidation of error codes.
+- Next: TA-POL-5 capability matrix refinement and documentation/test alignment.
+
+2025-10-02 (Sprint B – Capability Matrix Refinement TA-POL-5):
+
+- Added `GdprManage` capability; moved GDPR endpoints off `CustomerWrite`.
+- Tightened `CustomerWrite` (removed Inventory, Cashier roles) and `PaymentProcess` (removed Inventory role) per least-privilege.
+- Removed InventoryView from Cashier (cashiers no longer have broad inventory visibility).
+- Updated `policy.rs` mapping + unit tests (cashier denied CustomerWrite, SuperAdmin all, added GdprManage coverage).
+- Updated `customer-service` GDPR handler gating to use `Capability::GdprManage`.
+- Revised `capabilities.md` tables & rationale; added refinement changelog entry.
+- Follow-up: Add/adjust deny-path tests across services (inventory/payment/customer) to assert new 403 missing_role outcomes where allowances were removed.
+
+2025-10-02 (Sprint B – Capability Denial Auditing & Test Infra Enhancements):
+
+- Added capability denial audit emission hook: `emit_capability_denial_audit` (feature-gated `kafka`) in `common-security::policy`.
+- Integrated denial emission in `payment-service` handlers (`process_card_payment`, `void_card_payment`) when capability check fails; emits `capability_denied` audit event (Security severity) with payload {capability, roles} when Kafka/audit producer configured.
+- Extended `payment-service` `AppState` with optional `audit_producer` behind `kafka` feature; dynamic initialization using `KAFKA_BROKERS` + `AUDIT_TOPIC` if present.
+- Added positive-path tests for `GdprManage` (Admin & SuperAdmin allowed) and explicit denial tests (Manager) in `customer-service` error regression harness.
+- Updated customer-service capability tests to reflect refined deny matrix (Cashier & Inventory denied CustomerWrite).
+- Introduced shared `test_request_headers!` macro in `common-security::test_macros` to reduce header boilerplate in tests; refactored `payment-service` forbidden role test to use macro.
+- Added GitHub Actions workflow `.github/workflows/rust-ci.yml` running matrix (default + kafka features) for build, tests, clippy with warnings as errors; ensures denial audit code compiled under feature toggle.
+- Added `kafka` feature flags to `common-security` and `payment-service` crates to properly gate new audit logic preventing unexpected cfg warnings.
+- Documentation: `capabilities.md` already reflects refined matrix; no additional changes required for audit emission (operational detail). This entry serves as authoritative log.
+- Next: Consider wiring audit denial emissions into other services once they adopt capabilities + audit producer (e.g. customer-service once audit added) and adding metrics around denial counts.

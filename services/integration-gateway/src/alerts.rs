@@ -1,10 +1,10 @@
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
-use rdkafka::producer::{FutureProducer, FutureRecord};
+#[cfg(feature = "kafka")] use rdkafka::producer::{FutureProducer, FutureRecord};
 use reqwest::Client;
 use serde::Serialize;
 use serde_json::json;
-use std::time::Duration;
+#[cfg(feature = "kafka")] use std::time::Duration;
 use tracing::{info, warn};
 use uuid::Uuid;
 
@@ -22,27 +22,18 @@ pub struct RateLimitAlertEvent {
     pub message: String,
 }
 
-pub async fn publish_rate_limit_alert(
-    producer: &FutureProducer,
-    topic: &str,
-    event: &RateLimitAlertEvent,
-) -> Result<()> {
-    if topic.trim().is_empty() {
-        return Ok(());
-    }
-
+#[cfg(feature = "kafka")]
+pub async fn publish_rate_limit_alert(producer: &FutureProducer, topic: &str, event: &RateLimitAlertEvent) -> Result<()> {
+    if topic.trim().is_empty() { return Ok(()); }
     let payload = serde_json::to_string(event)?;
-    let key = event
-        .tenant_id
-        .map(|id| id.to_string())
-        .unwrap_or_else(|| "gateway".to_string());
-    producer
-        .send(
-            FutureRecord::to(topic).payload(&payload).key(&key),
-            Duration::from_secs(0),
-        )
-        .await
-        .map_err(|(err, _)| anyhow!("Failed to publish rate limit alert: {err}"))?;
+    let key = event.tenant_id.map(|id| id.to_string()).unwrap_or_else(|| "gateway".to_string());
+    producer.send(FutureRecord::to(topic).payload(&payload).key(&key), Duration::from_secs(0)).await.map_err(|(err, _)| anyhow!("Failed to publish rate limit alert: {err}"))?;
+    Ok(())
+}
+
+#[cfg(not(feature = "kafka"))]
+pub async fn publish_rate_limit_alert(_producer: &(), _topic: &str, _event: &RateLimitAlertEvent) -> Result<()> {
+    // No-op when kafka disabled
     Ok(())
 }
 

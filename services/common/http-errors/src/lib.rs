@@ -102,6 +102,15 @@ static HTTP_ERROR_CODES_DISTINCT: Lazy<IntGauge> = Lazy::new(|| {
     g
 });
 
+static HTTP_ERROR_CODE_SATURATION: Lazy<IntGauge> = Lazy::new(|| {
+    let g = IntGauge::new(
+        "http_error_code_saturation",
+        "Fraction * 100 (integer percent) of distinct error code capacity used",
+    ).expect("http_error_code_saturation");
+    let _ = prometheus::default_registry().register(Box::new(g.clone()));
+    g
+});
+
 // Cardinality guard: limit the number of distinct error codes to avoid metrics explosion.
 const MAX_ERROR_CODES: usize = 40; // tunable threshold
 static ERROR_CODE_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -128,6 +137,7 @@ pub fn http_error_metrics_layer(service_name: &'static str) -> impl Fn(Request<B
                             set.insert(raw_code.to_string());
                             let new = ERROR_CODE_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
                             HTTP_ERROR_CODES_DISTINCT.set(new as i64);
+                            HTTP_ERROR_CODE_SATURATION.set(((new as f64 / MAX_ERROR_CODES as f64) * 100.0).round() as i64);
                             raw_code
                         } else {
                             HTTP_ERROR_CODE_OVERFLOW_TOTAL.inc();
@@ -180,6 +190,7 @@ pub mod test_helpers {
 
     pub fn distinct_gauge() -> i64 { HTTP_ERROR_CODES_DISTINCT.get() }
     pub fn overflow_count() -> u64 { HTTP_ERROR_CODE_OVERFLOW_TOTAL.get() as u64 }
+    pub fn saturation_percent() -> i64 { HTTP_ERROR_CODE_SATURATION.get() }
 }
 
 /// Test-only assertion macro for validating an ApiError's rendered response structure.
