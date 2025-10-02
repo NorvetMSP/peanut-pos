@@ -1,0 +1,17 @@
+[package]
+name = "audit-coverage"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+walkdir = "2"
+regex = "1"
+serde = { version = "1", features=["derive"] }
+serde_json = "1"
+anyhow = "1"
+structopt = { version = "0.3", features=["paw"] }
+paw = "1"
+rayon = "1"
+syn = { version = "2", features=["full","visit"] }
+quote = "1"
+toml = "0.8"

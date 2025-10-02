@@ -1,10 +1,11 @@
 use crate::{AppState, PAYMENT_ROLES};
 use axum::{
     extract::State,
-    http::{HeaderMap, StatusCode},
+    http::HeaderMap,
     Json,
 };
 use common_auth::{ensure_role, tenant_id_from_request, AuthContext};
+use common_http_errors::ApiError;
 use serde::{Deserialize, Serialize};
 use bigdecimal::BigDecimal;
 use common_money::Money; // normalize_scale not needed here
@@ -47,9 +48,9 @@ pub async fn process_card_payment(
     auth: AuthContext,
     headers: HeaderMap,
     Json(req): Json<PaymentRequest>,
-) -> Result<Json<PaymentResponse>, (StatusCode, String)> {
-    ensure_role(&auth, PAYMENT_ROLES)?;
-    let _tenant_id = tenant_id_from_request(&headers, &auth)?;
+) -> Result<Json<PaymentResponse>, ApiError> {
+    ensure_role(&auth, PAYMENT_ROLES).map_err(|_| ApiError::ForbiddenMissingRole { role: "payment_access", trace_id: None })?;
+    let _tenant_id = tenant_id_from_request(&headers, &auth).map_err(|_| ApiError::BadRequest { code: "missing_tenant", trace_id: None, message: Some("Missing tenant id".into()) })?;
 
     let amount_money = Money::new(req.amount.clone());
     println!("Valor stub: processing card payment for Order {} amount={} (normalized={})", req.order_id, req.amount, amount_money);
@@ -71,9 +72,9 @@ pub async fn void_card_payment(
     auth: AuthContext,
     headers: HeaderMap,
     Json(req): Json<VoidPaymentRequest>,
-) -> Result<Json<VoidPaymentResponse>, (StatusCode, String)> {
-    ensure_role(&auth, PAYMENT_ROLES)?;
-    let _tenant_id = tenant_id_from_request(&headers, &auth)?;
+) -> Result<Json<VoidPaymentResponse>, ApiError> {
+    ensure_role(&auth, PAYMENT_ROLES).map_err(|_| ApiError::ForbiddenMissingRole { role: "payment_access", trace_id: None })?;
+    let _tenant_id = tenant_id_from_request(&headers, &auth).map_err(|_| ApiError::BadRequest { code: "missing_tenant", trace_id: None, message: Some("Missing tenant id".into()) })?;
 
     let amount_money = Money::new(req.amount.clone());
     println!("Valor stub: voiding payment for Order {} amount={} (normalized={}) reason={:?}", req.order_id, req.amount, amount_money, req.reason);

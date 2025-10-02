@@ -3,6 +3,9 @@ members = [
   "common/auth",
   "common/crypto",
   "common/money",
+  "common/observability",
+  "common/audit",
+  "common/security",
   "auth-service",
   "order-service",
   "product-service",
@@ -12,5 +15,6 @@ members = [
   "inventory-service",
   "customer-service",
   "loyalty-service"
+  ,"audit-coverage"
 ]
 resolver = "2"

@@ -12,11 +12,12 @@ use common_auth::{
     ensure_role, tenant_id_from_request, AuthContext, JwtConfig, JwtVerifier, ROLE_ADMIN,
     ROLE_CASHIER, ROLE_MANAGER, ROLE_SUPER_ADMIN,
 };
+use common_http_errors::ApiError;
 use common_money::log_rounding_mode_once;
-use futures::StreamExt;
-use rdkafka::consumer::{Consumer, StreamConsumer};
-use rdkafka::producer::{FutureProducer, FutureRecord};
-use rdkafka::Message;
+#[cfg(feature = "kafka")] use futures::StreamExt;
+#[cfg(feature = "kafka")] use rdkafka::consumer::{Consumer, StreamConsumer};
+#[cfg(feature = "kafka")] use rdkafka::producer::{FutureProducer, FutureRecord};
+#[cfg(feature = "kafka")] use rdkafka::Message;
 use serde::Deserialize;
 use sqlx::PgPool;
 use std::{
@@ -44,6 +45,7 @@ struct CompletedEvent {
 struct AppState {
     db: PgPool,
     jwt_verifier: Arc<JwtVerifier>,
+    #[cfg(feature = "kafka")] producer: FutureProducer,
 }
 
 impl FromRef<AppState> for Arc<JwtVerifier> {
@@ -59,17 +61,14 @@ async fn get_points(
     auth: AuthContext,
     Query(params): Query<HashMap<String, String>>,
     headers: axum::http::HeaderMap,
-) -> Result<String, (axum::http::StatusCode, String)> {
-    ensure_role(&auth, LOYALTY_VIEW_ROLES)?;
-    let tenant_id = tenant_id_from_request(&headers, &auth)?;
+) -> Result<String, ApiError> {
+    ensure_role(&auth, LOYALTY_VIEW_ROLES).map_err(|_| ApiError::ForbiddenMissingRole { role: "loyalty_view", trace_id: None })?;
+    let tenant_id = tenant_id_from_request(&headers, &auth).map_err(|_| ApiError::BadRequest { code: "missing_tenant", trace_id: None, message: Some("Missing tenant id".into()) })?;
 
     let cust_id = params
         .get("customer_id")
         .and_then(|s| Uuid::parse_str(s).ok())
-        .ok_or((
-            axum::http::StatusCode::BAD_REQUEST,
-            "customer_id required".into(),
-        ))?;
+        .ok_or(ApiError::BadRequest { code: "missing_customer_id", trace_id: None, message: Some("customer_id required".into()) })?;
 
     let rec = sqlx::query!(
         r#"SELECT points FROM loyalty_points WHERE customer_id = $1 AND tenant_id = $2"#,
@@ -78,14 +77,8 @@ async fn get_points(
     )
     .fetch_one(&state.db)
     .await
-    .map_err(|e| {
-        (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("DB error: {}", e),
-        )
-    })?;
+    .map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("DB error: {}", e)) })?;
 
-    // query! macro creates a struct with a `points` field directly
     Ok(rec.points.to_string())
 }
 
@@ -100,23 +93,24 @@ async fn main() -> anyhow::Result<()> {
     let jwt_verifier = build_jwt_verifier_from_env().await?;
     spawn_jwks_refresh(jwt_verifier.clone());
 
-    let bootstrap = env::var("KAFKA_BOOTSTRAP").unwrap_or_else(|_| "localhost:9092".into());
-    let consumer: StreamConsumer = rdkafka::ClientConfig::new()
+    #[cfg(feature = "kafka")] let bootstrap = env::var("KAFKA_BOOTSTRAP").unwrap_or_else(|_| "localhost:9092".into());
+    #[cfg(feature = "kafka")] let consumer: StreamConsumer = rdkafka::ClientConfig::new()
         .set("bootstrap.servers", &bootstrap)
         .set("group.id", "loyalty-service")
         .create()?;
-    consumer.subscribe(&["order.completed"])?;
+    #[cfg(feature = "kafka")] consumer.subscribe(&["order.completed"])?;
 
-    let producer: FutureProducer = rdkafka::ClientConfig::new()
+    #[cfg(feature = "kafka")] let producer: FutureProducer = rdkafka::ClientConfig::new()
         .set("bootstrap.servers", &bootstrap)
         .create()?;
 
     let state = AppState {
         db: db_pool.clone(),
         jwt_verifier,
+        #[cfg(feature = "kafka")] producer: producer.clone(),
     };
 
-    tokio::spawn({
+    #[cfg(feature = "kafka")] tokio::spawn({
         let db = db_pool.clone();
         let producer = producer.clone();
         async move {
@@ -156,10 +150,33 @@ async fn main() -> anyhow::Result<()> {
             HeaderName::from_static("x-tenant-id"),
         ]);
 
+    use once_cell::sync::Lazy;
+    use prometheus::{Registry, IntCounterVec, Opts};
+    use axum::middleware;
+    static LOYALTY_REGISTRY: Lazy<Registry> = Lazy::new(|| Registry::new());
+    static HTTP_ERRORS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+        let v = IntCounterVec::new(
+            Opts::new("http_errors_total", "Count of HTTP error responses emitted (status >= 400)"),
+            &["service", "code", "status"],
+        ).unwrap();
+        LOYALTY_REGISTRY.register(Box::new(v.clone())).ok();
+        v
+    });
+    async fn http_error_metrics(req: axum::http::Request<axum::body::Body>, next: axum::middleware::Next) -> axum::response::Response {
+        let resp = next.run(req).await;
+        let status = resp.status();
+        if status.as_u16() >= 400 {
+            let code = resp.headers().get("X-Error-Code").and_then(|v| v.to_str().ok()).unwrap_or("unknown");
+            HTTP_ERRORS_TOTAL.with_label_values(&["loyalty-service", code, status.as_str()]).inc();
+        }
+        resp
+    }
+
     let app = Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route("/points", get(get_points))
         .with_state(state)
+        .layer(middleware::from_fn(http_error_metrics))
         .layer(cors);
 
     let host = env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
@@ -176,6 +193,7 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "kafka")]
 async fn handle_completed_event(
     evt: &CompletedEvent,
     cust_id: Uuid,
@@ -229,7 +247,7 @@ async fn handle_completed_event(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "kafka"))]
 mod tests {
     use super::*;
     use sqlx::{Executor, PgPool};

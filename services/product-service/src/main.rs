@@ -1,16 +1,16 @@
 ﻿use anyhow::Context;
 use axum::{
-    extract::FromRef,
+    extract::State,
     http::{
         header::{ACCEPT, CONTENT_TYPE},
-        HeaderName, HeaderValue, Method,
+        HeaderName, HeaderValue, Method, StatusCode,
     },
     routing::{get, post, put},
     Router,
 };
 use common_auth::{JwtConfig, JwtVerifier};
 use common_money::log_rounding_mode_once;
-use rdkafka::producer::FutureProducer;
+#[cfg(feature = "kafka")] use rdkafka::producer::FutureProducer;
 use sqlx::PgPool;
 use std::{env, net::SocketAddr, sync::Arc};
 use tokio::{
@@ -20,24 +20,75 @@ use tokio::{
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tracing::{debug, info, warn};
 
-mod product_handlers;
-use product_handlers::{
+use product_service::product_handlers::{
     create_product, delete_product, list_product_audit, list_products, update_product,
 };
+use product_service::audit_handlers::{audit_search, view_redactions_count, VIEW_REDACTIONS_LABELS};
+mod metrics;
+use metrics::{
+    update_buffer_metrics,
+    update_redaction_counters,
+    gather as gather_metrics,
+    HTTP_ERRORS_TOTAL,
+};
+use axum::middleware;
+use axum::body::Body;
 
-/// Shared application state
-#[derive(Clone)]
-pub struct AppState {
-    pub(crate) db: PgPool,
-    pub(crate) kafka_producer: FutureProducer,
-    pub(crate) jwt_verifier: Arc<JwtVerifier>,
-}
-
-impl FromRef<AppState> for Arc<JwtVerifier> {
-    fn from_ref(state: &AppState) -> Self {
-        state.jwt_verifier.clone()
+async fn error_metrics_mw(
+    req: axum::http::Request<Body>,
+    next: middleware::Next,
+) -> axum::response::Response {
+    let resp = next.run(req).await;
+    let status = resp.status();
+    if status.as_u16() >= 400 {
+        let code = resp
+            .headers()
+            .get("x-error-code")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("unknown");
+        HTTP_ERRORS_TOTAL
+            .with_label_values(&["product-service", code, status.as_str()])
+            .inc();
     }
+    resp
 }
+use product_service::app_state::AppState;
+
+// Legacy JSON metrics (will be deprecated once dashboards switch to Prometheus scrape)
+async fn audit_metrics(State(state): State<AppState>) -> axum::Json<serde_json::Value> {
+    #[cfg(feature = "kafka")]
+    {
+        if let Some(buf) = state.audit_buffer() {
+            let snap = buf.snapshot();
+            return axum::Json(serde_json::json!({
+                "queued": snap.queued,
+                "emitted": snap.emitted,
+                "dropped": snap.dropped
+            }));
+        }
+    }
+    axum::Json(serde_json::json!({"queued":0,"emitted":0,"dropped":0}))
+}
+
+async fn metrics(State(state): State<AppState>) -> (StatusCode, String) {
+    #[cfg(feature = "kafka")]
+    if let Some(buf) = state.audit_buffer() {
+        let snap = buf.snapshot();
+        update_buffer_metrics(snap.queued as u64, snap.emitted as u64, snap.dropped as u64);
+    }
+    if let Ok(map) = VIEW_REDACTIONS_LABELS.lock() {
+        use std::collections::HashMap;
+        let mut converted: HashMap<(String,String,String), u64> = HashMap::new();
+        for ((tenant, role, field), count) in map.iter() {
+            converted.insert((tenant.to_string(), role.clone(), field.clone()), *count);
+        }
+        update_redaction_counters(view_redactions_count() as u64, &converted);
+    }
+    let out = gather_metrics(true);
+    (StatusCode::OK, out)
+}
+
+// AppState now sourced from library module (app_state.rs)
 
 async fn health() -> &'static str {
     "ok"
@@ -55,6 +106,7 @@ async fn main() -> anyhow::Result<()> {
     migrator.set_ignore_missing(true);
     migrator.run(&db).await?;
     // Initialize Kafka producer for downstream events
+    #[cfg(feature = "kafka")]
     let kafka_producer: FutureProducer = rdkafka::ClientConfig::new()
         .set(
             "bootstrap.servers",
@@ -67,11 +119,18 @@ async fn main() -> anyhow::Result<()> {
     spawn_jwks_refresh(jwt_verifier.clone());
 
     // Build application state
-    let state = AppState {
-        db,
-        kafka_producer,
-        jwt_verifier,
-    };
+    #[cfg(feature = "kafka")]
+    let audit_topic = env::var("AUDIT_TOPIC").unwrap_or_else(|_| "audit.events".to_string());
+    #[cfg(feature = "kafka")]
+    let base = common_audit::AuditProducer::new(common_audit::KafkaAuditSink::new(kafka_producer.clone(), common_audit::AuditProducerConfig { topic: audit_topic.clone() }));
+    #[cfg(feature = "kafka")]
+    let audit_producer = Some(Arc::new(common_audit::BufferedAuditProducer::new(base, 1024)));
+    #[cfg(feature = "kafka")] tracing::info!(topic = %audit_topic, "Audit producer initialized");
+    #[cfg(not(feature = "kafka"))]
+    let audit_producer: Option<Arc<()>> = None;
+    #[cfg(not(feature = "kafka"))]
+    let kafka_producer = (); // placeholder when kafka disabled
+    let state = AppState::new(db, kafka_producer, jwt_verifier, audit_producer);
 
     let allowed_origins = [
         "http://localhost:3000",
@@ -117,7 +176,11 @@ async fn main() -> anyhow::Result<()> {
         .route("/products", post(create_product).get(list_products))
         .route("/products/:id", put(update_product).delete(delete_product))
         .route("/products/:id/audit", get(list_product_audit))
+        .route("/audit/events", get(audit_search))
+        .route("/internal/audit_metrics", get(audit_metrics))
+        .route("/internal/metrics", get(metrics))
         .with_state(state)
+        .layer(middleware::from_fn(error_metrics_mw))
         .layer(cors);
     // Start server
     let host = env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string());

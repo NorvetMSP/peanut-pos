@@ -18,6 +18,11 @@ All notable changes to the `common-money` crate (and related monetary infrastruc
 - Aggregate rounding helper (`aggregate_rounding_sum`) with bias illustration test.
 - CI Rounding Mode Matrix workflow (`.github/workflows/money-rounding-matrix.yml`).
 - Debug tracing instrumentation stub for per-normalization events (metrics placeholder).
+- Audit: TA-AUD-7 Role-based redacted view completed in product-service (`/audit/events`):
+  - Privileged (Admin) bypass of redaction, Support masked/removed paths.
+  - `include_redacted=true` query param enables masked placeholder mode.
+  - Labeled redaction counters exported (tenant_id, field, role) via manual Prometheus exposition.
+  - Reusable `redact_event_fields` helper and full HTTP integration test validating removal vs masking vs passthrough.
 
 ### Changed
 

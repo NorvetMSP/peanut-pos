@@ -11,7 +11,8 @@ fn main() {
             println!("cargo:rustc-link-lib=static=z");
         }
     } else {
-        println!("cargo:rustc-link-lib=static=z");
+        // On non-Windows platforms, rely on dependent crates (e.g., libz-sys or rdkafka-sys)
+        // to declare any zlib linkage as needed. Do not force static z here.
     }
 }
 

@@ -39,15 +39,15 @@ Legend: ✅ Done | 🌓 Partial | ⛔ Missing
 | C Admin | Tenant onboarding workflow | 🌓 | `auth-service/src/tenant_handlers.rs` | Need provisioning hooks |
 | C Admin | Global audit views | ⛔ | — | Audit search API + UI |
 | D Security | Central tenancy middleware | 🌓 | Duplicate guards across services | Consolidate into shared crate |
-| D Security | Consistent RBAC enforcement | 🌓 | Product/customer handlers | Audit coverage uneven |
-| D Security | Unified audit pipeline | 🌓 | `docs/security/security_plan.txt` | Wire producer/consumer across services |
+| D Security | Consistent RBAC enforcement | 🌓 | Product & Order services now on `common-security` | Migrate remaining services (inventory, loyalty, payment, auth refactor) |
+| D Security | Unified audit pipeline | 🌓 | `common-audit` producer in product & order services | Add remaining services + consumer/search API |
 | D Security | GDPR/retention (non-customer) | ⛔ | — | Extend tombstones, purge jobs |
 | D Security | Network segmentation | ⛔ | `docker-compose.yml` flat network | Define ingress/egress profiles |
 | D Security | Timezone/reporting strategy | ⛔ | — | Store tz + conversion utils |
-| E Inventory | Per-location inventory model | ⛔ | — | Schema migration needed |
-| E Inventory | Reservation lifecycle (basic) | 🌓 | `inventory-service/src/main.rs` routes | Add expiry, reason codes |
-| E Inventory | Adjustment & transfer APIs | ⛔ | — | New endpoints + audit |
-| E Inventory | Low-stock alerts & audit | ⛔ | — | Threshold config + topic |
+| E Inventory | Per-location inventory model | ✅ | `inventory-service` migrations 4003–4005; code in `inventory_handlers.rs` | Multi-location tables + aggregation queries implemented |
+| E Inventory | Reservation lifecycle (basic) | ✅ | `reservation_handlers.rs`, sweeper in `main.rs` | TTL + expiration sweeper + audit + Kafka events |
+| E Inventory | Adjustment & transfer APIs | ⛔ | — | New endpoints + audit (not started) |
+| E Inventory | Low-stock alerts & audit | 🌓 | `main.rs` low_stock emission; audit events in sweeper | UI & threshold mgmt panel pending |
 | E Inventory | Event dedupe semantics | ⛔ | — | Idempotent keys / hashes |
 | F Returns | Basic return initiation UI | 🌓 | `admin-portal/ReturnsPage.tsx` | Backend policies missing |
 | F Returns | Policy module (fees, conditions) | ⛔ | — | `return_policies` table |
@@ -116,11 +116,11 @@ Legend: Done = implemented & exercised, Partial = foundations exist but gaps / b
 
 ### E. Inventory
 
-- Per-location / channel inventory model: Missing (no `location_id` columns evident in inventory queries; only global inventory endpoints).
-- Reservation / hold lifecycle: Partial (reservation endpoints exist in inventory-service for create & release; no expiration or multi-channel semantics).
-- Adjustment & transfer APIs: Missing (no adjustment/transfer routes).
-- Low-stock alerts & audit trails: Missing (no low-stock logic, no UI).
-- Event semantics clarity (dedupe): Missing (not documented in code; risk noted in analysis).
+- Per-location inventory model: Done. New tables `locations`, `inventory_items` added via migrations (4003_create_locations.sql, 4004_create_inventory_items_multilocation.sql, 4005_backfill_inventory_items.sql) with dual-write validation logic and aggregated query paths in `inventory_handlers.rs`.
+- Reservation lifecycle: Done. Create & release endpoints plus expiration sweeper (periodic task in `main.rs`) enforcing TTL via `expires_at` and emitting both domain (`inventory.reservation.expired`) and audit (`audit.events`) Kafka messages; integration test (`multilocation_lifecycle.rs`) validates restock + events.
+- Low-stock alerts & audit: Partial. Emission of `inventory.low_stock` events implemented after order completion when quantity <= threshold. UI surfacing, threshold management UX, and alert tuning still pending.
+- Adjustment & transfer APIs: Missing (no routes for manual adjustments or inter-location transfers yet).
+- Event dedupe semantics: Missing (no idempotency keys / hash-based suppression on emitted events beyond Kafka topic semantics).
 
 ### F. Returns & Exchanges
 
@@ -182,15 +182,36 @@ Legend: Done = implemented & exercised, Partial = foundations exist but gaps / b
 
 ### Epic: Inventory Multi-Location Foundation
 
-- Design & migration: add `locations`, augment `inventory_items(location_id)`, backfill.
-- Update reservation endpoints to accept `location_id`; add expiration job.
-- Publish low-stock event prototype.
+- Design & migration: add `locations`, augment `inventory_items(location_id)`, backfill. — ✅ Completed (migrations 4003–4005 applied; backfill script logic executed during startup/tests).
+- Update reservation endpoints to accept `location_id`; add expiration job. — ✅ Completed (handlers updated; sweeper task with TTL + audit + restock implemented).
+- Publish low-stock event prototype. — 🌓 Implemented event emission to `inventory.low_stock`; pending admin/UI consumption & threshold management tooling.
 
 ### Epic: Tenancy & Audit Unification
 
-- Extract shared tenancy/RBAC crate; apply to 2 pilot services.
-- Introduce audit producer wrapper; instrument product + order mutations.
-- Add global audit search backend route scaffold.
+Status: Phase 1 foundations in place (crate extraction, dual-service adoption, structured event schema, sink abstraction). Search/consumer layer deferred to Phase 2.
+
+Delivered (Phase 1):
+
+- Shared security context crate (`services/common/security`): unified tenant_id, actor, roles, trace propagation.
+- Audit event schema v1: event_version, event_id (UUID), severity, source_service, trace_id, payload/meta separation.
+- AuditSink abstraction with `KafkaAuditSink` (feature-gated) and `NoopAuditSink` for test isolation.
+- Product-service & order-service migrated to `SecurityCtxExtractor` (handlers now enforce roles via `Role` enum; removed legacy per-file constants in order-service; product-service cleanup pending unused legacy helpers removal).
+- Audit emissions added for product CRUD and order create/void/refund events.
+
+Pending (Phase 2 / Next Sprints):
+
+- Extend security context usage to remaining services (inventory, loyalty, payment, integration-gateway, customer, auth modernization).
+- Implement audit consumer & indexing service (persist to analytical store / searchable index) + REST query (`/audit/events`).
+- Role model expansion (distinct Cashier vs Support, granular inventory adjustment roles).
+- Redaction & retention policies (sensitive fields masking, TTL jobs) linked to GDPR roadmap.
+- Global audit search UI (admin portal) with filters (actor, action, entity, severity, date).
+- Cross-service correlation fields (propagate trace_id automatically from incoming request spans).
+
+Risks / Considerations:
+
+- Need to remove remaining legacy role helpers to avoid drift.
+- Kafka backpressure & batching strategy (currently synchronous fire-and-forget; move to buffered channel + backpressure metrics).
+- Future multi-sink support (e.g., direct OpenSearch sink) can extend `AuditSink` without schema churn.
 
 ### Epic: Offline Replay Validation
 
@@ -303,6 +324,18 @@ Legend: Done = implemented & exercised, Partial = foundations exist but gaps / b
 | Date | PR/Ref | Capability | Change | Notes |
 |------|--------|-----------|--------|-------|
 | 2025-10-01 | INIT | Document created | — | Baseline statuses captured |
+| 2025-10-01 | INV-ML-1 | Per-location inventory model | ⛔→✅ | Migrations + handlers + aggregation queries |
+| 2025-10-01 | INV-ML-2 | Reservation lifecycle (expiration) | 🌓→✅ | TTL + sweeper + audit + events |
+| 2025-10-01 | INV-ML-3 | Low-stock alerts & audit | ⛔→🌓 | Event emission implemented; UI pending |
+| 2025-10-01 | SEC-AUD-1 | Tenancy & audit foundations | ⛔→🌓 | Added common-security, audit schema v1, sink abstraction, product+order integration |
+| 2025-10-01 | SEC-AUD-2 | Audit consumer foundations | ⛔→🌓 | Created audit_events table + audit-consumer service ingesting Kafka with basic metrics |
+| 2025-10-01 | SEC-AUD-2 | Audit consumer foundations | 🌓→✅ | Added failure counter, last ingest timestamp, optional batching & improved lag/latency metrics |
+| 2025-10-01 | SEC-AUD-3 | /audit/events endpoint | ⛔→🌓 | Product-service implements filtered, paginated audit read API (tenant-scoped) |
+| 2025-10-01 | SEC-AUD-3 | /audit/events endpoint | 🌓→✅ | Added entity_id filter, event_id cursor tie-breaker, severity normalization |
+| 2025-10-01 | SEC-AUD-4 | Audit coverage scanner | ⛔→✅ | Added audit-coverage crate (syn AST parsing, config file, Prometheus metrics file, CI min ratio gate) replacing initial heuristic |
+| 2025-10-01 | SEC-AUD-5 | Audit retention job | ⛔→✅ | Added TTL purge task (env AUDIT_RETENTION_DAYS, dry-run mode, deletion & last-run metrics) |
+| 2025-10-01 | SEC-AUD-6 | Audit redaction layer | ⛔→✅ | Added configurable masking (env paths, modes off/log/enforce) + redaction metrics |
+| 2025-10-01 | SEC-AUD-7 | Role-based redacted audit view | ⛔→🌓 | Began TA-AUD-7: /audit/events now planning role privilege gating + response-time redaction overlay design (include_redacted param, metadata labels, view redactions metric) |
 
 ## 8. Open Questions / Decisions To Record
 

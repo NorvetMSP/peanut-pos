@@ -24,6 +24,10 @@ This repo uses SQLx compile-time offline metadata. See `docs/development/sqlx-of
 
 CI enforces `SQLX_OFFLINE=1` builds via the `sqlx-offline` workflow.
 
+### Inventory Service Notes
+
+For rationale on using dynamic `sqlx::query` in integration tests (to avoid maintaining offline macro metadata for ephemeral seed/setup SQL), see `services/inventory-service/README.md`.
+
 ## Layout
 
 - services/ (Rust microservices)

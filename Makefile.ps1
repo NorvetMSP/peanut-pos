@@ -9,7 +9,7 @@
 
 param(
     [Parameter(Position=0, Mandatory=$true)]
-    [ValidateSet("Start-Infra","Stop-Infra","Build-Services","Test-Services","Run-Service","Dev-Frontend","Lint-Frontend")]
+    [ValidateSet("Start-Infra","Stop-Infra","Build-Services","Test-Services","Run-Service","Dev-Frontend","Lint-Frontend","Audit-Coverage")]
     [string]$Task,
     [string]$Name,
     [string]$App
@@ -118,6 +118,22 @@ function Lint-Frontend {
     }
 }
 
+function Audit-Coverage {
+    Write-Host "Running audit coverage scanner..."
+    Push-Location services
+    try {
+        cargo run -p audit-coverage -- --root . --json ../audit_coverage_report.json --metrics-out ../audit_coverage_metrics.prom --min-ratio 90
+    } finally {
+        Pop-Location
+    }
+    if (Test-Path audit_coverage_report.json) {
+        Write-Host "Coverage report written to services/../audit_coverage_report.json"
+    }
+    if (Test-Path audit_coverage_metrics.prom) {
+        Write-Host "Prometheus metrics written to services/../audit_coverage_metrics.prom"
+    }
+}
+
 switch ($Task) {
     "Start-Infra"    { Start-Infra }
     "Stop-Infra"     { Stop-Infra }
@@ -126,6 +142,7 @@ switch ($Task) {
     "Run-Service"    { Run-Service -Name $Name }
     "Dev-Frontend"   { Dev-Frontend -App $App }
     "Lint-Frontend"  { Lint-Frontend }
+    "Audit-Coverage" { Audit-Coverage }
     default { Write-Error "Unknown task '$Task'." }
 }
 

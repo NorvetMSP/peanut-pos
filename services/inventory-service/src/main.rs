@@ -1,56 +1,64 @@
 use anyhow::Context;
 use axum::{
-    extract::FromRef,
+    extract::{FromRef, State},
     http::{
         header::{ACCEPT, CONTENT_TYPE},
         HeaderName, HeaderValue, Method,
     },
     routing::{delete, get, post},
     Router,
+    middleware,
+    body::Body,
 };
 use common_auth::{JwtConfig, JwtVerifier};
 use common_money::log_rounding_mode_once;
-use futures::StreamExt;
-use rdkafka::consumer::{Consumer, StreamConsumer};
-use rdkafka::producer::FutureProducer;
-use rdkafka::Message;
-use serde::Deserialize;
-use sqlx::PgPool;
+#[cfg(feature = "kafka")] use futures::StreamExt; // only needed when kafka feature enabled
+#[cfg(feature = "kafka")] use rdkafka::consumer::{Consumer, StreamConsumer};
+#[cfg(feature = "kafka")] use rdkafka::producer::FutureProducer;
+#[cfg(feature = "kafka")] use rdkafka::Message;
+use sqlx::{PgPool, Row};
+use prometheus::{Encoder, TextEncoder};
+use common_observability::InventoryMetrics;
 use std::{env, net::SocketAddr, sync::Arc, time::Duration};
 use tokio::net::TcpListener;
 use tokio::time::{interval, MissedTickBehavior};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tracing::{debug, info, warn};
+use inventory_service::DEFAULT_THRESHOLD; // import shared constant
 use uuid::Uuid;
 
 mod inventory_handlers;
 use inventory_handlers::list_inventory;
 mod reservation_handlers;
 use reservation_handlers::{create_reservation, release_reservation};
+mod location_handlers;
+use location_handlers::list_locations;
 
-pub(crate) const DEFAULT_THRESHOLD: i32 = 5;
+// (Removed placeholder error metrics layer; will reintroduce with proper implementation later)
+
+pub(crate) const DEFAULT_RESERVATION_TTL_SECS: i64 = 900; // 15 minutes
 
 #[derive(Deserialize)]
-struct OrderCompletedEvent {
+#[cfg(feature = "kafka")] struct OrderCompletedEvent {
     order_id: Uuid,
     tenant_id: Uuid,
     items: Vec<OrderItem>,
 }
 
 #[derive(Deserialize)]
-struct OrderVoidedEvent {
+#[cfg(feature = "kafka")] struct OrderVoidedEvent {
     order_id: Uuid,
     tenant_id: Uuid,
 }
 
 #[derive(Deserialize)]
-struct OrderItem {
+#[cfg(feature = "kafka")] struct OrderItem {
     product_id: Uuid,
     quantity: i32,
 }
 
 #[derive(Deserialize, Debug)]
-struct ProductCreatedEvent {
+#[cfg(feature = "kafka")] struct ProductCreatedEvent {
     product_id: Uuid,
     tenant_id: Uuid,
     initial_quantity: Option<i32>,
@@ -58,7 +66,7 @@ struct ProductCreatedEvent {
 }
 
 #[derive(Deserialize, Debug)]
-struct PaymentCompletedEvent {
+#[cfg(feature = "kafka")] struct PaymentCompletedEvent {
     order_id: Uuid,
     tenant_id: Uuid,
     amount: f64,
@@ -66,8 +74,35 @@ struct PaymentCompletedEvent {
 
 #[derive(Clone)]
 pub struct AppState {
-    pub(crate) db: PgPool,
-    pub(crate) jwt_verifier: Arc<JwtVerifier>,
+    pub db: PgPool,
+    pub jwt_verifier: Arc<JwtVerifier>,
+    #[allow(dead_code)]
+    pub multi_location_enabled: bool,
+    #[allow(dead_code)]
+    pub reservation_default_ttl: Duration,
+    #[allow(dead_code)]
+    pub reservation_expiry_sweep: Duration,
+    pub dual_write_enabled: bool,
+    #[cfg(feature = "kafka")] pub kafka_producer: FutureProducer,
+    pub metrics: Arc<InventoryMetrics>,
+}
+
+// Metrics implementation now provided by common-observability crate.
+
+async fn metrics_endpoint(State(state): State<AppState>) -> (axum::http::StatusCode, String) {
+    let encoder = TextEncoder::new();
+    let families = state.metrics.registry.gather();
+    let mut buf = Vec::new();
+    if let Err(e) = encoder.encode(&families, &mut buf) {
+        return (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("metrics encode error: {e}"),
+        );
+    }
+    (
+        axum::http::StatusCode::OK,
+        String::from_utf8_lossy(&buf).to_string(),
+    )
 }
 
 impl FromRef<AppState> for Arc<JwtVerifier> {
@@ -91,6 +126,7 @@ async fn main() -> anyhow::Result<()> {
     let jwt_verifier = build_jwt_verifier_from_env().await?;
     spawn_jwks_refresh(jwt_verifier.clone());
 
+    #[cfg(feature = "kafka")]
     let consumer: StreamConsumer = rdkafka::ClientConfig::new()
         .set(
             "bootstrap.servers",
@@ -100,6 +136,7 @@ async fn main() -> anyhow::Result<()> {
         .set("enable.auto.commit", "true")
         .create()
         .expect("failed to create kafka consumer");
+    #[cfg(feature = "kafka")]
     consumer.subscribe(&[
         "order.completed",
         "order.voided",
@@ -107,6 +144,7 @@ async fn main() -> anyhow::Result<()> {
         "product.created",
     ])?;
 
+    #[cfg(feature = "kafka")]
     let producer: FutureProducer = rdkafka::ClientConfig::new()
         .set(
             "bootstrap.servers",
@@ -115,9 +153,36 @@ async fn main() -> anyhow::Result<()> {
         .create()
         .expect("failed to create kafka producer");
 
+    let multi_location_enabled = env::var("MULTI_LOCATION_ENABLED")
+        .ok()
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let reservation_default_ttl = env::var("RESERVATION_DEFAULT_TTL_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(Duration::from_secs(DEFAULT_RESERVATION_TTL_SECS as u64));
+    let reservation_expiry_sweep = env::var("RESERVATION_EXPIRY_SWEEP_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(Duration::from_secs(60));
+
+    let dual_write_enabled = env::var("INVENTORY_DUAL_WRITE")
+        .ok()
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+
+    let metrics = Arc::new(InventoryMetrics::new());
     let state = AppState {
         db: db_pool.clone(),
         jwt_verifier,
+        multi_location_enabled,
+        reservation_default_ttl: reservation_default_ttl,
+        reservation_expiry_sweep: reservation_expiry_sweep,
+        dual_write_enabled,
+        #[cfg(feature = "kafka")] kafka_producer: producer.clone(),
+        metrics: metrics.clone(),
     };
 
     let allowed_origins = [
@@ -141,6 +206,28 @@ async fn main() -> anyhow::Result<()> {
             HeaderName::from_static("x-tenant-id"),
         ]);
 
+    // Error metrics middleware using dedicated state (Arc<InventoryMetrics>) passed via from_fn_with_state.
+    async fn error_metrics_mw(
+        State(metrics): State<Arc<InventoryMetrics>>,
+        req: axum::http::Request<Body>,
+        next: middleware::Next,
+    ) -> axum::response::Response {
+        let resp = next.run(req).await;
+        let status = resp.status();
+        if status.as_u16() >= 400 {
+            let code = resp
+                .headers()
+                .get("x-error-code")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("unknown");
+            metrics
+                .http_errors_total
+                .with_label_values(&["inventory-service", code, status.as_str()])
+                .inc();
+        }
+        resp
+    }
+
     let app = Router::new()
         .route("/healthz", get(health))
         .route("/inventory", get(list_inventory))
@@ -149,34 +236,47 @@ async fn main() -> anyhow::Result<()> {
             "/inventory/reservations/:order_id",
             delete(release_reservation),
         )
-        .with_state(state.clone())
+        .route("/locations", get(list_locations))
+        .route("/metrics", get(metrics_endpoint))
+    .with_state(state.clone())
+    .layer(middleware::from_fn_with_state(metrics.clone(), error_metrics_mw))
         .layer(cors);
 
-    let db_for_consumer = db_pool.clone();
-    tokio::spawn(async move {
-        let mut stream = consumer.stream();
-        while let Some(message) = stream.next().await {
-            match message {
-                Ok(m) => {
-                    let topic = m.topic();
-                    if let Some(Ok(text)) = m.payload_view::<str>() {
-                        if topic == "order.completed" {
-                            handle_order_completed(text, &db_for_consumer, &producer).await;
-                        } else if topic == "order.voided" {
-                            handle_order_voided(text, &db_for_consumer).await;
-                        } else if topic == "product.created" {
-                            handle_product_created(text, &db_for_consumer).await;
-                        } else if topic == "payment.completed" {
-                            if let Ok(evt) = serde_json::from_str::<PaymentCompletedEvent>(text) {
-                                tracing::debug!(order_id = %evt.order_id, tenant_id = %evt.tenant_id, amount = evt.amount, "Payment completed event received (no-op for inventory)");
+    #[cfg(feature = "kafka")]
+    {
+        let db_for_consumer = db_pool.clone();
+        let multi_loc_for_consumer = state.multi_location_enabled;
+        let producer = producer.clone();
+        tokio::spawn(async move {
+            let mut stream = consumer.stream();
+            while let Some(message) = stream.next().await {
+                match message {
+                    Ok(m) => {
+                        let topic = m.topic();
+                        if let Some(Ok(text)) = m.payload_view::<str>() {
+                            if topic == "order.completed" {
+                                handle_order_completed(text, &db_for_consumer, &producer, multi_loc_for_consumer).await;
+                            } else if topic == "order.voided" {
+                                #[cfg(feature = "kafka")] {
+                                    handle_order_voided(text, &db_for_consumer).await;
+                                }
+                            } else if topic == "product.created" {
+                                handle_product_created(text, &db_for_consumer).await;
+                            } else if topic == "payment.completed" {
+                                if let Ok(evt) = serde_json::from_str::<PaymentCompletedEvent>(text) {
+                                    tracing::debug!(order_id = %evt.order_id, tenant_id = %evt.tenant_id, amount = evt.amount, "Payment completed event received (no-op for inventory)");
+                                }
                             }
                         }
                     }
+                    Err(err) => tracing::error!(?err, "Kafka error"),
                 }
-                Err(err) => tracing::error!(?err, "Kafka error"),
             }
-        }
-    });
+        });
+    }
+
+    // Spawn reservation expiration sweeper
+    spawn_reservation_sweeper(state.clone());
 
     let host = env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
     let port: u16 = env::var("PORT")
@@ -191,7 +291,8 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn handle_order_completed(text: &str, db: &PgPool, producer: &FutureProducer) {
+#[cfg(feature = "kafka")]
+async fn handle_order_completed(text: &str, db: &PgPool, producer: &FutureProducer, multi_location_enabled: bool) {
     match serde_json::from_str::<OrderCompletedEvent>(text) {
         Ok(event) => {
             let OrderCompletedEvent {
@@ -215,59 +316,100 @@ async fn handle_order_completed(text: &str, db: &PgPool, producer: &FutureProduc
                 let quantity_delta = item.quantity;
                 let mut attempts = 0;
                 let mut latest: Option<(i32, i32)> = None;
-
-                loop {
-                    match sqlx::query!(
-                        "UPDATE inventory SET quantity = quantity - $1 WHERE product_id = $2 AND tenant_id = $3 RETURNING quantity, threshold",
-                        quantity_delta,
-                        product_id,
-                        tenant_id
+                if multi_location_enabled {
+                    // Use dynamic queries (query / query_as) to avoid sqlx compile-time validation failing before migrations.
+                    if let Ok(res_rows) = sqlx::query(
+                        "SELECT location_id, quantity FROM inventory_reservations WHERE order_id = $1 AND tenant_id = $2 AND product_id = $3"
                     )
-                    .fetch_optional(&mut *tx)
+                    .bind(order_id)
+                    .bind(tenant_id)
+                    .bind(product_id)
+                    .fetch_all(&mut *tx)
                     .await
                     {
-                        Ok(Some(row)) => {
-                            latest = Some((row.quantity, row.threshold));
-                            break;
+                        for r in res_rows.iter() {
+                            let loc_id: Option<Uuid> = r.get("location_id");
+                            let q: i32 = r.get("quantity");
+                            if let Some(loc) = loc_id {
+                                if let Err(err) = sqlx::query(
+                                    "UPDATE inventory_items SET quantity = quantity - $1, updated_at = NOW() WHERE tenant_id = $2 AND product_id = $3 AND location_id = $4"
+                                )
+                                .bind(q)
+                                .bind(tenant_id)
+                                .bind(product_id)
+                                .bind(loc)
+                                .execute(&mut *tx)
+                                .await {
+                                    tracing::error!(?err, product_id = %product_id, tenant_id = %tenant_id, location_id = %loc, "Failed to decrement inventory_items for completion");
+                                }
+                            }
                         }
-                        Ok(None) if attempts == 0 => {
-                            attempts += 1;
-                            if let Err(err) = sqlx::query!(
-                                "INSERT INTO inventory (product_id, tenant_id, quantity, threshold) VALUES ($1, $2, $3, $4) ON CONFLICT (product_id, tenant_id) DO NOTHING",
-                                product_id,
-                                tenant_id,
-                                0,
-                                DEFAULT_THRESHOLD
-                            )
-                            .execute(&mut *tx)
-                            .await
-                            {
+                    }
+                    if let Ok(row) = sqlx::query(
+                        "SELECT COALESCE(SUM(quantity),0) as quantity, MIN(threshold) as threshold FROM inventory_items WHERE tenant_id = $1 AND product_id = $2"
+                    )
+                    .bind(tenant_id)
+                    .bind(product_id)
+                    .fetch_one(&mut *tx)
+                    .await {
+                        let q: i64 = row.get("quantity");
+                        let th: Option<i32> = row.get::<Option<i32>, _>("threshold");
+                        if let Some(thr) = th { latest = Some((q as i32, thr)); }
+                    }
+                } else {
+                    loop {
+                        match sqlx::query!(
+                            "UPDATE inventory SET quantity = quantity - $1 WHERE product_id = $2 AND tenant_id = $3 RETURNING quantity, threshold",
+                            quantity_delta,
+                            product_id,
+                            tenant_id
+                        )
+                        .fetch_optional(&mut *tx)
+                        .await
+                        {
+                            Ok(Some(row)) => {
+                                latest = Some((row.quantity, row.threshold));
+                                break;
+                            }
+                            Ok(None) if attempts == 0 => {
+                                attempts += 1;
+                                if let Err(err) = sqlx::query!(
+                                    "INSERT INTO inventory (product_id, tenant_id, quantity, threshold) VALUES ($1, $2, $3, $4) ON CONFLICT (product_id, tenant_id) DO NOTHING",
+                                    product_id,
+                                    tenant_id,
+                                    0,
+                                    DEFAULT_THRESHOLD
+                                )
+                                .execute(&mut *tx)
+                                .await
+                                {
+                                    tracing::error!(
+                                        ?err,
+                                        product_id = %product_id,
+                                        tenant_id = %tenant_id,
+                                        "Failed to initialise inventory row before completion"
+                                    );
+                                    break;
+                                }
+                                continue;
+                            }
+                            Ok(None) => {
+                                tracing::warn!(
+                                    product_id = %product_id,
+                                    tenant_id = %tenant_id,
+                                    "Inventory record missing for completed order; skipping adjustment"
+                                );
+                                break;
+                            }
+                            Err(err) => {
                                 tracing::error!(
                                     ?err,
                                     product_id = %product_id,
                                     tenant_id = %tenant_id,
-                                    "Failed to initialise inventory row before completion"
+                                    "Failed to update inventory for completed order"
                                 );
                                 break;
                             }
-                            continue;
-                        }
-                        Ok(None) => {
-                            tracing::warn!(
-                                product_id = %product_id,
-                                tenant_id = %tenant_id,
-                                "Inventory record missing for completed order; skipping adjustment"
-                            );
-                            break;
-                        }
-                        Err(err) => {
-                            tracing::error!(
-                                ?err,
-                                product_id = %product_id,
-                                tenant_id = %tenant_id,
-                                "Failed to update inventory for completed order"
-                            );
-                            break;
                         }
                     }
                 }
@@ -302,6 +444,7 @@ async fn handle_order_completed(text: &str, db: &PgPool, producer: &FutureProduc
                 return;
             }
 
+            #[cfg(feature = "kafka")]
             for (product_id, quantity, threshold) in alerts {
                 let alert = serde_json::json!({
                     "product_id": product_id,
@@ -326,11 +469,45 @@ async fn handle_order_completed(text: &str, db: &PgPool, producer: &FutureProduc
                     );
                 }
             }
+
+            // Dual-write validation: verify legacy aggregate matches sum of multi-location if both features active.
+            if multi_location_enabled {
+                if let Ok(rows) = sqlx::query(
+                    "SELECT product_id, SUM(quantity) as sum_qty FROM inventory_items WHERE tenant_id = $1 GROUP BY product_id"
+                )
+                .bind(tenant_id)
+                .fetch_all(db)
+                .await
+                {
+                    for r in rows {
+                        let product_id: Uuid = r.get("product_id");
+                        let sum_qty: Option<i64> = r.get("sum_qty");
+                        if let Some(sum_qty) = sum_qty {
+                            if let Ok(legacy) = sqlx::query(
+                                "SELECT quantity FROM inventory WHERE tenant_id = $1 AND product_id = $2"
+                            )
+                            .bind(tenant_id)
+                            .bind(product_id)
+                            .fetch_optional(db)
+                            .await
+                            {
+                                if let Some(row) = legacy {
+                                    let legacy_qty: i32 = row.get("quantity");
+                                    if legacy_qty != sum_qty as i32 {
+                                        tracing::warn!(product_id = %product_id, tenant_id = %tenant_id, legacy = legacy_qty, agg = sum_qty, "Dual-write divergence detected");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
         Err(err) => tracing::error!(?err, "Failed to parse OrderCompletedEvent"),
     }
 }
 
+#[cfg(feature = "kafka")]
 async fn handle_order_voided(text: &str, db: &PgPool) {
     match serde_json::from_str::<OrderVoidedEvent>(text) {
         Ok(event) => {
@@ -434,6 +611,7 @@ async fn handle_order_voided(text: &str, db: &PgPool) {
     }
 }
 
+#[cfg(feature = "kafka")]
 async fn handle_product_created(text: &str, db: &PgPool) {
     match serde_json::from_str::<ProductCreatedEvent>(text) {
         Ok(event) => {
@@ -528,4 +706,142 @@ fn spawn_jwks_refresh(verifier: Arc<JwtVerifier>) {
             }
         }
     });
+}
+
+fn spawn_reservation_sweeper(state: AppState) {
+    tokio::spawn(async move {
+        let sweep_interval = state.reservation_expiry_sweep;
+        loop {
+            tokio::time::sleep(sweep_interval).await;
+            let start = std::time::Instant::now();
+            if let Err(err) = expire_reservations(&state).await {
+                tracing::error!(?err, "Reservation sweeper error");
+            }
+            let elapsed = start.elapsed().as_secs_f64();
+            state.metrics.sweeper_duration_seconds.observe(elapsed);
+        }
+    });
+}
+
+async fn expire_reservations(state: &AppState) -> anyhow::Result<()> {
+    // Update expired reservations and restock inventory for multi-location aware system.
+    let mut tx = state.db.begin().await?;
+    let rows = sqlx::query(
+        "UPDATE inventory_reservations SET status = 'EXPIRED' WHERE status = 'ACTIVE' AND expires_at IS NOT NULL AND expires_at < NOW() RETURNING product_id, tenant_id, location_id, quantity, order_id"
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+    if !rows.is_empty() {
+        for r in rows.iter() {
+            let product_id: Uuid = r.get("product_id");
+            let tenant_id: Uuid = r.get("tenant_id");
+            let quantity: i32 = r.get("quantity");
+            let order_id: Uuid = r.get("order_id");
+            if state.multi_location_enabled {
+                let loc_id: Option<Uuid> = r.get("location_id");
+                if let Some(loc) = loc_id {
+                    let _ = sqlx::query(
+                        "UPDATE inventory_items SET quantity = quantity + $1, updated_at = NOW() WHERE tenant_id = $2 AND product_id = $3 AND location_id = $4"
+                    )
+                    .bind(quantity)
+                    .bind(tenant_id)
+                    .bind(product_id)
+                    .bind(loc)
+                    .execute(&mut *tx)
+                    .await;
+                }
+            } else {
+                let _ = sqlx::query(
+                    "UPDATE inventory SET quantity = quantity + $1 WHERE tenant_id = $2 AND product_id = $3"
+                )
+                .bind(quantity)
+                .bind(tenant_id)
+                .bind(product_id)
+                .execute(&mut *tx)
+                .await;
+            }
+
+            // Emit reservation expired event
+            let expired_at = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let _evt = serde_json::json!({
+                "type": "reservation.expired",
+                "tenant_id": tenant_id,
+                "product_id": product_id,
+                "order_id": order_id,
+                "quantity": quantity,
+                "expired_at_epoch": expired_at,
+            });
+            #[cfg(feature = "kafka")]
+            if let Err(err) = state.kafka_producer.send(
+                rdkafka::producer::FutureRecord::to("inventory.reservation.expired")
+                    .payload(&evt.to_string())
+                    .key(&tenant_id.to_string()),
+                Duration::from_secs(0)
+            ).await {
+                tracing::error!(?err, tenant_id = %tenant_id, order_id = %order_id, "Failed to emit inventory.reservation.expired");
+            }
+            // Audit event
+            let _audit_evt = serde_json::json!({
+                "action": "inventory.reservation.expired",
+                "schema_version": 1,
+                "tenant_id": tenant_id,
+                "order_id": order_id,
+                "product_id": product_id,
+                "quantity": quantity,
+                "expired_at_epoch": expired_at,
+            });
+            #[cfg(feature = "kafka")] let _ = state.kafka_producer.send(
+                rdkafka::producer::FutureRecord::to("audit.events")
+                    .payload(&audit_evt.to_string())
+                    .key(&tenant_id.to_string()),
+                Duration::from_secs(0)
+            ).await;
+        }
+    }
+    tx.commit().await?;
+
+    // Dual-write validation (periodic) if enabled
+    if state.multi_location_enabled && state.dual_write_enabled {
+        if let Ok(tenants) = sqlx::query("SELECT DISTINCT tenant_id FROM inventory_items")
+            .fetch_all(&state.db)
+            .await
+        {
+            for r in tenants {
+                let tenant_id: Uuid = r.get("tenant_id");
+                if let Ok(rows) = sqlx::query(
+                    "SELECT product_id, SUM(quantity) as sum_qty FROM inventory_items WHERE tenant_id = $1 GROUP BY product_id"
+                )
+                .bind(tenant_id)
+                .fetch_all(&state.db)
+                .await
+                {
+                    for row in rows {
+                        let product_id: Uuid = row.get("product_id");
+                        let sum_qty: Option<i64> = row.get("sum_qty");
+                        if let Some(sum_qty) = sum_qty {
+                            if let Ok(legacy) = sqlx::query(
+                                "SELECT quantity FROM inventory WHERE tenant_id = $1 AND product_id = $2"
+                            )
+                            .bind(tenant_id)
+                            .bind(product_id)
+                            .fetch_optional(&state.db)
+                            .await
+                            {
+                                if let Some(lrow) = legacy {
+                                    let legacy_qty: i32 = lrow.get("quantity");
+                                    if legacy_qty != sum_qty as i32 {
+                                        tracing::warn!(product_id = %product_id, tenant_id = %tenant_id, legacy = legacy_qty, agg = sum_qty, "Dual-write divergence detected (sweeper)");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
 }

@@ -5,11 +5,12 @@ use axum::{
     Json,
 };
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
-use common_auth::{
-    ensure_role, tenant_id_from_request, AuthContext, ROLE_ADMIN, ROLE_CASHIER, ROLE_MANAGER,
-    ROLE_SUPER_ADMIN,
-};
-use rdkafka::producer::FutureRecord;
+use common_auth::AuthContext; // retained only for access to bearer token for downstream service calls
+use common_security::{SecurityCtxExtractor, Role};
+#[cfg(feature = "kafka")] use common_audit; // for AuditSeverity
+#[cfg(feature = "kafka")] use serde_json::json;
+use common_http_errors::ApiError;
+#[cfg(feature = "kafka")] use rdkafka::producer::FutureRecord;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use bigdecimal::BigDecimal;
@@ -18,15 +19,13 @@ use common_money::{nearly_equal, Money};
 use sqlx::{Postgres, QueryBuilder, Row, Transaction};
 use sqlx::Acquire; // acquire a connection handle within a transaction for sqlx 0.7 executor compatibility
 use std::collections::HashMap;
-use std::time::Duration;
+#[cfg(feature = "kafka")] use std::time::Duration;
 use uuid::Uuid;
 
 use crate::AppState;
 
-const ORDER_WRITE_ROLES: &[&str] = &[ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_MANAGER, ROLE_CASHIER];
-const ORDER_REFUND_ROLES: &[&str] = &[ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_MANAGER];
-const ORDER_VOID_ROLES: &[&str] = &[ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_MANAGER];
-const ORDER_VIEW_ROLES: &[&str] = &[ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_MANAGER, ROLE_CASHIER];
+// Legacy role string constants removed; unified role enforcement now via common-security Role enum.
+// Mapping note: prior ROLE_CASHIER is approximated by Role::Support until a dedicated Cashier role is introduced.
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct OrderItem {
@@ -185,6 +184,17 @@ fn inventory_url(base_url: &str, suffix: &str) -> String {
     format!("{}{}", trimmed, suffix)
 }
 
+fn map_legacy_error(status: StatusCode, message: String) -> ApiError {
+    match status {
+        StatusCode::BAD_REQUEST => ApiError::BadRequest { code: "bad_request", trace_id: None, message: Some(message) },
+        StatusCode::FORBIDDEN => ApiError::Forbidden { trace_id: None },
+        StatusCode::NOT_FOUND => ApiError::NotFound { code: "not_found", trace_id: None },
+        StatusCode::CONFLICT => ApiError::BadRequest { code: "conflict", trace_id: None, message: Some(message) },
+        StatusCode::BAD_GATEWAY => ApiError::BadRequest { code: "upstream_error", trace_id: None, message: Some(message) },
+        _ => ApiError::Internal { trace_id: None, message: Some(message) },
+    }
+}
+
 async fn reserve_inventory(
     client: &Client,
     base_url: &str,
@@ -192,7 +202,7 @@ async fn reserve_inventory(
     auth_token: &str,
     order_id: Uuid,
     items: &[OrderItem],
-) -> Result<(), (StatusCode, String)> {
+) -> Result<(), ApiError> {
     let payload = InventoryReservationRequestPayload {
         order_id,
         items: items
@@ -214,12 +224,7 @@ async fn reserve_inventory(
         request = request.header("Authorization", format!("Bearer {}", auth_token));
     }
 
-    let response = request.send().await.map_err(|err| {
-        (
-            StatusCode::BAD_GATEWAY,
-            format!("Failed to contact inventory-service: {err}"),
-        )
-    })?;
+    let response = request.send().await.map_err(|err| map_legacy_error(StatusCode::BAD_GATEWAY, format!("Failed to contact inventory-service: {err}")))?;
 
     if response.status().is_success() {
         return Ok(());
@@ -230,23 +235,11 @@ async fn reserve_inventory(
 
     if status == reqwest::StatusCode::CONFLICT || status == reqwest::StatusCode::BAD_REQUEST {
         let mapped = StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-        return Err((
-            mapped,
-            if body.is_empty() {
-                mapped.to_string()
-            } else {
-                body
-            },
-        ));
+    return Err(map_legacy_error(mapped, if body.is_empty() { mapped.to_string() } else { body }));
     }
 
-    Err((
-        StatusCode::BAD_GATEWAY,
-        if body.is_empty() {
-            format!("Inventory reservation failed with status {status}")
-        } else {
-            format!("Inventory reservation failed with status {status}: {body}")
-        },
+    Err(map_legacy_error(StatusCode::BAD_GATEWAY,
+        if body.is_empty() { format!("Inventory reservation failed with status {status}") } else { format!("Inventory reservation failed with status {status}: {body}") }
     ))
 }
 
@@ -351,49 +344,47 @@ async fn insert_order_items(
     tx: &mut Transaction<'_, Postgres>,
     order_id: Uuid,
     items: &[OrderItem],
-) -> Result<(), (StatusCode, String)> {
+) -> Result<(), ApiError> {
     for item in items {
-    let conn = tx
+        let conn = tx
             .acquire()
             .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to acquire transaction connection: {e}")))?;
-        sqlx::query!(
-            r#"INSERT INTO order_items (id, order_id, product_id, quantity, unit_price, line_total, product_name)
-                VALUES ($1, $2, $3, $4, $5, $6, $7)"#,
-            Uuid::new_v4(),
-            order_id,
-            item.product_id,
-            item.quantity,
-            item.unit_price.inner(),
-            item.line_total.inner(),
-            item.product_name.as_deref()
-        )
-        .execute(&mut *conn)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to insert order item: {}", e),
+            .map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to acquire transaction connection: {e}")) })?;
+            sqlx::query(
+                r#"INSERT INTO order_items (id, order_id, product_id, quantity, unit_price, line_total, product_name)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7)"#
             )
-        })?;
+            .bind(Uuid::new_v4())
+            .bind(order_id)
+            .bind(item.product_id)
+            .bind(item.quantity)
+            .bind(item.unit_price.inner())
+            .bind(item.line_total.inner())
+            .bind(item.product_name.as_deref())
+            .execute(&mut *conn)
+            .await
+            .map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to insert order item: {}", e)) })?;
     }
     Ok(())
 }
 
 pub async fn create_order(
     State(state): State<AppState>,
-    auth: AuthContext,
-    headers: HeaderMap,
+    SecurityCtxExtractor(sec): SecurityCtxExtractor,
+    auth: AuthContext, // kept only for propagating bearer token to inventory-service
     Json(new_order): Json<NewOrder>,
-) -> Result<Json<Order>, (StatusCode, String)> {
-    ensure_role(&auth, ORDER_WRITE_ROLES)?;
-    let tenant_id = tenant_id_from_request(&headers, &auth)?;
+) -> Result<Json<Order>, ApiError> {
+    if !sec
+        .roles
+        .iter()
+        .any(|r| matches!(r, Role::Admin | Role::Manager | Role::Support))
+    {
+    return Err(ApiError::ForbiddenMissingRole { role: "admin_or_manager_or_support", trace_id: None });
+    }
+    let tenant_id = sec.tenant_id;
 
     if new_order.items.is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "Order must contain at least one item".to_string(),
-        ));
+    return Err(ApiError::BadRequest { code: "missing_items", trace_id: None, message: Some("Order must contain at least one item".into()) });
     }
 
     let mut payment_method = new_order.payment_method.trim().to_lowercase();
@@ -415,13 +406,8 @@ pub async fn create_order(
         .bind(tenant_id)
         .bind(key)
         .fetch_optional(&state.db)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("DB error while checking idempotency: {}", e),
-            )
-        })?
+    .await
+    .map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("DB error while checking idempotency: {}", e)) })?
         {
             return Ok(Json(existing));
         }
@@ -511,10 +497,7 @@ pub async fn create_order(
             {
                 tracing::error!(?release_err, order_id = %order_id, tenant_id = %tenant_id, "Failed to release inventory after begin failure");
             }
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to begin transaction: {}", e),
-            ));
+            return Err(ApiError::Internal { trace_id: None, message: Some(format!("Failed to begin transaction: {}", e)) });
         }
     };
 
@@ -522,7 +505,7 @@ pub async fn create_order(
     let conn = tx
             .acquire()
             .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to acquire transaction connection: {e}")))?;
+            .map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to acquire transaction connection: {e}")) })?;
         sqlx::query_as::<_, Order>(
             "INSERT INTO orders (id, tenant_id, total, status, customer_id, customer_name, customer_email, store_id, offline, payment_method, idempotency_key)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
@@ -555,10 +538,7 @@ pub async fn create_order(
             {
                 tracing::error!(?release_err, order_id = %order_id, tenant_id = %tenant_id, "Failed to release inventory after insert failure");
             }
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to insert order: {}", e),
-            ));
+            return Err(ApiError::Internal { trace_id: None, message: Some(format!("Failed to insert order: {}", e)) });
         }
     };
 
@@ -589,14 +569,11 @@ pub async fn create_order(
         {
             tracing::error!(?release_err, order_id = %order_id, tenant_id = %tenant_id, "Failed to release inventory after commit failure");
         }
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to commit transaction: {}", e),
-        ));
+        return Err(ApiError::Internal { trace_id: None, message: Some(format!("Failed to commit transaction: {}", e)) });
     }
 
     if order.status == "COMPLETED" {
-        let event_items: Vec<serde_json::Value> = new_order
+    #[cfg(feature = "kafka")] let event_items: Vec<serde_json::Value> = new_order
             .items
             .iter()
             .map(|item| {
@@ -609,7 +586,7 @@ pub async fn create_order(
             })
             .collect();
 
-        let event = serde_json::json!({
+    #[cfg(feature = "kafka")] let event = serde_json::json!({
             "order_id": order.id,
             "tenant_id": tenant_id,
             "items": event_items,
@@ -619,32 +596,54 @@ pub async fn create_order(
             "payment_method": order.payment_method,
         });
 
-        if let Err(err) = state
-            .kafka_producer
-            .send(
-                FutureRecord::to("order.completed")
-                    .payload(&event.to_string())
-                    .key(&tenant_id.to_string()),
-                Duration::from_secs(0),
-            )
-            .await
+        #[cfg(feature = "kafka")]
         {
-            tracing::error!("Failed to send order.completed: {:?}", err);
+            if let Err(err) = state
+                .kafka_producer
+                .send(
+                    FutureRecord::to("order.completed")
+                        .payload(&event.to_string())
+                        .key(&tenant_id.to_string()),
+                    Duration::from_secs(0),
+                )
+                .await
+            {
+                tracing::error!("Failed to send order.completed: {:?}", err);
+            }
         }
     }
 
+    #[cfg(feature = "kafka")]
+    if let Some(audit) = &state.audit_producer {
+        let changes = json!({"after": {"order_id": order.id, "status": order.status, "total": order.total.inner()}});
+        let _ = audit
+            .emit(
+                tenant_id,
+                sec.actor.clone(),
+                "order",
+                Some(order.id),
+                "created",
+                "order-service",
+                common_audit::AuditSeverity::Info,
+                None,
+                changes,
+                json!({"source":"order-service"}),
+            )
+            .await;
+    }
     Ok(Json(order))
 }
 
 pub async fn void_order(
     State(state): State<AppState>,
-    auth: AuthContext,
+    SecurityCtxExtractor(sec): SecurityCtxExtractor,
     Path(order_id): Path<Uuid>,
-    headers: HeaderMap,
     Json(req): Json<VoidOrderRequest>,
-) -> Result<Json<Order>, (StatusCode, String)> {
-    ensure_role(&auth, ORDER_VOID_ROLES)?;
-    let tenant_id = tenant_id_from_request(&headers, &auth)?;
+) -> Result<Json<Order>, ApiError> {
+    if !sec.roles.iter().any(|r| matches!(r, Role::Admin | Role::Manager)) {
+    return Err(ApiError::ForbiddenMissingRole { role: "admin_or_manager", trace_id: None });
+    }
+    let tenant_id = sec.tenant_id;
 
     let void_reason = req
         .reason
@@ -660,20 +659,12 @@ pub async fn void_order(
     .bind(tenant_id)
     .fetch_optional(&state.db)
     .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to fetch order: {}", e),
-        )
-    })?;
+    .map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to fetch order: {}", e)) })?;
 
-    let existing = existing.ok_or((StatusCode::NOT_FOUND, "Order not found".to_string()))?;
+    let existing = existing.ok_or(ApiError::NotFound { code: "order_not_found", trace_id: None })?;
 
     if existing.status.as_str() != "PENDING" {
-        return Err((
-            StatusCode::CONFLICT,
-            format!("Order in status '{}' cannot be voided", existing.status),
-        ));
+        return Err(ApiError::BadRequest { code: "invalid_status", trace_id: None, message: Some(format!("Order in status '{}' cannot be voided", existing.status)) });
     }
 
     if let Err(err) = notify_payment_void(
@@ -689,10 +680,7 @@ pub async fn void_order(
     .await
     {
         tracing::error!(order_id = %order_id, tenant_id = %tenant_id, ?err, "Failed to notify payment void");
-        return Err((
-            StatusCode::BAD_GATEWAY,
-            "Unable to void payment with upstream provider".to_string(),
-        ));
+        return Err(ApiError::BadRequest { code: "upstream_error", trace_id: None, message: Some("Unable to void payment with upstream provider".into()) });
     }
 
     let updated_order = sqlx::query_as::<_, Order>(
@@ -704,31 +692,19 @@ pub async fn void_order(
     .bind(void_reason.as_deref())
     .fetch_optional(&state.db)
     .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to void order: {}", e),
-        )
-    })?
-    .ok_or((
-        StatusCode::CONFLICT,
-        "Order status changed before void could be applied".to_string(),
-    ))?;
+    .map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to void order: {}", e)) })?
+    .ok_or(ApiError::BadRequest { code: "status_changed", trace_id: None, message: Some("Order status changed before void could be applied".into()) })?;
 
+    #[cfg(feature = "kafka")]
     let item_rows = sqlx::query_as::<_, OrderItemFinancialRow>(
-    "SELECT product_id, quantity, unit_price, line_total FROM order_items WHERE order_id = $1",
+        "SELECT product_id, quantity, unit_price, line_total FROM order_items WHERE order_id = $1",
     )
     .bind(order_id)
     .fetch_all(&state.db)
     .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to load order items: {}", e),
-        )
-    })?;
+    .map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to load order items: {}", e)) })?;
 
-    let event_items: Vec<serde_json::Value> = item_rows
+    #[cfg(feature = "kafka")] let event_items: Vec<serde_json::Value> = item_rows
         .into_iter()
         .map(|row| {
             serde_json::json!({
@@ -740,7 +716,7 @@ pub async fn void_order(
         })
         .collect();
 
-    let order_void_event = serde_json::json!({
+    #[cfg(feature = "kafka")] let order_void_event = serde_json::json!({
         "order_id": updated_order.id,
         "tenant_id": tenant_id,
         "items": event_items,
@@ -751,6 +727,7 @@ pub async fn void_order(
         "reason": void_reason,
     });
 
+    #[cfg(feature = "kafka")]
     if let Err(err) = state
         .kafka_producer
         .send(
@@ -764,37 +741,52 @@ pub async fn void_order(
         tracing::error!("Failed to send order.voided: {:?}", err);
     }
 
+    #[cfg(feature = "kafka")]
+    if let Some(audit) = &state.audit_producer {
+        let changes = json!({
+            "order_id": updated_order.id,
+            "before": {"status": "PENDING"},
+            "after": {"status": "VOIDED", "reason": void_reason},
+        });
+        let _ = audit
+            .emit(
+                tenant_id,
+                sec.actor.clone(),
+                "order",
+                Some(updated_order.id),
+                "voided",
+                "order-service",
+                common_audit::AuditSeverity::Info,
+                None,
+                changes,
+                json!({"source":"order-service"}),
+            )
+            .await;
+    }
     Ok(Json(updated_order))
 }
 
 pub async fn refund_order(
     State(state): State<AppState>,
-    auth: AuthContext,
-    headers: HeaderMap,
+    SecurityCtxExtractor(sec): SecurityCtxExtractor,
     Json(req): Json<RefundRequest>,
-) -> Result<Json<Order>, (StatusCode, String)> {
-    ensure_role(&auth, ORDER_REFUND_ROLES)?;
-    let tenant_id = tenant_id_from_request(&headers, &auth)?;
+) -> Result<Json<Order>, ApiError> {
+    if !sec.roles.iter().any(|r| matches!(r, Role::Admin | Role::Manager)) {
+    return Err(ApiError::ForbiddenMissingRole { role: "admin_or_manager", trace_id: None });
+    }
+    let tenant_id = sec.tenant_id;
 
     if req.items.is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "Refund must include at least one item".to_string(),
-        ));
+        return Err(ApiError::BadRequest { code: "missing_items", trace_id: None, message: Some("Refund must include at least one item".into()) });
     }
 
-    let mut tx = state.db.begin().await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to begin refund transaction: {}", e),
-        )
-    })?;
+    let mut tx = state.db.begin().await.map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to begin refund transaction: {}", e)) })?;
 
     let order_snapshot = {
-    let conn = tx
+        let conn = tx
             .acquire()
             .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to acquire transaction connection: {e}")))?;
+            .map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to acquire transaction connection: {e}")) })?;
         sqlx::query_as::<_, OrderStatusSnapshot>(
             "SELECT status, payment_method, customer_id, offline, total FROM orders WHERE id = $1 AND tenant_id = $2 FOR UPDATE",
         )
@@ -802,52 +794,33 @@ pub async fn refund_order(
         .bind(tenant_id)
         .fetch_optional(&mut *conn)
         .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to load order for refund: {}", e),
-            )
-        })?
-        .ok_or((StatusCode::NOT_FOUND, "Order not found".to_string()))?
+        .map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to load order for refund: {}", e)) })?
+        .ok_or(ApiError::NotFound { code: "order_not_found", trace_id: None })?
     };
 
     match order_snapshot.status.as_str() {
         "PENDING" | "VOIDED" | "NOT_ACCEPTED" => {
-            return Err((
-                StatusCode::CONFLICT,
-                format!(
-                    "Order in status '{}' cannot be refunded",
-                    order_snapshot.status
-                ),
-            ));
+            return Err(ApiError::BadRequest { code: "invalid_status", trace_id: None, message: Some(format!("Order in status '{}' cannot be refunded", order_snapshot.status)) });
         }
         _ => {}
     }
 
     let db_rows = {
-    let conn = tx
+        let conn = tx
             .acquire()
             .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to acquire transaction connection: {e}")))?;
+            .map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to acquire transaction connection: {e}")) })?;
         sqlx::query(
             "SELECT id, product_id, quantity, returned_quantity, unit_price FROM order_items WHERE order_id = $1 FOR UPDATE",
         )
         .bind(req.order_id)
         .fetch_all(&mut *conn)
         .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to load order items for refund: {}", e),
-            )
-        })?
+        .map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to load order items for refund: {}", e)) })?
     };
 
     if db_rows.is_empty() {
-        return Err((
-            StatusCode::CONFLICT,
-            "Order has no items to refund".to_string(),
-        ));
+        return Err(ApiError::BadRequest { code: "no_items", trace_id: None, message: Some("Order has no items to refund".into()) });
     }
 
     struct PendingUpdate {
@@ -867,31 +840,11 @@ pub async fn refund_order(
 
     let mut items_map: HashMap<Uuid, DbItem> = HashMap::new();
     for row in db_rows {
-        let order_item_id: Uuid = row.try_get("id").map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to read order item id: {}", e),
-            )
-        })?;
-        let product_id: Uuid = row.try_get("product_id").map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to read order item product: {}", e),
-            )
-        })?;
-        let quantity: i32 = row.try_get("quantity").map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to read order item quantity: {}", e),
-            )
-        })?;
+        let order_item_id: Uuid = row.try_get("id").map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to read order item id: {}", e)) })?;
+        let product_id: Uuid = row.try_get("product_id").map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to read order item product: {}", e)) })?;
+        let quantity: i32 = row.try_get("quantity").map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to read order item quantity: {}", e)) })?;
         let returned_quantity: i32 = row.try_get("returned_quantity").unwrap_or(0);
-    let unit_price: BigDecimal = row.try_get("unit_price").map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to read order item unit price: {}", e),
-            )
-        })?;
+    let unit_price: BigDecimal = row.try_get("unit_price").map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to read order item unit price: {}", e)) })?;
 
         items_map.insert(
             product_id,
@@ -909,39 +862,18 @@ pub async fn refund_order(
 
     for request_item in req.items.iter() {
         if request_item.quantity <= 0 {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                "Refund quantities must be positive".to_string(),
-            ));
+            return Err(ApiError::BadRequest { code: "invalid_quantity", trace_id: None, message: Some("Refund quantities must be positive".into()) });
         }
 
-        let entry = items_map.get_mut(&request_item.product_id).ok_or((
-            StatusCode::BAD_REQUEST,
-            format!(
-                "Product {} is not part of the order",
-                request_item.product_id
-            ),
-        ))?;
+        let entry = items_map.get_mut(&request_item.product_id).ok_or(ApiError::BadRequest { code: "product_not_in_order", trace_id: None, message: Some(format!("Product {} is not part of the order", request_item.product_id)) })?;
 
         let available = entry.quantity - entry.returned_quantity;
         if available <= 0 {
-            return Err((
-                StatusCode::CONFLICT,
-                format!(
-                    "All units of product {} have already been returned",
-                    request_item.product_id
-                ),
-            ));
+            return Err(ApiError::BadRequest { code: "already_returned", trace_id: None, message: Some(format!("All units of product {} have already been returned", request_item.product_id)) });
         }
 
         if request_item.quantity > available {
-            return Err((
-                StatusCode::CONFLICT,
-                format!(
-                    "Cannot return {} units of product {}; only {} remain",
-                    request_item.quantity, request_item.product_id, available
-                ),
-            ));
+            return Err(ApiError::BadRequest { code: "exceeds_available", trace_id: None, message: Some(format!("Cannot return {} units of product {}; only {} remain", request_item.quantity, request_item.product_id, available)) });
         }
 
         entry.returned_quantity += request_item.quantity;
@@ -957,10 +889,7 @@ pub async fn refund_order(
     }
 
     if updates.is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "No valid items provided for refund".to_string(),
-        ));
+        return Err(ApiError::BadRequest { code: "no_valid_items", trace_id: None, message: Some("No valid items provided for refund".into()) });
     }
 
     if let Some(client_total) = req.total.clone() {
@@ -976,10 +905,10 @@ pub async fn refund_order(
     }
 
     for update in &updates {
-    let conn = tx
+        let conn = tx
             .acquire()
             .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to acquire transaction connection: {e}")))?;
+            .map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to acquire transaction connection: {e}")) })?;
         sqlx::query(
             "UPDATE order_items SET returned_quantity = returned_quantity + $1 WHERE id = $2",
         )
@@ -987,12 +916,7 @@ pub async fn refund_order(
         .bind(update.order_item_id)
         .execute(&mut *conn)
         .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to write return quantity: {}", e),
-            )
-        })?;
+        .map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to write return quantity: {}", e)) })?;
     }
 
     let reason_text = req.reason.as_ref().and_then(|value| {
@@ -1007,10 +931,10 @@ pub async fn refund_order(
     let return_id = Uuid::new_v4();
 
     {
-    let conn = tx
+        let conn = tx
             .acquire()
             .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to acquire transaction connection: {e}")))?;
+            .map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to acquire transaction connection: {e}")) })?;
         sqlx::query(
             "INSERT INTO order_returns (id, order_id, tenant_id, total, reason) VALUES ($1, $2, $3, $4, $5)",
         )
@@ -1021,19 +945,14 @@ pub async fn refund_order(
         .bind(reason_text.as_deref())
         .execute(&mut *conn)
         .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to record order return: {}", e),
-            )
-        })?;
+        .map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to record order return: {}", e)) })?;
     }
 
     for update in &updates {
-    let conn = tx
+        let conn = tx
             .acquire()
             .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to acquire transaction connection: {e}")))?;
+            .map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to acquire transaction connection: {e}")) })?;
         sqlx::query(
             "INSERT INTO order_return_items (id, return_id, order_item_id, quantity, line_total) VALUES ($1, $2, $3, $4, $5)",
         )
@@ -1044,12 +963,7 @@ pub async fn refund_order(
         .bind(&update.line_total)
         .execute(&mut *conn)
         .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to record order return items: {}", e),
-            )
-        })?;
+        .map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to record order return items: {}", e)) })?;
     }
 
     let all_returned = items_map
@@ -1062,10 +976,10 @@ pub async fn refund_order(
     };
 
     let updated_order = {
-    let conn = tx
+        let conn = tx
             .acquire()
             .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to acquire transaction connection: {e}")))?;
+            .map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to acquire transaction connection: {e}")) })?;
         sqlx::query_as::<_, Order>(
             "UPDATE orders SET status = $3 WHERE id = $1 AND tenant_id = $2
              RETURNING id, tenant_id, total, status, customer_id, customer_name, customer_email, store_id, created_at, offline, payment_method, idempotency_key",
@@ -1075,22 +989,12 @@ pub async fn refund_order(
         .bind(new_status)
         .fetch_one(&mut *conn)
         .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to update order status: {}", e),
-            )
-        })?
+        .map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to update order status: {}", e)) })?
     };
 
-    tx.commit().await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to commit refund transaction: {}", e),
-        )
-    })?;
+    tx.commit().await.map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to commit refund transaction: {}", e)) })?;
 
-    let event_items: Vec<serde_json::Value> = updates
+    #[cfg(feature = "kafka")] let event_items: Vec<serde_json::Value> = updates
         .iter()
         .map(|update| {
             serde_json::json!({
@@ -1102,7 +1006,7 @@ pub async fn refund_order(
         })
         .collect();
 
-    let refund_event = serde_json::json!({
+    #[cfg(feature = "kafka")] let refund_event = serde_json::json!({
         "order_id": updated_order.id,
         "tenant_id": tenant_id,
         "items": event_items,
@@ -1113,6 +1017,7 @@ pub async fn refund_order(
         "return_id": return_id,
     });
 
+    #[cfg(feature = "kafka")]
     if let Err(err) = state
         .kafka_producer
         .send(
@@ -1126,17 +1031,45 @@ pub async fn refund_order(
         tracing::error!("Failed to send order.completed (refund): {:?}", err);
     }
 
+    #[cfg(feature = "kafka")]
+    if let Some(audit) = &state.audit_producer {
+        let changes = json!({
+            "order_id": updated_order.id,
+            "return_id": return_id,
+            "refund_total": refund_total,
+            "new_status": updated_order.status,
+        });
+        let _ = audit
+            .emit(
+                tenant_id,
+                sec.actor.clone(),
+                "order",
+                Some(updated_order.id),
+                "refunded",
+                "order-service",
+                common_audit::AuditSeverity::Info,
+                None,
+                changes,
+                json!({"source":"order-service"}),
+            )
+            .await;
+    }
     Ok(Json(updated_order))
 }
 
 pub async fn list_orders(
     State(state): State<AppState>,
-    auth: AuthContext,
-    headers: HeaderMap,
+    SecurityCtxExtractor(sec): SecurityCtxExtractor,
     Query(params): Query<ListOrdersParams>,
-) -> Result<Json<Vec<Order>>, (StatusCode, String)> {
-    ensure_role(&auth, ORDER_VIEW_ROLES)?;
-    let tenant_id = tenant_id_from_request(&headers, &auth)?;
+) -> Result<Json<Vec<Order>>, ApiError> {
+    if !sec
+        .roles
+        .iter()
+        .any(|r| matches!(r, Role::Admin | Role::Manager | Role::Support))
+    {
+    return Err(ApiError::ForbiddenMissingRole { role: "admin_or_manager_or_support", trace_id: None });
+    }
+    let tenant_id = sec.tenant_id;
 
     let limit = params.limit.unwrap_or(50).clamp(1, 200);
     let offset = params.offset.unwrap_or(0).max(0);
@@ -1256,24 +1189,24 @@ pub async fn list_orders(
         .build_query_as::<Order>()
         .fetch_all(&state.db)
         .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Database error: {}", e),
-            )
-        })?;
+        .map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Database error: {}", e)) })?;
 
     Ok(Json(orders))
 }
 
 pub async fn list_returns(
     State(state): State<AppState>,
-    auth: AuthContext,
-    headers: HeaderMap,
+    SecurityCtxExtractor(sec): SecurityCtxExtractor,
     Query(params): Query<ListReturnsParams>,
-) -> Result<Json<Vec<ReturnSummary>>, (StatusCode, String)> {
-    ensure_role(&auth, ORDER_VIEW_ROLES)?;
-    let tenant_id = tenant_id_from_request(&headers, &auth)?;
+) -> Result<Json<Vec<ReturnSummary>>, ApiError> {
+    if !sec
+        .roles
+        .iter()
+        .any(|r| matches!(r, Role::Admin | Role::Manager | Role::Support))
+    {
+    return Err(ApiError::ForbiddenMissingRole { role: "admin_or_manager_or_support", trace_id: None });
+    }
+    let tenant_id = sec.tenant_id;
 
     let limit = params.limit.unwrap_or(50).clamp(1, 200);
     let offset = params.offset.unwrap_or(0).max(0);
@@ -1322,20 +1255,15 @@ pub async fn list_returns(
         .build()
         .fetch_all(&state.db)
         .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Database error: {}", e),
-            )
-        })?;
+        .map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Database error: {}", e)) })?;
 
     let mut returns: Vec<ReturnSummary> = Vec::with_capacity(raw_rows.len());
     for row in raw_rows {
-        let id: Uuid = row.try_get("id").map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to read return id: {e}")))?;
-        let order_id: Uuid = row.try_get("order_id").map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to read return order_id: {e}")))?;
-        let total: BigDecimal = row.try_get("total").map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to read return total: {e}")))?;
+    let id: Uuid = row.try_get("id").map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to read return id: {e}")) })?;
+    let order_id: Uuid = row.try_get("order_id").map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to read return order_id: {e}")) })?;
+    let total: BigDecimal = row.try_get("total").map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to read return total: {e}")) })?;
         let reason: Option<String> = row.try_get("reason").ok();
-        let created_at: DateTime<Utc> = row.try_get("created_at").map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to read return created_at: {e}")))?;
+    let created_at: DateTime<Utc> = row.try_get("created_at").map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to read return created_at: {e}")) })?;
         let store_id: Option<Uuid> = row.try_get("store_id").ok();
         returns.push(ReturnSummary { id, order_id, total: Money::new(total), reason, created_at, store_id });
     }
@@ -1346,7 +1274,7 @@ async fn fetch_order_detail(
     state: &AppState,
     tenant_id: Uuid,
     order_id: Uuid,
-) -> Result<OrderDetail, (StatusCode, String)> {
+) -> Result<OrderDetail, ApiError> {
     let order = sqlx::query_as::<_, Order>(
     "SELECT id, tenant_id, total, status, customer_id, customer_name, customer_email, store_id, created_at, offline, payment_method, idempotency_key FROM orders WHERE id = $1 AND tenant_id = $2",
     )
@@ -1354,13 +1282,8 @@ async fn fetch_order_detail(
     .bind(tenant_id)
     .fetch_optional(&state.db)
     .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to load order: {}", e),
-        )
-    })?
-    .ok_or((StatusCode::NOT_FOUND, "Order not found".to_string()))?;
+    .map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to load order: {}", e)) })?
+    .ok_or(ApiError::NotFound { code: "order_not_found", trace_id: None })?;
 
     let item_rows = sqlx::query(
     "SELECT product_id, product_name, quantity, returned_quantity, unit_price, line_total FROM order_items WHERE order_id = $1 ORDER BY created_at"
@@ -1368,47 +1291,17 @@ async fn fetch_order_detail(
     .bind(order_id)
     .fetch_all(&state.db)
     .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to load order items: {}", e),
-        )
-    })?;
+    .map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to load order items: {}", e)) })?;
 
     let items = item_rows
         .into_iter()
         .map(|row| {
-            let product_id: Uuid = row.try_get("product_id").map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Failed to read order item product: {}", e),
-                )
-            })?;
-            let product_name: Option<String> = row.try_get("product_name").map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Failed to read order item product name: {}", e),
-                )
-            })?;
-            let quantity: i32 = row.try_get("quantity").map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Failed to read order item quantity: {}", e),
-                )
-            })?;
+            let product_id: Uuid = row.try_get("product_id").map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to read order item product: {}", e)) })?;
+            let product_name: Option<String> = row.try_get("product_name").map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to read order item product name: {}", e)) })?;
+            let quantity: i32 = row.try_get("quantity").map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to read order item quantity: {}", e)) })?;
             let returned_quantity: i32 = row.try_get("returned_quantity").unwrap_or(0);
-            let unit_price: BigDecimal = row.try_get("unit_price").map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Failed to read order item unit price: {}", e),
-                )
-            })?;
-            let line_total: BigDecimal = row.try_get("line_total").map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Failed to read order item line total: {}", e),
-                )
-            })?;
+            let unit_price: BigDecimal = row.try_get("unit_price").map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to read order item unit price: {}", e)) })?;
+            let line_total: BigDecimal = row.try_get("line_total").map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to read order item line total: {}", e)) })?;
             Ok(OrderLineItem {
                 product_id,
                 product_name,
@@ -1418,30 +1311,40 @@ async fn fetch_order_detail(
                 returned_quantity,
             })
         })
-        .collect::<Result<Vec<_>, (StatusCode, String)>>()?;
+    .collect::<Result<Vec<_>, ApiError>>()?;
 
     Ok(OrderDetail { order, items })
 }
 
 pub async fn get_order(
     State(state): State<AppState>,
-    auth: AuthContext,
+    SecurityCtxExtractor(sec): SecurityCtxExtractor,
     Path(order_id): Path<Uuid>,
-    headers: HeaderMap,
-) -> Result<Json<OrderDetail>, (StatusCode, String)> {
-    ensure_role(&auth, ORDER_VIEW_ROLES)?;
-    let tenant_id = tenant_id_from_request(&headers, &auth)?;
+) -> Result<Json<OrderDetail>, ApiError> {
+    if !sec
+        .roles
+        .iter()
+        .any(|r| matches!(r, Role::Admin | Role::Manager | Role::Support))
+    {
+    return Err(ApiError::ForbiddenMissingRole { role: "admin_or_manager_or_support", trace_id: None });
+    }
+    let tenant_id = sec.tenant_id;
     let detail = fetch_order_detail(&state, tenant_id, order_id).await?;
     Ok(Json(detail))
 }
 pub async fn get_order_receipt(
     State(state): State<AppState>,
-    auth: AuthContext,
+    SecurityCtxExtractor(sec): SecurityCtxExtractor,
     Path(order_id): Path<Uuid>,
-    headers: HeaderMap,
-) -> Result<Response, (StatusCode, String)> {
-    ensure_role(&auth, ORDER_VIEW_ROLES)?;
-    let tenant_id = tenant_id_from_request(&headers, &auth)?;
+) -> Result<Response, ApiError> {
+    if !sec
+        .roles
+        .iter()
+        .any(|r| matches!(r, Role::Admin | Role::Manager | Role::Support))
+    {
+    return Err(ApiError::ForbiddenMissingRole { role: "admin_or_manager_or_support", trace_id: None });
+    }
+    let tenant_id = sec.tenant_id;
     let detail = fetch_order_detail(&state, tenant_id, order_id).await?;
 
     let mut body = String::new();
@@ -1506,11 +1409,12 @@ pub async fn get_order_receipt(
 }
 pub async fn clear_offline_orders(
     State(state): State<AppState>,
-    auth: AuthContext,
-    headers: HeaderMap,
-) -> Result<Json<ClearOfflineResponse>, (StatusCode, String)> {
-    ensure_role(&auth, ORDER_REFUND_ROLES)?;
-    let tenant_id = tenant_id_from_request(&headers, &auth)?;
+    SecurityCtxExtractor(sec): SecurityCtxExtractor,
+) -> Result<Json<ClearOfflineResponse>, ApiError> {
+    if !sec.roles.iter().any(|r| matches!(r, Role::Admin | Role::Manager)) {
+        return Err(ApiError::ForbiddenMissingRole { role: "admin_or_manager", trace_id: None });
+    }
+    let tenant_id = sec.tenant_id;
 
     let result = sqlx::query!(
         r#"DELETE FROM orders WHERE tenant_id = $1 AND offline = TRUE"#,
@@ -1518,12 +1422,7 @@ pub async fn clear_offline_orders(
     )
     .execute(&state.db)
     .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to clear offline orders: {}", e),
-            )
-        })?;
+        .map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to clear offline orders: {}", e)) })?;
 
     Ok(Json(ClearOfflineResponse {
         cleared: result.rows_affected(),

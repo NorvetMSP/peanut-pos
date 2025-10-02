@@ -1,19 +1,19 @@
 use anyhow::Context;
 use bigdecimal::BigDecimal;
 use axum::{
-    extract::FromRef,
+    extract::{FromRef, State},
     http::{
         header::{ACCEPT, CONTENT_TYPE},
-        HeaderName, HeaderValue, Method,
+        HeaderName, HeaderValue, Method, StatusCode,
     },
     routing::{get, post},
     Router,
 };
 use common_auth::{JwtConfig, JwtVerifier};
-use futures_util::StreamExt;
-use rdkafka::consumer::{Consumer, StreamConsumer};
-use rdkafka::producer::{FutureProducer, FutureRecord};
-use rdkafka::Message;
+#[cfg(feature = "kafka")] use futures_util::StreamExt;
+#[cfg(feature = "kafka")] use rdkafka::consumer::{Consumer, StreamConsumer};
+#[cfg(feature = "kafka")] use rdkafka::producer::{FutureProducer, FutureRecord};
+#[cfg(feature = "kafka")] use rdkafka::Message;
 use reqwest::Client;
 use sqlx::PgPool;
 use std::env;
@@ -24,6 +24,9 @@ use tokio::net::TcpListener;
 use tokio::time::{interval, MissedTickBehavior};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tracing::{debug, info, warn};
+use prometheus::{IntCounterVec, Opts, Registry};
+use once_cell::sync::Lazy;
+use axum::middleware;
 use common_money::log_rounding_mode_once;
 use uuid::Uuid;
 
@@ -32,14 +35,16 @@ use order_handlers::{
     clear_offline_orders, create_order, get_order, get_order_receipt, list_orders, list_returns,
     refund_order, void_order,
 };
+async fn audit_search() -> (StatusCode, &'static str) { (StatusCode::NOT_IMPLEMENTED, "audit search not implemented") }
 
 #[derive(Clone)]
 pub struct AppState {
     pub db: PgPool,
-    pub kafka_producer: FutureProducer,
+    #[cfg(feature = "kafka")] pub kafka_producer: FutureProducer,
     pub jwt_verifier: Arc<JwtVerifier>,
     pub http_client: Client,
     pub inventory_base_url: String,
+    #[cfg(feature = "kafka")] pub audit_producer: Option<Arc<common_audit::BufferedAuditProducer<common_audit::KafkaAuditSink>>>,
 }
 
 impl FromRef<AppState> for Arc<JwtVerifier> {
@@ -80,6 +85,27 @@ struct OrderItemFinancialRow {
     line_total: BigDecimal,
 }
 
+// --- Error metrics (mirrors product/inventory services) ---
+static ORDER_REGISTRY: Lazy<Registry> = Lazy::new(|| Registry::new());
+static HTTP_ERRORS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    let v = IntCounterVec::new(
+        Opts::new("http_errors_total", "Count of HTTP error responses emitted (status >= 400)"),
+        &["service", "code", "status"],
+    ).unwrap();
+    ORDER_REGISTRY.register(Box::new(v.clone())).ok();
+    v
+});
+
+async fn http_error_metrics(req: axum::http::Request<axum::body::Body>, next: axum::middleware::Next) -> axum::response::Response {
+    let resp = next.run(req).await;
+    let status = resp.status();
+    if status.as_u16() >= 400 {
+        let code = resp.headers().get("X-Error-Code").and_then(|v| v.to_str().ok()).unwrap_or("unknown");
+        HTTP_ERRORS_TOTAL.with_label_values(&["order-service", code, status.as_str()]).inc();
+    }
+    resp
+}
+
 async fn health() -> &'static str {
     "ok"
 }
@@ -92,6 +118,7 @@ async fn main() -> anyhow::Result<()> {
     let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
     let db = PgPool::connect(&database_url).await?;
 
+    #[cfg(feature = "kafka")]
     let kafka_producer: FutureProducer = rdkafka::ClientConfig::new()
         .set(
             "bootstrap.servers",
@@ -107,9 +134,25 @@ async fn main() -> anyhow::Result<()> {
     let inventory_base_url =
         env::var("INVENTORY_SERVICE_URL").unwrap_or_else(|_| "http://localhost:8087".to_string());
 
+    #[cfg(feature = "kafka")]
     let state = AppState {
         db: db.clone(),
         kafka_producer: kafka_producer.clone(),
+        jwt_verifier,
+        http_client: http_client.clone(),
+        inventory_base_url: inventory_base_url.clone(),
+        audit_producer: Some(Arc::new(common_audit::BufferedAuditProducer::new(
+            common_audit::AuditProducer::new(common_audit::KafkaAuditSink::new(
+                kafka_producer.clone(),
+                common_audit::AuditProducerConfig { topic: env::var("AUDIT_TOPIC").unwrap_or_else(|_| "audit.events".to_string()) }
+            )),
+            1024,
+        ))),
+    };
+    #[cfg(feature = "kafka")] tracing::info!(topic = %env::var("AUDIT_TOPIC").unwrap_or_else(|_| "audit.events".to_string()), "Audit producer initialized");
+    #[cfg(not(feature = "kafka"))]
+    let state = AppState {
+        db: db.clone(),
         jwt_verifier,
         http_client: http_client.clone(),
         inventory_base_url: inventory_base_url.clone(),
@@ -150,6 +193,56 @@ async fn main() -> anyhow::Result<()> {
             .collect::<Vec<_>>(),
         );
 
+    async fn audit_metrics(State(state): State<AppState>) -> axum::Json<serde_json::Value> {
+        #[cfg(not(feature = "kafka"))]
+        let _ = &state; // suppress unused warning when kafka disabled
+        #[cfg(feature = "kafka")] {
+            if let Some(buf) = &state.audit_producer {
+                let snap = buf.snapshot();
+                return axum::Json(serde_json::json!({
+                    "queued": snap.queued,
+                    "emitted": snap.emitted,
+                    "dropped": snap.dropped
+                }));
+            }
+        }
+        axum::Json(serde_json::json!({"queued":0,"emitted":0,"dropped":0}))
+    }
+
+    async fn metrics(State(state): State<AppState>) -> (StatusCode, String) {
+        #[cfg(not(feature = "kafka"))]
+        let _ = &state; // suppress unused warning when kafka disabled
+        let mut out = String::with_capacity(512);
+        #[cfg(feature = "kafka")] {
+            if let Some(buf) = &state.audit_producer {
+                let snap = buf.snapshot();
+                out.push_str("# HELP audit_buffer_queued Current in-memory buffered audit events\n");
+                out.push_str("# TYPE audit_buffer_queued gauge\n");
+                out.push_str(&format!("audit_buffer_queued {}\n", snap.queued));
+                out.push_str("# HELP audit_buffer_emitted_total Total audit events emitted from buffer\n");
+                out.push_str("# TYPE audit_buffer_emitted_total counter\n");
+                out.push_str(&format!("audit_buffer_emitted_total {}\n", snap.emitted));
+                out.push_str("# HELP audit_buffer_dropped_total Total audit events dropped due to full buffer\n");
+                out.push_str("# TYPE audit_buffer_dropped_total counter\n");
+                out.push_str(&format!("audit_buffer_dropped_total {}\n", snap.dropped));
+            } else {
+                out.push_str("# HELP audit_buffer_queued Current in-memory buffered audit events\n# TYPE audit_buffer_queued gauge\naudit_buffer_queued 0\n");
+                out.push_str("# HELP audit_buffer_emitted_total Total audit events emitted from buffer\n# TYPE audit_buffer_emitted_total counter\naudit_buffer_emitted_total 0\n");
+                out.push_str("# HELP audit_buffer_dropped_total Total audit events dropped due to full buffer\n# TYPE audit_buffer_dropped_total counter\naudit_buffer_dropped_total 0\n");
+            }
+        }
+        #[cfg(not(feature = "kafka"))] {
+            out.push_str("# HELP audit_buffer_queued Current in-memory buffered audit events\n# TYPE audit_buffer_queued gauge\naudit_buffer_queued 0\n");
+            out.push_str("# HELP audit_buffer_emitted_total Total audit events emitted from buffer\n# TYPE audit_buffer_emitted_total counter\naudit_buffer_emitted_total 0\n");
+            out.push_str("# HELP audit_buffer_dropped_total Total audit events dropped due to full buffer\n# TYPE audit_buffer_dropped_total counter\naudit_buffer_dropped_total 0\n");
+        }
+        if let Ok(cov) = std::fs::read_to_string("../audit_coverage_metrics.prom") {
+            out.push_str("\n# Audit coverage metrics\n");
+            out.push_str(&cov);
+        }
+        (StatusCode::OK, out)
+    }
+
     let app = Router::new()
         .route("/healthz", get(health))
         .route("/orders", post(create_order).get(list_orders))
@@ -159,32 +252,37 @@ async fn main() -> anyhow::Result<()> {
         .route("/orders/:order_id/void", post(void_order))
         .route("/orders/refund", post(refund_order))
         .route("/returns", get(list_returns))
+    .route("/audit/events", get(audit_search))
+    .route("/internal/audit_metrics", get(audit_metrics))
+    .route("/internal/metrics", get(metrics))
         .with_state(state.clone())
-        .layer(cors);
+    .layer(cors)
+    .layer(middleware::from_fn(http_error_metrics));
 
-    let db_pool = db.clone();
-    let producer = kafka_producer.clone();
-
-    tokio::spawn(async move {
-        let consumer: StreamConsumer = rdkafka::ClientConfig::new()
-            .set(
-                "bootstrap.servers",
-                &env::var("KAFKA_BOOTSTRAP").unwrap_or("localhost:9092".into()),
-            )
-            .set("group.id", "order-service")
-            .create()
-            .expect("failed to create kafka consumer");
-        consumer
-            .subscribe(&["payment.completed", "payment.failed"])
-            .expect("failed to subscribe");
-        let mut stream = consumer.stream();
-        while let Some(msg) = stream.next().await {
-            match msg {
-                Ok(m) => {
-                    let topic = m.topic();
-                    if let Some(Ok(payload)) = m.payload_view::<str>() {
-                        match topic {
-                            "payment.completed" => {
+    #[cfg(feature = "kafka")]
+    {
+        let db_pool = db.clone();
+        let producer = kafka_producer.clone();
+        tokio::spawn(async move {
+            let consumer: StreamConsumer = rdkafka::ClientConfig::new()
+                .set(
+                    "bootstrap.servers",
+                    &env::var("KAFKA_BOOTSTRAP").unwrap_or("localhost:9092".into()),
+                )
+                .set("group.id", "order-service")
+                .create()
+                .expect("failed to create kafka consumer");
+            consumer
+                .subscribe(&["payment.completed", "payment.failed"])
+                .expect("failed to subscribe");
+            let mut stream = consumer.stream();
+            while let Some(msg) = stream.next().await {
+                match msg {
+                    Ok(m) => {
+                        let topic = m.topic();
+                        if let Some(Ok(payload)) = m.payload_view::<str>() {
+                            match topic {
+                                "payment.completed" => {
                                 match serde_json::from_str::<PaymentCompletedEvent>(payload) {
                                     Ok(evt) => {
                                         if let Err(err) = sqlx::query(
@@ -300,7 +398,7 @@ async fn main() -> anyhow::Result<()> {
                                     }
                                 }
                             }
-                            "payment.failed" => {
+                                "payment.failed" => {
                                 match serde_json::from_str::<PaymentFailedEvent>(payload) {
                                     Ok(evt) => {
                                         match sqlx::query(
@@ -437,14 +535,15 @@ async fn main() -> anyhow::Result<()> {
                                     }
                                 }
                             }
-                            _ => {}
+                                _ => {}
+                            }
                         }
                     }
+                    Err(err) => tracing::error!(?err, "Kafka error"),
                 }
-                Err(err) => tracing::error!(?err, "Kafka error"),
             }
-        }
-    });
+        });
+    }
 
     let host = env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
     let port: u16 = env::var("PORT")

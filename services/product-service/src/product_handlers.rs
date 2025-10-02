@@ -1,21 +1,22 @@
-use crate::AppState;
+use crate::app_state::AppState;
+use crate::ApiError;
 use axum::{
     extract::{Path, Query, State},
-    http::{HeaderMap, StatusCode},
+    http::StatusCode,
     Json,
 };
 use chrono::{DateTime, Utc};
-use common_auth::{
-    ensure_role, tenant_id_from_request, AuthContext, ROLE_ADMIN, ROLE_MANAGER, ROLE_SUPER_ADMIN,
-};
-use rdkafka::producer::FutureRecord;
+// AuthContext no longer required in handlers; SecurityCtxExtractor provides actor & tenant.
+use common_security::{SecurityCtxExtractor, Role};
+#[cfg(feature = "kafka")] use common_audit::AuditActor as SharedAuditActor;
+#[cfg(feature = "kafka")] use rdkafka::producer::FutureRecord;
 use serde::ser::{SerializeStruct, Serializer};
 use serde::{Deserialize, Serialize};
 use bigdecimal::BigDecimal;
 use common_money::{normalize_scale, Money};
 use serde_json::{json, Value};
 use sqlx::{query, query_as, PgPool};
-use std::{env, time::Duration};
+use std::env;
 use uuid::Uuid;
 
 const INVENTORY_DEFAULT_THRESHOLD: i32 = 5;
@@ -49,56 +50,17 @@ fn normalize_image_input(input: Option<String>) -> Option<String> {
 }
 
 #[derive(Default, Clone)]
-pub struct AuditActor {
+pub struct AuditActor { // local representation for legacy DB audit table
     pub id: Option<Uuid>,
     pub name: Option<String>,
     pub email: Option<String>,
 }
 
-const PRODUCT_WRITE_ROLES: &[&str] = &[ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_MANAGER];
+// Legacy role constant removed; all role checks now rely on Role enum via SecurityCtxExtractor.
 
-fn extract_actor(headers: &HeaderMap, auth: &AuthContext) -> AuditActor {
-    let mut actor = AuditActor {
-        id: Some(auth.claims.subject),
-        name: auth
-            .claims
-            .raw
-            .get("name")
-            .and_then(|value| value.as_str())
-            .map(|value| value.to_string()),
-        email: auth
-            .claims
-            .raw
-            .get("email")
-            .and_then(|value| value.as_str())
-            .map(|value| value.to_string()),
-    };
-
-    if let Some(value) = headers
-        .get("X-User-ID")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| Uuid::parse_str(value.trim()).ok())
-    {
-        actor.id = Some(value);
-    }
-    if let Some(value) = headers
-        .get("X-User-Name")
-        .and_then(|value| value.to_str().ok())
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-    {
-        actor.name = Some(value);
-    }
-    if let Some(value) = headers
-        .get("X-User-Email")
-        .and_then(|value| value.to_str().ok())
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-    {
-        actor.email = Some(value);
-    }
-
-    actor
+#[cfg(feature = "kafka")]
+fn shared(actor: &AuditActor) -> SharedAuditActor {
+    SharedAuditActor { id: actor.id, name: actor.name.clone(), email: actor.email.clone() }
 }
 
 async fn record_product_audit(
@@ -140,7 +102,7 @@ impl Serialize for Product {
         state.serialize_field("id", &self.id)?;
         state.serialize_field("tenant_id", &self.tenant_id)?;
         state.serialize_field("name", &self.name)?;
-    state.serialize_field("price", &self.price.inner())?;
+        state.serialize_field("price", &self.price.inner())?;
         state.serialize_field("description", &self.description)?;
         state.serialize_field("image", &self.image)?;
         state.serialize_field("image_url", &self.image)?;
@@ -150,14 +112,16 @@ impl Serialize for Product {
 }
 pub async fn update_product(
     State(state): State<AppState>,
-    auth: AuthContext,
-    headers: HeaderMap,
+    SecurityCtxExtractor(sec): SecurityCtxExtractor,
     Path(product_id): axum::extract::Path<Uuid>,
     Json(upd): Json<UpdateProduct>,
-) -> Result<Json<Product>, (StatusCode, String)> {
-    ensure_role(&auth, PRODUCT_WRITE_ROLES)?;
-    let tenant_id = tenant_id_from_request(&headers, &auth)?;
-    let actor = extract_actor(&headers, &auth);
+) -> Result<Json<Product>, ApiError> {
+    // Temporary dual enforcement: old roles + new context roles
+    if !sec.roles.iter().any(|r| matches!(r, Role::Admin | Role::Manager)) {
+        return Err(ApiError::ForbiddenMissingRole { role: "Manager", trace_id: sec.trace_id });
+    }
+    let tenant_id = sec.tenant_id;
+    let actor = AuditActor { id: sec.actor.id, name: sec.actor.name.clone(), email: sec.actor.email.clone() };
     let existing = query_as::<_, Product>(
     "SELECT id, tenant_id, name, price, description, image, active FROM products WHERE id = $1 AND tenant_id = $2",
     )
@@ -165,30 +129,32 @@ pub async fn update_product(
     .bind(tenant_id)
     .fetch_optional(&state.db)
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+    .map_err(|e| ApiError::internal(e, sec.trace_id))?;
     let existing = match existing {
         Some(product) => product,
-        None => return Err((StatusCode::NOT_FOUND, "Product not found".into())),
+        None => return Err(ApiError::NotFound { code: "product_not_found", trace_id: sec.trace_id }),
     };
     let image = normalize_image_input(upd.image);
     let product = query_as::<_, Product>(
-    "UPDATE products SET name = $1, price = $2, description = $3, active = $4, image = COALESCE($5, image)\n         WHERE id = $6 AND tenant_id = $7\n         RETURNING id, tenant_id, name, price, description, image, active"
+        "UPDATE products SET name = $1, price = $2, description = $3, active = $4, image = COALESCE($5, image)\n         WHERE id = $6 AND tenant_id = $7\n         RETURNING id, tenant_id, name, price, description, image, active"
     )
-    .bind(upd.name)
-    .bind(normalize_scale(&upd.price))
-    .bind(upd.description)
-    .bind(upd.active)
-    .bind(image)
-    .bind(product_id)
-    .bind(tenant_id)
-    .fetch_one(&state.db)
+        .bind(upd.name)
+        .bind(normalize_scale(&upd.price))
+        .bind(upd.description)
+        .bind(upd.active)
+        .bind(image)
+        .bind(product_id)
+        .bind(tenant_id)
+        .fetch_one(&state.db)
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+    .map_err(|e| ApiError::internal(e, sec.trace_id))?;
     let changes = json!({
         "before": product_to_value(&existing),
         "after": product_to_value(&product),
     });
-    record_product_audit(&state.db, &actor, product.id, tenant_id, "updated", changes).await;
+    record_product_audit(&state.db, &actor, product.id, tenant_id, "updated", changes.clone()).await;
+    #[cfg(feature = "kafka")]
+    if let Some(audit) = &state.audit_producer { let _ = audit.emit(tenant_id, shared(&actor), "product", Some(product.id), "updated", "product-service", common_audit::AuditSeverity::Info, None, changes, json!({"source":"product-service"})).await; }
     Ok(Json(product))
 }
 
@@ -214,13 +180,14 @@ pub struct Product {
 
 pub async fn create_product(
     State(state): State<AppState>,
-    auth: AuthContext,
-    headers: HeaderMap,
+    SecurityCtxExtractor(sec): SecurityCtxExtractor,
     Json(new_product): Json<NewProduct>,
-) -> Result<Json<Product>, (StatusCode, String)> {
-    ensure_role(&auth, PRODUCT_WRITE_ROLES)?;
-    let tenant_id = tenant_id_from_request(&headers, &auth)?;
-    let actor = extract_actor(&headers, &auth);
+) -> Result<Json<Product>, ApiError> {
+    if !sec.roles.iter().any(|r| matches!(r, Role::Admin | Role::Manager)) {
+        return Err(ApiError::ForbiddenMissingRole { role: "Manager", trace_id: sec.trace_id });
+    }
+    let tenant_id = sec.tenant_id;
+    let actor = AuditActor { id: sec.actor.id, name: sec.actor.name.clone(), email: sec.actor.email.clone() };
 
     let product_id = Uuid::new_v4();
     let NewProduct {
@@ -233,30 +200,34 @@ pub async fn create_product(
     let image = normalize_image_input(image).unwrap_or_else(default_product_image);
 
     let product = query_as::<_, Product>(
-    "INSERT INTO products (id, tenant_id, name, price, description, active, image) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id, tenant_id, name, price, description, image, active"
+        "INSERT INTO products (id, tenant_id, name, price, description, active, image) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id, tenant_id, name, price, description, image, active"
     )
-    .bind(product_id)
-    .bind(tenant_id)
-    .bind(name)
-    .bind(normalize_scale(&price))
-    .bind(desc)
-    .bind(true)
-    .bind(image)
-    .fetch_one(&state.db)
+        .bind(product_id)
+        .bind(tenant_id)
+        .bind(name)
+        .bind(normalize_scale(&price))
+        .bind(desc)
+        .bind(true)
+        .bind(image)
+        .fetch_one(&state.db)
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+    .map_err(|e| ApiError::internal(e, sec.trace_id))?;
 
     let changes = json!({
         "after": product_to_value(&product),
     });
-    record_product_audit(&state.db, &actor, product.id, tenant_id, "created", changes).await;
+    record_product_audit(&state.db, &actor, product.id, tenant_id, "created", changes.clone()).await;
+    #[cfg(feature = "kafka")]
+    if let Some(audit) = &state.audit_producer { let _ = audit.emit(tenant_id, shared(&actor), "product", Some(product.id), "created", "product-service", common_audit::AuditSeverity::Info, None, json!({"after": product_to_value(&product)}), json!({"source":"product-service"})).await; }
 
+    #[cfg(feature = "kafka")]
     let event = serde_json::json!({
         "product_id": product.id,
         "tenant_id": tenant_id,
         "initial_quantity": 0,
         "threshold": INVENTORY_DEFAULT_THRESHOLD,
     });
+    #[cfg(feature = "kafka")]
     if let Err(err) = state
         .kafka_producer
         .send(
@@ -275,10 +246,9 @@ pub async fn create_product(
 
 pub async fn list_products(
     State(state): State<AppState>,
-    auth: AuthContext,
-    headers: HeaderMap,
-) -> Result<Json<Vec<Product>>, (StatusCode, String)> {
-    let tenant_id = tenant_id_from_request(&headers, &auth)?;
+    SecurityCtxExtractor(sec): SecurityCtxExtractor,
+) -> Result<Json<Vec<Product>>, ApiError> {
+    let tenant_id = sec.tenant_id;
 
     let products = query_as::<_, Product>(
         "SELECT id, tenant_id, name, price, description, image, active FROM products WHERE tenant_id = $1",
@@ -286,25 +256,21 @@ pub async fn list_products(
     .bind(tenant_id)
     .fetch_all(&state.db)
     .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Database error: {}", e),
-        )
-    })?;
+    .map_err(|e| ApiError::internal(e, sec.trace_id))?;
 
     Ok(Json(products))
 }
 
 pub async fn delete_product(
     State(state): State<AppState>,
-    auth: AuthContext,
-    headers: HeaderMap,
+    SecurityCtxExtractor(sec): SecurityCtxExtractor,
     Path(product_id): axum::extract::Path<Uuid>,
-) -> Result<StatusCode, (StatusCode, String)> {
-    ensure_role(&auth, PRODUCT_WRITE_ROLES)?;
-    let tenant_id = tenant_id_from_request(&headers, &auth)?;
-    let actor = extract_actor(&headers, &auth);
+) -> Result<StatusCode, ApiError> {
+    if !sec.roles.iter().any(|r| matches!(r, Role::Admin | Role::Manager)) {
+        return Err(ApiError::ForbiddenMissingRole { role: "Manager", trace_id: sec.trace_id });
+    }
+    let tenant_id = sec.tenant_id;
+    let actor = AuditActor { id: sec.actor.id, name: sec.actor.name.clone(), email: sec.actor.email.clone() };
 
     let existing = query_as::<_, Product>(
         "SELECT id, tenant_id, name, price, description, image, active FROM products WHERE id = $1 AND tenant_id = $2",
@@ -313,15 +279,10 @@ pub async fn delete_product(
     .bind(tenant_id)
     .fetch_optional(&state.db)
     .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Database error: {}", e),
-        )
-    })?;
+    .map_err(|e| ApiError::internal(e, sec.trace_id))?;
     let existing = match existing {
         Some(product) => product,
-        None => return Err((StatusCode::NOT_FOUND, "Product not found".into())),
+        None => return Err(ApiError::NotFound { code: "product_not_found", trace_id: sec.trace_id }),
     };
 
     let result = query("DELETE FROM products WHERE id = $1 AND tenant_id = $2")
@@ -329,34 +290,25 @@ pub async fn delete_product(
         .bind(tenant_id)
         .execute(&state.db)
         .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Database error: {}", e),
-            )
-        })?;
+        .map_err(|e| ApiError::internal(e, sec.trace_id))?;
 
     if result.rows_affected() == 0 {
-        return Err((StatusCode::NOT_FOUND, "Product not found".into()));
+        return Err(ApiError::NotFound { code: "product_not_found", trace_id: sec.trace_id });
     }
 
     let changes = json!({
         "before": product_to_value(&existing),
     });
-    record_product_audit(
-        &state.db,
-        &actor,
-        existing.id,
-        tenant_id,
-        "deleted",
-        changes,
-    )
-    .await;
+    record_product_audit(&state.db, &actor, existing.id, tenant_id, "deleted", changes.clone()).await;
+    #[cfg(feature = "kafka")]
+    if let Some(audit) = &state.audit_producer { let _ = audit.emit(tenant_id, shared(&actor), "product", Some(existing.id), "deleted", "product-service", common_audit::AuditSeverity::Info, None, json!({"before": product_to_value(&existing)}), json!({"source":"product-service"})).await; }
 
+    #[cfg(feature = "kafka")]
     let event = serde_json::json!({
         "product_id": product_id,
         "tenant_id": tenant_id,
     });
+    #[cfg(feature = "kafka")]
     if let Err(err) = state
         .kafka_producer
         .send(
@@ -391,13 +343,14 @@ pub struct ProductAuditEntry {
 
 pub async fn list_product_audit(
     State(state): State<AppState>,
-    auth: AuthContext,
-    headers: HeaderMap,
+    SecurityCtxExtractor(sec): SecurityCtxExtractor,
     Path(product_id): axum::extract::Path<Uuid>,
     Query(params): Query<ProductAuditQuery>,
-) -> Result<Json<Vec<ProductAuditEntry>>, (StatusCode, String)> {
-    ensure_role(&auth, PRODUCT_WRITE_ROLES)?;
-    let tenant_id = tenant_id_from_request(&headers, &auth)?;
+) -> Result<Json<Vec<ProductAuditEntry>>, ApiError> {
+    if !sec.roles.iter().any(|r| matches!(r, Role::Admin | Role::Manager)) {
+        return Err(ApiError::ForbiddenMissingRole { role: "Manager", trace_id: sec.trace_id });
+    }
+    let tenant_id = sec.tenant_id;
 
     let mut limit = params.limit.unwrap_or(10);
     if limit < 1 {
@@ -418,12 +371,7 @@ pub async fn list_product_audit(
     .bind(limit)
     .fetch_all(&state.db)
     .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Database error: {}", e),
-        )
-    })?;
+    .map_err(|e| ApiError::internal(e, sec.trace_id))?;
 
     Ok(Json(entries))
 }
