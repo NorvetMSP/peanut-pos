@@ -65,7 +65,10 @@ pub type ApiResult<T> = Result<T, ApiError>;
 
 // Shared HTTP error metrics middleware helper
 use once_cell::sync::Lazy;
-use prometheus::{IntCounterVec, Opts};
+use prometheus::{IntCounterVec, Opts, IntCounter};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::collections::HashSet;
+use std::sync::Mutex;
 use axum::{body::Body, http::Request};
 use axum::middleware::Next;
 
@@ -81,6 +84,21 @@ static HTTP_ERRORS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
     c
 });
 
+static HTTP_ERROR_CODE_OVERFLOW_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    let c = IntCounter::new(
+        "http_error_code_overflow_total",
+        "Count of error responses whose original code label was replaced by overflow due to cardinality guard",
+    ).expect("http_error_code_overflow_total");
+    let _ = prometheus::default_registry().register(Box::new(c.clone()));
+    c
+});
+
+// Cardinality guard: limit the number of distinct error codes to avoid metrics explosion.
+const MAX_ERROR_CODES: usize = 40; // tunable threshold
+static ERROR_CODE_COUNT: AtomicUsize = AtomicUsize::new(0);
+static OBSERVED_CODES: Lazy<Mutex<HashSet<String>>> = Lazy::new(|| Mutex::new(HashSet::new()));
+const OVERFLOW_CODE: &str = "_overflow"; // label used when limit exceeded
+
 /// Returns an Axum middleware function that records HTTP error counts.
 /// Usage: .layer(axum::middleware::from_fn(http_error_metrics_layer("service-name")))
 pub fn http_error_metrics_layer(service_name: &'static str) -> impl Fn(Request<Body>, Next) -> std::pin::Pin<Box<dyn std::future::Future<Output=Result<axum::response::Response, ApiError>> + Send>> + Clone + Send + Sync + 'static {
@@ -90,7 +108,23 @@ pub fn http_error_metrics_layer(service_name: &'static str) -> impl Fn(Request<B
             let resp = next.run(req).await;
             let status = resp.status();
             if status.as_u16() >= 400 {
-                let code = resp.headers().get("X-Error-Code").and_then(|v| v.to_str().ok()).unwrap_or("unknown");
+                let raw_code = resp.headers().get("X-Error-Code").and_then(|v| v.to_str().ok()).unwrap_or("unknown");
+                let code = if raw_code == OVERFLOW_CODE { OVERFLOW_CODE } else {
+                    // Track distinct codes under guard
+                    let mut set = OBSERVED_CODES.lock().expect("lock observed codes");
+                    if set.contains(raw_code) {
+                        raw_code
+                    } else {
+                        if ERROR_CODE_COUNT.load(Ordering::Relaxed) < MAX_ERROR_CODES {
+                            set.insert(raw_code.to_string());
+                            ERROR_CODE_COUNT.fetch_add(1, Ordering::Relaxed);
+                            raw_code
+                        } else {
+                            HTTP_ERROR_CODE_OVERFLOW_TOTAL.inc();
+                            OVERFLOW_CODE
+                        }
+                    }
+                };
                 HTTP_ERRORS_TOTAL.with_label_values(&[svc, code, status.as_str()]).inc();
             }
             Ok(resp)

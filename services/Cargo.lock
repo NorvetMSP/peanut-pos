@@ -1016,6 +1016,8 @@ dependencies = [
  "prometheus",
  "serde",
  "serde_json",
+ "tokio",
+ "tower 0.5.2",
  "uuid",
 ]
 
@@ -1237,6 +1239,7 @@ dependencies = [
  "serde_json",
  "sqlx",
  "tokio",
+ "tower 0.5.2",
  "tower-http 0.5.2",
  "tracing",
  "tracing-subscriber",
@@ -2374,6 +2377,7 @@ dependencies = [
  "sqlx",
  "thiserror 1.0.69",
  "tokio",
+ "tower 0.5.2",
  "tower-http 0.5.2",
  "tracing",
  "tracing-subscriber",

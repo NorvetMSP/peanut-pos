@@ -1,7 +1,7 @@
 use axum::extract::{State, Query};
 use std::collections::HashMap;
 use common_http_errors::ApiError;
-use common_security::{SecurityCtxExtractor, roles::{ensure_any_role, Role}};
+use common_security::{SecurityCtxExtractor, roles::{ensure_any_role, Role}, Capability, ensure_capability};
 use uuid::Uuid;
 use sqlx::PgPool;
 use std::sync::Arc;
@@ -21,8 +21,10 @@ pub async fn get_points(
     SecurityCtxExtractor(sec): SecurityCtxExtractor,
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<String, ApiError> {
-    if ensure_any_role(&sec, LOYALTY_VIEW_ROLES).is_err() {
-        return Err(ApiError::ForbiddenMissingRole { role: "loyalty_view", trace_id: sec.trace_id });
+    if let Err(_) = ensure_capability(&sec, Capability::LoyaltyView) {
+        if ensure_any_role(&sec, LOYALTY_VIEW_ROLES).is_err() {
+            return Err(ApiError::ForbiddenMissingRole { role: "loyalty_view", trace_id: sec.trace_id });
+        }
     }
     let tenant_id = sec.tenant_id;
     let cust_id = params

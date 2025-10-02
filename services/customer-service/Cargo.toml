@@ -25,6 +25,9 @@ uuid = { version = "1", features = ["v4", "serde"] }
 once_cell = "1"
 prometheus = "0.13"
 
+[dev-dependencies]
+tower = "0.5"
+
 [features]
 # Enables running integration tests requiring a live Postgres and other infra.
 integration = []

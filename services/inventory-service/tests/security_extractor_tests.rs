@@ -12,11 +12,13 @@ use uuid::Uuid;
 
 #[tokio::test]
 async fn list_inventory_missing_tenant_header() {
-    // Build minimal state (lazy connection ok; test does not hit DB)
+    // This test only exercises extractor rejection; no DB interaction should occur.
+    // Use lazy pool to avoid requiring a live Postgres unless handler logic executes (it won't on missing tenant).
+    let db_url = std::env::var("TEST_DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://postgres:postgres@localhost:5432/inventory_tests".to_string());
     let pool = PgPoolOptions::new()
-        .connect("postgres://postgres:postgres@localhost:5432/inventory_tests")
-        .await
-        .expect("connect test db");
+        .connect_lazy(&db_url)
+        .expect("lazy pool");
     // JwtVerifier not used directly now; placeholder from common-auth path via inventory_service AppState
     let jwt_verifier = Arc::new(common_auth::JwtVerifier::new(common_auth::JwtConfig::new("issuer","aud")));
     #[cfg(feature = "kafka")] let producer: rdkafka::producer::FutureProducer = rdkafka::ClientConfig::new().set("bootstrap.servers","localhost:9092").create().unwrap();
@@ -71,9 +73,18 @@ async fn list_inventory_cross_tenant_forbidden_when_mismatch() {
 
 #[tokio::test]
 async fn list_inventory_happy_path_empty_ok() {
+    // This test requires a real database (schema creation + query). Gate with TEST_DATABASE_URL.
+    let db_url = match std::env::var("TEST_DATABASE_URL") {
+        Ok(url) => url,
+        Err(_) => {
+            eprintln!("SKIP list_inventory_happy_path_empty_ok: TEST_DATABASE_URL not set");
+            return; // soft skip when env not configured
+        }
+    };
     let pool = PgPoolOptions::new()
-        .connect_lazy("postgres://postgres:postgres@localhost:5432/inventory_tests")
-        .expect("lazy pool");
+        .connect(&db_url)
+        .await
+        .expect("connect test db");
     let jwt_verifier = Arc::new(common_auth::JwtVerifier::new(common_auth::JwtConfig::new("issuer","aud")));
     #[cfg(feature = "kafka")] let producer: rdkafka::producer::FutureProducer = rdkafka::ClientConfig::new().set("bootstrap.servers","localhost:9092").create().unwrap();
     let state = AppState {

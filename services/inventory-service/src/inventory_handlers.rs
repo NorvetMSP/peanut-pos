@@ -3,7 +3,7 @@ use axum::extract::{Query, State};
 use axum::{
     Json,
 };
-use common_security::{SecurityCtxExtractor, roles::{ensure_any_role, Role}};
+use common_security::{SecurityCtxExtractor, roles::{ensure_any_role, Role}, Capability, ensure_capability};
 use serde::{Deserialize, Serialize};
 use sqlx::{query, Row};
 use sqlx::query_as;
@@ -34,8 +34,12 @@ pub async fn list_inventory(
     SecurityCtxExtractor(sec): SecurityCtxExtractor,
     Query(params): Query<InventoryQueryParams>,
 ) -> Result<Json<Vec<InventoryRecord>>, ApiError> {
-    if ensure_any_role(&sec, INVENTORY_VIEW_ROLES).is_err() {
-        return Err(ApiError::ForbiddenMissingRole { role: "manager", trace_id: sec.trace_id });
+    // New capability-based authorization (preferred)
+    if let Err(_) = ensure_capability(&sec, Capability::InventoryView) {
+        // Fallback to legacy role array check for transitional compatibility
+        if ensure_any_role(&sec, INVENTORY_VIEW_ROLES).is_err() {
+            return Err(ApiError::ForbiddenMissingRole { role: "inventory_view", trace_id: sec.trace_id });
+        }
     }
     let tenant_id = sec.tenant_id;
     let records = if state.multi_location_enabled {

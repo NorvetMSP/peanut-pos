@@ -12,7 +12,7 @@ use chrono::{DateTime, Utc};
 use common_auth::{
     JwtConfig, JwtVerifier,
 };
-use common_security::{SecurityCtxExtractor, roles::{ensure_any_role, Role}};
+use common_security::{SecurityCtxExtractor, roles::{ensure_any_role, Role}, ensure_capability, Capability};
 use common_http_errors::{ApiError, ApiResult};
 use common_crypto::{decrypt_field, deterministic_hash, encrypt_field, CryptoError, MasterKey};
 use serde::{Deserialize, Serialize};
@@ -272,7 +272,9 @@ async fn create_customer(
     SecurityCtxExtractor(sec): SecurityCtxExtractor,
     Json(new_cust): Json<NewCustomer>,
 ) -> ApiResult<Json<Customer>> {
-    if ensure_any_role(&sec, CUSTOMER_WRITE_ROLES).is_err() { return Err(ApiError::ForbiddenMissingRole { role: "customer_write", trace_id: sec.trace_id }); }
+    if let Err(_) = ensure_capability(&sec, Capability::CustomerWrite) {
+        if ensure_any_role(&sec, CUSTOMER_WRITE_ROLES).is_err() { return Err(ApiError::ForbiddenMissingRole { role: "customer_write", trace_id: sec.trace_id }); }
+    }
     let tenant_id = sec.tenant_id;
     let customer_id = Uuid::new_v4();
 
@@ -374,7 +376,9 @@ async fn search_customers(
     SecurityCtxExtractor(sec): SecurityCtxExtractor,
     Query(params): Query<SearchParams>,
 ) -> ApiResult<Json<Vec<Customer>>> {
-    if ensure_any_role(&sec, CUSTOMER_VIEW_ROLES).is_err() { return Err(ApiError::ForbiddenMissingRole { role: "customer_view", trace_id: sec.trace_id }); }
+    if let Err(_) = ensure_capability(&sec, Capability::CustomerView) {
+        if ensure_any_role(&sec, CUSTOMER_VIEW_ROLES).is_err() { return Err(ApiError::ForbiddenMissingRole { role: "customer_view", trace_id: sec.trace_id }); }
+    }
     let tenant_id = sec.tenant_id;
 
     let mut key_cache = TenantKeyCache::new(&state, tenant_id);
@@ -449,7 +453,9 @@ async fn get_customer(
     SecurityCtxExtractor(sec): SecurityCtxExtractor,
     Path(customer_id): Path<Uuid>,
 ) -> ApiResult<Json<Customer>> {
-    if ensure_any_role(&sec, CUSTOMER_VIEW_ROLES).is_err() { return Err(ApiError::ForbiddenMissingRole { role: "customer_view", trace_id: sec.trace_id }); }
+    if let Err(_) = ensure_capability(&sec, Capability::CustomerView) {
+        if ensure_any_role(&sec, CUSTOMER_VIEW_ROLES).is_err() { return Err(ApiError::ForbiddenMissingRole { role: "customer_view", trace_id: sec.trace_id }); }
+    }
     let tenant_id = sec.tenant_id;
 
     let mut key_cache = TenantKeyCache::new(&state, tenant_id);
@@ -485,7 +491,9 @@ async fn update_customer(
     Path(customer_id): Path<Uuid>,
     Json(payload): Json<UpdateCustomerRequest>,
 ) -> ApiResult<Json<Customer>> {
-    if ensure_any_role(&sec, CUSTOMER_WRITE_ROLES).is_err() { return Err(ApiError::ForbiddenMissingRole { role: "customer_write", trace_id: sec.trace_id }); }
+    if let Err(_) = ensure_capability(&sec, Capability::CustomerWrite) {
+        if ensure_any_role(&sec, CUSTOMER_WRITE_ROLES).is_err() { return Err(ApiError::ForbiddenMissingRole { role: "customer_write", trace_id: sec.trace_id }); }
+    }
     let tenant_id = sec.tenant_id;
     let mut key_cache = TenantKeyCache::new(&state, tenant_id);
 
