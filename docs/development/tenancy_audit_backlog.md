@@ -62,7 +62,7 @@ Status: Planned | In-Progress | Done | Blocked | Deferred
 | TA-DOC-1 | Developer guide: emitting audit event | DOC | Planned | TA-AUD-1 | CONTRIBUTING snippet |
 | TA-DOC-2 | Architecture doc: audit pipeline phases | DOC | Planned | TA-AUD-2 | Sequence & flow diagrams |
 | TA-OPS-2 | Schema compliance linter / macro | OPS | Planned | TA-AUD-1 | Build-time validation |
-| TA-OPS-3 | Prometheus client metrics migration | OPS | Planned | TA-OPS-1 | Replace manual text exposition with official client library (counters/gauges + labeled redaction metrics). |
+| TA-OPS-3 | Prometheus client metrics migration | OPS | Done | TA-OPS-1 | Migrated to `prometheus` crate: registered buffer gauges/counters + redaction counters (labelled). Added metrics endpoint integration test. Future: dedupe double-count risk & cardinality guard. |
 | TA-AUD-8 | Multi-sink support (Kafka + Search) | AUD | Deferred | TA-AUD-3 | Latency-driven follow-on |
 | TA-FUT-1 | Search backend evaluation | FUT | Planned | TA-AUD-2 | PG vs ES vs ClickHouse bench |
 | TA-FUT-2 | Tenant isolation study (RLS vs shared) | FUT | Planned | — | Decision doc |

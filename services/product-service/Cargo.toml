@@ -24,6 +24,7 @@ common-money = { path = "../common/money" }
 common-audit = { path = "../common/audit", features=["kafka"] }
 common-security = { path = "../common/security" }
 once_cell = "1"
+prometheus = { version = "0.13", default-features = false, features = ["process"] }
 
 [features]
 # (No explicit offline feature; controlled via SQLX_OFFLINE env var.)
