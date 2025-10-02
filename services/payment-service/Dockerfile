@@ -2,8 +2,8 @@
 FROM rust:1-slim-bookworm AS builder
 WORKDIR /repo
 
-# system deps for SQLx/Postgres
-RUN apt-get update && apt-get install -y libssl-dev pkg-config cmake g++ && rm -rf /var/lib/apt/lists/*
+# system deps for SQLx/Postgres + rdkafka (zlib)
+RUN apt-get update && apt-get install -y libssl-dev pkg-config cmake g++ zlib1g-dev && rm -rf /var/lib/apt/lists/*
 
 # Leverage caching by copying manifests first
 COPY services/Cargo.toml services/Cargo.lock ./
@@ -21,7 +21,7 @@ RUN cargo build --release --manifest-path services/Cargo.toml --target-dir /repo
 
 # Runtime
 FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y ca-certificates libssl3 && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y ca-certificates libssl3 zlib1g && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=builder /repo/target/release/payment-service /app/payment-service
 ENV RUST_LOG=info

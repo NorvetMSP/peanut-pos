@@ -350,17 +350,17 @@ async fn insert_order_items(
             .acquire()
             .await
             .map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to acquire transaction connection: {e}")) })?;
-            sqlx::query!(
+            sqlx::query(
                 r#"INSERT INTO order_items (id, order_id, product_id, quantity, unit_price, line_total, product_name)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7)"#,
-                Uuid::new_v4(),
-                order_id,
-                item.product_id,
-                item.quantity,
-                item.unit_price.inner(),
-                item.line_total.inner(),
-                item.product_name.as_deref()
+                    VALUES ($1, $2, $3, $4, $5, $6, $7)"#
             )
+            .bind(Uuid::new_v4())
+            .bind(order_id)
+            .bind(item.product_id)
+            .bind(item.quantity)
+            .bind(item.unit_price.inner())
+            .bind(item.line_total.inner())
+            .bind(item.product_name.as_deref())
             .execute(&mut *conn)
             .await
             .map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to insert order item: {}", e)) })?;
