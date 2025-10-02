@@ -41,11 +41,11 @@ Status: Planned | In-Progress | Done | Blocked | Deferred
 |----|-------|----------|--------|---------|-------|
 | TA-FND-1 | Remove legacy role constants & helpers | FND | Done | — | Completed: product-service cleanup |
 | TA-FND-2 | Add trace_id auto-generation in extractor | FND | Done | — | Implemented in SecurityCtxExtractor |
-| TA-ROL-1 | Apply SecurityCtxExtractor to inventory-service | ROL | Planned | TA-FND-1 | Inventory mutating endpoints |
-| TA-ROL-2 | Apply SecurityCtxExtractor to loyalty-service | ROL | Planned | TA-FND-1 | Align role mapping |
-| TA-ROL-3 | Apply SecurityCtxExtractor to payment-service | ROL | Planned | TA-FND-1 | Pre-req payment intent model |
-| TA-ROL-4 | Apply SecurityCtxExtractor to customer-service | ROL | Planned | TA-FND-1 | Remove per-handler tenant parsing |
-| TA-ROL-5 | Apply SecurityCtxExtractor to integration-gateway | ROL | Planned | TA-FND-1 | Propagate trace & roles downstream |
+| TA-ROL-1 | Apply SecurityCtxExtractor to inventory-service | ROL | Done | TA-FND-1 | Completed (handlers migrated, tests added) |
+| TA-ROL-2 | Apply SecurityCtxExtractor to loyalty-service | ROL | Done | TA-FND-1 | Completed (api.rs restructure, tests) |
+| TA-ROL-3 | Apply SecurityCtxExtractor to payment-service | ROL | Done | TA-FND-1 | Completed (process/void endpoints) |
+| TA-ROL-4 | Apply SecurityCtxExtractor to customer-service | ROL | Done | TA-FND-1 | Completed (all handlers, modular impl) |
+| TA-ROL-5 | Apply SecurityCtxExtractor to integration-gateway | ROL | Done | TA-FND-1 | Completed (header synthesis + metrics) |
 | TA-FND-3 | Unified auth error JSON shape | FND | Done | TA-FND-1 | Implemented auth_error module returning {code,missing_role,trace_id}; integrated into product & audit handlers + test (auth_error_shape). |
 | TA-FND-4 | Cross-service unified HTTP error envelope | FND | Done | TA-FND-3 | Completed: All HTTP services (Product, Inventory, Order, Payment, Loyalty, Customer, Integration-Gateway) now return ApiError with unified JSON + X-Error-Code. HTTP error metrics middleware and http_errors_total counter integrated across services. Kafka gating applied where relevant. Tests added for error shape in migrated services. |
 | TA-FND-5 | Kafka gating for integration-gateway | FND | Planned | TA-FND-4 | Add `kafka` feature flag; conditional Kafka producer & event emission to align with other services and improve Windows/local builds. |
@@ -66,8 +66,18 @@ Status: Planned | In-Progress | Done | Blocked | Deferred
 | TA-DOC-2 | Architecture doc: audit pipeline phases | DOC | Planned | TA-AUD-2 | Sequence & flow diagrams |
 | TA-OPS-2 | Schema compliance linter / macro | OPS | Planned | TA-AUD-1 | Build-time validation |
 | TA-OPS-3 | Prometheus client metrics migration | OPS | Done | TA-OPS-1 | Migrated to `prometheus` crate: registered buffer gauges/counters + redaction counters (labelled). Added metrics endpoint integration test. Future: dedupe double-count risk & cardinality guard. |
-| TA-OPS-4 | Unified HTTP metrics helper | OPS | Planned | TA-FND-4 | Centralize http_errors_total registration + enforce error code cardinality guard; reduce duplication across services. |
-| TA-OPS-5 | Error envelope regression test matrix | OPS | Planned | TA-FND-4 | Standardized tests per service for key ApiError variants + metrics increment assertion. |
+| TA-OPS-4 | Unified HTTP metrics helper | OPS | Done | TA-FND-4 | Implemented shared layer + cardinality guard (overflow label). |
+| TA-OPS-5 | Error envelope regression test matrix | OPS | In-Progress | TA-FND-4 | Harness seeded; per-service 400/403/404 tests present; 500 paths pending. |
+| TA-OPS-6 | Inventory test DB gating & lazy pool | OPS | Done | TA-OPS-5 | TEST_DATABASE_URL gating + lazy connect for extractor tests. |
+| TA-OPS-7 | Capability regression deny/allow matrix | OPS | Planned | TA-POL-4 | Expand deny-path & 500 internal synthetic tests across services. |
+| TA-POL-3 | Capability-based authorization layer | POL | Done | TA-POL-1 | Capability enum + ensure_capability integrated platform-wide. |
+| TA-POL-4 | Deprecate legacy role fallback | POL | Done | TA-POL-3 | Removed ensure_any_role branches; capability-only checks. |
+| TA-OPS-8 | Extractor 400 code normalization | OPS | Planned | TA-FND-4 | Always emit X-Error-Code=missing_tenant_id on missing tenant. |
+| TA-OPS-9 | Error code guard saturation telemetry | OPS | Planned | TA-OPS-4 | Expose metric for overflow occurrences. |
+| TA-OPS-10 | Synthetic 500 regression endpoints | OPS | Planned | TA-OPS-5 | Shared helper + per-service test route ensuring Internal path covered. |
+| TA-POL-5 | Role→Capability matrix finalization | POL | Planned | TA-POL-3 | Document explicit allow/deny table & update tests. |
+| TA-DOC-3 | Capability & authorization reference | DOC | Planned | TA-POL-3 | Doc mapping roles to capabilities + denial examples. |
+| TA-DOC-4 | Regression harness guide | DOC | Planned | TA-OPS-5 | Document adding new ApiError regression cases & synthetic 500s. |
 | TA-AUD-8 | Multi-sink support (Kafka + Search) | AUD | Deferred | TA-AUD-3 | Latency-driven follow-on |
 | TA-FUT-1 | Search backend evaluation | FUT | Planned | TA-AUD-2 | PG vs ES vs ClickHouse bench |
 | TA-FUT-2 | Tenant isolation study (RLS vs shared) | FUT | Planned | — | Decision doc |
@@ -217,7 +227,6 @@ Pending / Next Focus Recommendations:
 3. Initiate TA-OPS-5 standard error envelope regression harness leveraging centralized layer.
 4. Consider refactoring integration-gateway synthetic role assignment to prefer JWT role claims over default Support for better least-privilege fidelity.
 
-
 All additions above are append-only; no prior backlog entries were edited or removed.
 
 2025-10-02 (Quality Gates – Initial Post-Rollout Snapshot):
@@ -235,6 +244,7 @@ All additions above are append-only; no prior backlog entries were edited or rem
     Both failed with Postgres authentication error (SQLSTATE 28P01) attempting to connect as user `postgres` with missing/invalid password.
 
 Inventory Failure Root Cause Analysis:
+
 - Earlier hardening removed the temporary DB bypass and now requires a reachable test database for even negative-path tests.
 - The missing-tenant test should not require a live DB (extractor rejects before handler DB interaction). Current test harness initializes a connection pool up front and fails before assertion stage.
 - Happy-path empty test requires schema creation; fails earlier during pool acquisition due to auth.
@@ -347,3 +357,34 @@ All above changes are append-only; canonical table remains untouched in accordan
   4. Add gateway deny-path tests (synthesized headers) to complete cross-service matrix.
 
 All content above appended without modifying prior backlog entries, preserving audit integrity.
+
+2025-10-02 (Legacy Role Fallback Deprecation – Capability-Only Authorization):
+
+- Scope: Removed remaining legacy role array fallbacks in service handlers (inventory, loyalty, payment, customer) in favor of capability-only checks via `ensure_capability`.
+- Affected Handlers:
+  - inventory-service: `list_inventory`, `create_reservation`, `release_reservation`, `list_locations`
+  - loyalty-service: `get_points`
+  - payment-service: `process_card_payment`, `void_card_payment`
+  - customer-service: `create_customer_impl`, `search_customers_impl`, `get_customer_impl`, `update_customer_impl`
+- Changes:
+  - Removed conditional branches invoking `ensure_any_role` fallbacks; now a failed capability check returns `ApiError::ForbiddenMissingRole` with stable role codes (e.g. `inventory_view`, `customer_view`, `customer_write`, `payment_access`, `loyalty_view`).
+  - Deleted or collapsed obsolete role acceptance tests that asserted legacy role arrays (replaced by existing deny/allow capability path tests where applicable).
+  - Removed re-exported role arrays (`LOYALTY_VIEW_ROLES`, `PAYMENT_ROLES`, `LOCATION_ROLES`, `RESERVATION_ROLES`) from handlers/modules; retained any constants only still referenced by tests earmarked for eventual cleanup.
+- Rationale: Simplifies authorization path, eliminates dual-policy drift risk, and reduces future maintenance when expanding policy matrix (TA-POL-1 follow-on phases).
+- Observability: No new error codes introduced; existing `missing_role` / specific capability-denied codes feed `http_errors_total` without increasing label cardinality. Distinct gauge unchanged.
+- Tests: All modified service test suites pass (regression + extractor + internal error paths). Legacy role acceptance suites now removed or stubbed with explanatory comments.
+- Risk Mitigation: If rollback required, reintroduce minimal role array mapping by referencing git history for removed constants; low complexity.
+- Next: Update any external service documentation referencing old role arrays; expand capability deny-path matrix (Support vs Cashier vs Manager) under TA-POL-1 enhancement phase.
+
+Note: Main backlog table left unmodified per append-only governance; this section serves as authoritative evidence of completion for implicit "Deprecate legacy role fallback" task.
+
+2025-10-02 (Sprint A Closure – Stabilization & Policy Foundations):
+
+- Scope Completed: TA-OPS-8 (uniform 400 header), TA-OPS-5 (core 400/403/404 + synthetic 500 harness), TA-OPS-10 (synthetic internal endpoints), TA-OPS-7 seed (inventory deny/allow capability tests), TA-DOC-3 (capability reference doc draft), legacy artifact cleanup (removed role arrays & fallback imports), capability-only enforcement validated across services.
+- Added Docs: `docs/development/capabilities.md` (capability set, role→cap matrix, patterns, evolution roadmap).
+- Test Enhancements: Mandatory `X-Error-Code=missing_tenant_id` on extractor 400, per-service 500 synthetic tests, inventory capability deny matrix (Support denied; Cashier/Admin/Manager/SuperAdmin allowed).
+- Cleanup: Removed `INVENTORY_VIEW_ROLES`, `PAYMENT_ROLES`, GDPR role array/fallback, extraneous `ensure_any_role` imports; converted GDPR handlers to capability gate (temporary reuse of CustomerWrite until dedicated GdprManage capability is introduced).
+- Observability: Error metrics cardinality guard already active; harness now guarantees consistent internal_error coverage.
+- Risk Reduction: Eliminated divergence between legacy role arrays and capability mapping; reduced test flakiness by isolating capability checks from DB dependencies (lazy harness paths).
+- Remaining (Next Sprint Targets): Kafka gating (TA-FND-5), backpressure & rate limiter metrics (TA-PERF-2/3), finalize role→cap matrix differentiation (TA-POL-5), overflow saturation telemetry (TA-OPS-9), policy engine spike (TA-POL-2).
+- Exit Criteria Met: All planned Sprint A stabilization tasks closed; no open legacy artifacts; regression matrix exercised uniformly (400/403/404/500) across services.

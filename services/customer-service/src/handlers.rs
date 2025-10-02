@@ -1,7 +1,7 @@
 use crate::*; // bring in main module symbols when included from lib/main context
 use axum::{extract::{State, Path, Query}, Json};
 use uuid::Uuid;
-use common_security::{SecurityCtxExtractor, roles::ensure_any_role};
+use common_security::SecurityCtxExtractor;
 use common_http_errors::{ApiError, ApiResult};
 
 pub async fn create_customer(

@@ -3,7 +3,7 @@ use axum::extract::{Query, State};
 use axum::{
     Json,
 };
-use common_security::{SecurityCtxExtractor, roles::Role, Capability, ensure_capability};
+use common_security::{SecurityCtxExtractor, Capability, ensure_capability};
 use serde::{Deserialize, Serialize};
 use sqlx::{query, Row};
 use sqlx::query_as;
@@ -13,7 +13,6 @@ use common_http_errors::ApiError;
 pub(crate) const LIST_INVENTORY_SQL: &str =
     "SELECT product_id, tenant_id, quantity, threshold FROM inventory WHERE tenant_id = $1";
 
-pub const INVENTORY_VIEW_ROLES: &[Role] = &[Role::SuperAdmin, Role::Admin, Role::Manager, Role::Inventory, Role::Cashier];
 
 #[derive(Debug, sqlx::FromRow, Serialize)]
 pub struct InventoryRecord {

@@ -51,9 +51,9 @@ async fn missing_tenant_400_create() {
     let req = Request::builder().uri("/customers").method("POST").header("content-type","application/json").body(axum::body::Body::from(json_body)).unwrap();
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST); // missing tenant header rejected by extractor
-    if let Some(code) = resp.headers().get("X-Error-Code") {
-        assert_eq!(code, "missing_tenant_id");
-    }
+    // TA-OPS-8: Uniform 400 header emission; header must always be present now
+    let code = resp.headers().get("X-Error-Code").expect("missing X-Error-Code header");
+    assert_eq!(code, "missing_tenant_id");
 }
 
 #[tokio::test]

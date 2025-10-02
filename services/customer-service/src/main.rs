@@ -12,7 +12,8 @@ use chrono::{DateTime, Utc};
 use common_auth::{
     JwtConfig, JwtVerifier,
 };
-use common_security::{SecurityCtxExtractor, roles::{ensure_any_role, Role}, ensure_capability, Capability};
+use common_security::{SecurityCtxExtractor, ensure_capability, Capability};
+#[cfg(test)] use common_security::roles::Role;
 use common_http_errors::{ApiError, ApiResult};
 use common_crypto::{decrypt_field, deterministic_hash, encrypt_field, CryptoError, MasterKey};
 use serde::{Deserialize, Serialize};
@@ -79,7 +80,7 @@ async fn render_metrics() -> Result<String, StatusCode> {
 // Legacy CUSTOMER_*_ROLES arrays retained only for tests until fallback fully removed.
 mod handlers;
 use handlers::{create_customer, get_customer, update_customer, search_customers};
-const GDPR_MANAGE_ROLES: &[Role]    = &[Role::Admin];
+// GDPR management currently gated by CustomerWrite capability (future: distinct Capability::GdprManage)
 const GDPR_DELETED_NAME: &str = "[deleted]";
 
 #[derive(Clone)]
@@ -691,7 +692,8 @@ async fn gdpr_export_customer(
     SecurityCtxExtractor(sec): SecurityCtxExtractor,
     Path(customer_id): Path<Uuid>,
 ) -> ApiResult<Json<GdprExportResponse>> {
-    if ensure_any_role(&sec, GDPR_MANAGE_ROLES).is_err() { return Err(ApiError::ForbiddenMissingRole { role: "gdpr_manage", trace_id: sec.trace_id }); }
+    ensure_capability(&sec, Capability::CustomerWrite)
+        .map_err(|_| ApiError::ForbiddenMissingRole { role: "customer_write", trace_id: sec.trace_id })?;
     let tenant_id = sec.tenant_id;
 
     let mut key_cache = TenantKeyCache::new(&state, tenant_id);
@@ -749,7 +751,8 @@ async fn gdpr_delete_customer(
     SecurityCtxExtractor(sec): SecurityCtxExtractor,
     Path(customer_id): Path<Uuid>,
 ) -> ApiResult<Json<GdprDeleteResponse>> {
-    if ensure_any_role(&sec, GDPR_MANAGE_ROLES).is_err() { return Err(ApiError::ForbiddenMissingRole { role: "gdpr_manage", trace_id: sec.trace_id }); }
+    ensure_capability(&sec, Capability::CustomerWrite)
+        .map_err(|_| ApiError::ForbiddenMissingRole { role: "customer_write", trace_id: sec.trace_id })?;
     let tenant_id = sec.tenant_id;
 
     let row = sqlx::query_as::<_, CustomerRow>(
