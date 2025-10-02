@@ -76,7 +76,9 @@ async fn render_metrics() -> Result<String, StatusCode> {
     String::from_utf8(buffer).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
-use customer_service::{CUSTOMER_VIEW_ROLES, CUSTOMER_WRITE_ROLES};
+// Legacy CUSTOMER_*_ROLES arrays retained only for tests until fallback fully removed.
+mod handlers;
+use handlers::{create_customer, get_customer, update_customer, search_customers};
 const GDPR_MANAGE_ROLES: &[Role]    = &[Role::Admin];
 const GDPR_DELETED_NAME: &str = "[deleted]";
 
@@ -267,14 +269,14 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn create_customer(
-    State(state): State<AppState>,
-    SecurityCtxExtractor(sec): SecurityCtxExtractor,
-    Json(new_cust): Json<NewCustomer>,
+// Implementation moved for reuse (public via crate::create_customer_impl)
+pub(crate) async fn create_customer_impl(
+    state: AppState,
+    sec: common_security::context::SecurityContext,
+    new_cust: NewCustomer,
 ) -> ApiResult<Json<Customer>> {
-    if let Err(_) = ensure_capability(&sec, Capability::CustomerWrite) {
-        if ensure_any_role(&sec, CUSTOMER_WRITE_ROLES).is_err() { return Err(ApiError::ForbiddenMissingRole { role: "customer_write", trace_id: sec.trace_id }); }
-    }
+    ensure_capability(&sec, Capability::CustomerWrite)
+        .map_err(|_| ApiError::ForbiddenMissingRole { role: "customer_write", trace_id: sec.trace_id })?;
     let tenant_id = sec.tenant_id;
     let customer_id = Uuid::new_v4();
 
@@ -371,14 +373,13 @@ async fn create_customer(
     Ok(Json(customer))
 }
 
-async fn search_customers(
-    State(state): State<AppState>,
-    SecurityCtxExtractor(sec): SecurityCtxExtractor,
-    Query(params): Query<SearchParams>,
+pub(crate) async fn search_customers_impl(
+    state: AppState,
+    sec: common_security::context::SecurityContext,
+    params: SearchParams,
 ) -> ApiResult<Json<Vec<Customer>>> {
-    if let Err(_) = ensure_capability(&sec, Capability::CustomerView) {
-        if ensure_any_role(&sec, CUSTOMER_VIEW_ROLES).is_err() { return Err(ApiError::ForbiddenMissingRole { role: "customer_view", trace_id: sec.trace_id }); }
-    }
+    ensure_capability(&sec, Capability::CustomerView)
+        .map_err(|_| ApiError::ForbiddenMissingRole { role: "customer_view", trace_id: sec.trace_id })?;
     let tenant_id = sec.tenant_id;
 
     let mut key_cache = TenantKeyCache::new(&state, tenant_id);
@@ -448,14 +449,13 @@ async fn search_customers(
     Ok(Json(customers))
 }
 
-async fn get_customer(
-    State(state): State<AppState>,
-    SecurityCtxExtractor(sec): SecurityCtxExtractor,
-    Path(customer_id): Path<Uuid>,
+pub(crate) async fn get_customer_impl(
+    state: AppState,
+    sec: common_security::context::SecurityContext,
+    customer_id: Uuid,
 ) -> ApiResult<Json<Customer>> {
-    if let Err(_) = ensure_capability(&sec, Capability::CustomerView) {
-        if ensure_any_role(&sec, CUSTOMER_VIEW_ROLES).is_err() { return Err(ApiError::ForbiddenMissingRole { role: "customer_view", trace_id: sec.trace_id }); }
-    }
+    ensure_capability(&sec, Capability::CustomerView)
+        .map_err(|_| ApiError::ForbiddenMissingRole { role: "customer_view", trace_id: sec.trace_id })?;
     let tenant_id = sec.tenant_id;
 
     let mut key_cache = TenantKeyCache::new(&state, tenant_id);
@@ -485,15 +485,14 @@ async fn get_customer(
     Ok(Json(customer))
 }
 
-async fn update_customer(
-    State(state): State<AppState>,
-    SecurityCtxExtractor(sec): SecurityCtxExtractor,
-    Path(customer_id): Path<Uuid>,
-    Json(payload): Json<UpdateCustomerRequest>,
+pub(crate) async fn update_customer_impl(
+    state: AppState,
+    sec: common_security::context::SecurityContext,
+    customer_id: Uuid,
+    payload: UpdateCustomerRequest,
 ) -> ApiResult<Json<Customer>> {
-    if let Err(_) = ensure_capability(&sec, Capability::CustomerWrite) {
-        if ensure_any_role(&sec, CUSTOMER_WRITE_ROLES).is_err() { return Err(ApiError::ForbiddenMissingRole { role: "customer_write", trace_id: sec.trace_id }); }
-    }
+    ensure_capability(&sec, Capability::CustomerWrite)
+        .map_err(|_| ApiError::ForbiddenMissingRole { role: "customer_write", trace_id: sec.trace_id })?;
     let tenant_id = sec.tenant_id;
     let mut key_cache = TenantKeyCache::new(&state, tenant_id);
 

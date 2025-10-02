@@ -1,7 +1,7 @@
 use axum::extract::{State, Query};
 use std::collections::HashMap;
 use common_http_errors::ApiError;
-use common_security::{SecurityCtxExtractor, roles::{ensure_any_role, Role}, Capability, ensure_capability};
+use common_security::{SecurityCtxExtractor, Capability, ensure_capability};
 use uuid::Uuid;
 use sqlx::PgPool;
 use std::sync::Arc;
@@ -14,18 +14,15 @@ pub struct AppState {
     #[cfg(feature = "kafka")] pub producer: rdkafka::producer::FutureProducer,
 }
 
-pub const LOYALTY_VIEW_ROLES: &[Role] = &[Role::SuperAdmin, Role::Admin, Role::Manager, Role::Inventory, Role::Cashier];
+// Legacy LOYALTY_VIEW_ROLES removed; authorization via LoyaltyView capability only.
 
 pub async fn get_points(
     State(state): State<AppState>,
     SecurityCtxExtractor(sec): SecurityCtxExtractor,
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<String, ApiError> {
-    if let Err(_) = ensure_capability(&sec, Capability::LoyaltyView) {
-        if ensure_any_role(&sec, LOYALTY_VIEW_ROLES).is_err() {
-            return Err(ApiError::ForbiddenMissingRole { role: "loyalty_view", trace_id: sec.trace_id });
-        }
-    }
+    ensure_capability(&sec, Capability::LoyaltyView)
+        .map_err(|_| ApiError::ForbiddenMissingRole { role: "loyalty_view", trace_id: sec.trace_id })?;
     let tenant_id = sec.tenant_id;
     let cust_id = params
         .get("customer_id")

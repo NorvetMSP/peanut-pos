@@ -1,14 +1,14 @@
 use crate::{AppState, DEFAULT_THRESHOLD}; // DEFAULT_THRESHOLD now defined in lib
 use axum::extract::{Path, State};
 use axum::{ Json };
-use common_security::{SecurityCtxExtractor, roles::{ensure_any_role, Role}};
+use common_security::{SecurityCtxExtractor, Capability, ensure_capability};
 use common_http_errors::ApiError;
 use serde::{Deserialize, Serialize};
 use sqlx::{query, query_as, Row}; // dynamic + typed queries
 use std::collections::HashMap;
 use uuid::Uuid;
 
-const RESERVATION_ROLES: &[Role] = &[Role::Admin, Role::Manager, Role::Inventory];
+// Legacy RESERVATION_ROLES removed; capability Payment/Inventory reservations mapped to InventoryView + (future) InventoryWrite if introduced.
 
 #[derive(Debug, Deserialize)]
 pub struct ReservationItemPayload {
@@ -47,9 +47,8 @@ pub async fn create_reservation(
     SecurityCtxExtractor(sec): SecurityCtxExtractor,
     Json(payload): Json<CreateReservationRequest>,
 ) -> Result<Json<ReservationResponse>, ApiError> {
-    if ensure_any_role(&sec, RESERVATION_ROLES).is_err() {
-        return Err(ApiError::ForbiddenMissingRole { role: "manager", trace_id: sec.trace_id });
-    }
+    ensure_capability(&sec, Capability::InventoryView)
+        .map_err(|_| ApiError::ForbiddenMissingRole { role: "inventory_view", trace_id: sec.trace_id })?;
     let tenant_id = sec.tenant_id;
 
     if payload.items.is_empty() {
@@ -217,9 +216,8 @@ pub async fn release_reservation(
     SecurityCtxExtractor(sec): SecurityCtxExtractor,
     Path(order_id): Path<Uuid>,
 ) -> Result<Json<ReleaseResponse>, ApiError> {
-    if ensure_any_role(&sec, RESERVATION_ROLES).is_err() {
-        return Err(ApiError::ForbiddenMissingRole { role: "manager", trace_id: sec.trace_id });
-    }
+    ensure_capability(&sec, Capability::InventoryView)
+        .map_err(|_| ApiError::ForbiddenMissingRole { role: "inventory_view", trace_id: sec.trace_id })?;
     let tenant_id = sec.tenant_id;
 
     let mut tx = state

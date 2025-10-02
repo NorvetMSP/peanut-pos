@@ -1,10 +1,10 @@
-use crate::{AppState, PAYMENT_ROLES};
+use crate::AppState;
 use axum::{
     extract::State,
     http::HeaderMap,
     Json,
 };
-use common_security::{SecurityCtxExtractor, roles::ensure_any_role, Capability, ensure_capability};
+use common_security::{SecurityCtxExtractor, Capability, ensure_capability};
 use common_http_errors::ApiError;
 use serde::{Deserialize, Serialize};
 use bigdecimal::BigDecimal;
@@ -20,7 +20,7 @@ pub struct PaymentRequest {
     pub method: String,
     pub amount: BigDecimal,
 }
-
+// Legacy PAYMENT_ROLES removed: rely solely on PaymentProcess capability (Cashier + Admin-like roles allowed by mapping).
 #[derive(Serialize)]
 pub struct PaymentResponse {
     pub status: String,
@@ -49,11 +49,8 @@ pub async fn process_card_payment(
     _headers: HeaderMap,
     Json(req): Json<PaymentRequest>,
 ) -> Result<Json<PaymentResponse>, ApiError> {
-    if let Err(_) = ensure_capability(&sec, Capability::PaymentProcess) {
-        if ensure_any_role(&sec, PAYMENT_ROLES).is_err() {
-            return Err(ApiError::ForbiddenMissingRole { role: "payment_access", trace_id: sec.trace_id });
-        }
-    }
+    ensure_capability(&sec, Capability::PaymentProcess)
+        .map_err(|_| ApiError::ForbiddenMissingRole { role: "payment_access", trace_id: sec.trace_id })?;
     let _tenant_id = sec.tenant_id;
 
     let amount_money = Money::new(req.amount.clone());
@@ -77,11 +74,8 @@ pub async fn void_card_payment(
     _headers: HeaderMap,
     Json(req): Json<VoidPaymentRequest>,
 ) -> Result<Json<VoidPaymentResponse>, ApiError> {
-    if let Err(_) = ensure_capability(&sec, Capability::PaymentProcess) {
-        if ensure_any_role(&sec, PAYMENT_ROLES).is_err() {
-            return Err(ApiError::ForbiddenMissingRole { role: "payment_access", trace_id: sec.trace_id });
-        }
-    }
+    ensure_capability(&sec, Capability::PaymentProcess)
+        .map_err(|_| ApiError::ForbiddenMissingRole { role: "payment_access", trace_id: sec.trace_id })?;
     let _tenant_id = sec.tenant_id;
 
     let amount_money = Money::new(req.amount.clone());

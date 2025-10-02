@@ -1,12 +1,12 @@
 use crate::AppState;
 use axum::{extract::State, Json};
-use common_security::{SecurityCtxExtractor, roles::{ensure_any_role, Role}};
+use common_security::{SecurityCtxExtractor, Capability, ensure_capability};
 use common_http_errors::ApiError;
 use serde::Serialize;
 use sqlx::Row;
 use uuid::Uuid;
 
-const LOCATION_ROLES: &[Role] = &[Role::Admin, Role::Manager, Role::Inventory]; // restricted roles
+// Legacy LOCATION_ROLES removed; rely solely on InventoryView capability.
 
 #[derive(Debug, Serialize)]
 pub struct LocationRecord {
@@ -20,9 +20,8 @@ pub async fn list_locations(
     State(state): State<AppState>,
     SecurityCtxExtractor(sec): SecurityCtxExtractor,
 ) -> Result<Json<Vec<LocationRecord>>, ApiError> {
-    if ensure_any_role(&sec, LOCATION_ROLES).is_err() {
-        return Err(ApiError::ForbiddenMissingRole { role: "manager", trace_id: sec.trace_id });
-    }
+    ensure_capability(&sec, Capability::InventoryView)
+        .map_err(|_| ApiError::ForbiddenMissingRole { role: "inventory_view", trace_id: sec.trace_id })?;
     let tenant_id = sec.tenant_id;
     if !state.multi_location_enabled {
         return Ok(Json(vec![]));

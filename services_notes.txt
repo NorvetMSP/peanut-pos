@@ -398,6 +398,104 @@ That terminates every session using novapos. E
 
 Use this same URL for product-service, order-service, auth-service, and inventory-service in the prototype:
 
+Recent Additions (Oct 2025)
+---------------------------
+
+Customer Service Real DB Harness
+--------------------------------
+Purpose: Validate customer encryption / persistence logic against a real Postgres without running the full HTTP server.
+
+Test File: services/customer-service/tests/db_encryption_harness.rs
+Gate Env Vars:
+  ENABLE_CUSTOMER_DB_ITEST=1
+  CUSTOMER_ITEST_DB_URL=postgres://...
+  CUSTOMER_MASTER_KEY=<base64 32-byte>
+
+Behavior:
+  - Applies migrations inline (idempotent)
+  - Seeds tenant data key if none present
+  - Inserts sample customer row and asserts round-trip fields
+  - Skips automatically when env variables are not present (keeps default test runs fast)
+
+Run (PowerShell example):
+  $env:ENABLE_CUSTOMER_DB_ITEST="1"; \
+  $env:CUSTOMER_ITEST_DB_URL="postgres://postgres:postgres@localhost:5432/customer_itest"; \
+  $env:CUSTOMER_MASTER_KEY="<base64>"; \
+  cargo test -p customer-service --tests -- db_encryption_harness --nocapture
+
+Unified HTTP Error Metrics Enhancements
+--------------------------------------
+Added distinct error code tracking + cardinality guard in common-http-errors crate.
+Metrics:
+  http_errors_total{service,code,status}
+  http_error_codes_distinct (gauge)
+  http_error_code_overflow_total (counter)
+
+Guard: First 40 unique error codes are tracked normally; additional distinct codes increment overflow counter and are labeled as _overflow.
+
+Operational Play:
+  - Watch http_error_codes_distinct approaching 40 -> review new codes and consolidate.
+  - Overflow counter > 0 indicates truncation; inspect recent deployments for unintended code proliferation.
+
+Capability-Based Authorization Rollout
+--------------------------------------
+Capability enum added (InventoryView, CustomerView, CustomerWrite, PaymentProcess, LoyaltyView) with ensure_capability helper.
+Handlers now attempt capability check first, then fall back to legacy role arrays (transitional). This enables future removal of legacy role fallback without breaking existing flows.
+
+Next Step (Planned): Remove legacy role arrays once capability coverage validated in prod metrics & tests.
+
+Handler Modularization (Customer Service)
+-----------------------------------------
+Refactored customer-service handlers into reusable implementations (create_customer_impl, get_customer_impl, etc.) with thin routing wrappers in handlers.rs. Enables direct invocation by tests without spinning up HTTP server.
+
+Inventory Test Strategy Update
+------------------------------
+Negative-path tests (missing tenant, forbidden role) now use a lazily connected pool (connect_lazy) to avoid requiring a live DB when extractor short-circuits.
+Happy-path tests gated via TEST_DATABASE_URL; they soft-skip when env absent to prevent false negatives locally.
+
+Run Example:
+  $env:TEST_DATABASE_URL="postgres://postgres:postgres@localhost:5432/inventory_tests"; cargo test -p inventory-service --tests
+
+Synthetic 500 Regression Paths
+------------------------------
+All primary services now include a lightweight test endpoint or test-only handler that returns ApiError::Internal to assert 500 envelope + X-Error-Code=internal_error header contract.
+
+Gateway Header Synthesis Tests
+------------------------------
+Added tests ensuring integration-gateway synthesized headers (X-Tenant-ID, X-Roles, X-User-ID) remain compatible with SecurityCtxExtractor. Supports early detection if upstream middleware changes header names or formatting.
+
+Runbook Actions When Adding A New Service (Updated)
+---------------------------------------------------
+1. Add dependency on common-http-errors and wire http_error_metrics_layer(service_name).
+2. Adopt SecurityCtxExtractor for consistent tenant/role extraction; ensure trace_id is propagated.
+3. For authorization, implement capability checks first; only add role fallback temporarily.
+4. Include regression tests: 400 missing_tenant_id, 403 missing_role, representative 404, synthetic 500.
+5. Ensure metrics endpoint exposes http_errors_total + distinct/overflow metrics.
+6. If service has encrypted data, create an optional harness test gated by env vars (pattern: ENABLE_<SERVICE>_DB_ITEST).
+
+Troubleshooting Quick Reference (New Sections)
+----------------------------------------------
+Symptom: Distinct gauge spikes near limit
+  Action: List recent commits adding new ApiError codes; consolidate or map to existing codes.
+
+Symptom: Overflow counter increments
+  Action: Inspect /metrics for http_errors_total entries with code="_overflow"; replicate scenario locally to identify uncapped code sources.
+
+Symptom: 400 without X-Error-Code
+  Action: Verify extractor returns ApiError::BadRequest variant (missing_tenant_id). If not, wrap rejection into ApiError.
+
+Symptom: Capability test passes when it should deny
+  Action: Confirm handler removed legacy role fallback; if not, legacy array may be granting broader access.
+
+Planned Removal Notice
+----------------------
+Legacy ensure_any_role fallbacks are slated for removal after validating capability coverage telemetry; update service handlers to drop fallback and adjust tests (expect missing_role errors on unsupported roles once removed).
+
+Append-Only Governance
+----------------------
+This runbook section augments existing guidance without modifying prior historical entries; earlier instructions remain valid unless superseded here explicitly.
+
+
 
 
 # For current shell session:

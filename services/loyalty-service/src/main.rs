@@ -29,7 +29,7 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 mod api; // expose library module for tests & reuse
-pub use crate::api::{AppState, get_points, LOYALTY_VIEW_ROLES};
+pub use crate::api::{AppState, get_points};
 
 #[derive(Debug, Deserialize)]
 struct CompletedEvent {
