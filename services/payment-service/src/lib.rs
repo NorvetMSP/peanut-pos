@@ -3,7 +3,7 @@ use common_auth::JwtVerifier;
 use common_security::roles::Role;
 use axum::extract::FromRef;
 
-pub const PAYMENT_ROLES: &[Role] = &[Role::Admin, Role::Manager, Role::Inventory]; // Temporary mapping until expanded role model (POL-1)
+pub const PAYMENT_ROLES: &[Role] = &[Role::SuperAdmin, Role::Admin, Role::Manager, Role::Inventory, Role::Cashier]; // Expanded with SuperAdmin & Cashier
 
 #[derive(Clone)]
 pub struct AppState {

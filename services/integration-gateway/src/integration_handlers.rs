@@ -50,12 +50,15 @@ struct PaymentServiceResponse {
     approval_code: String,
 }
 
+use common_security::SecurityCtxExtractor;
+
 pub async fn process_payment(
     State(state): State<AppState>,
-    Extension(tenant_id): Extension<Uuid>,
+    SecurityCtxExtractor(sec): SecurityCtxExtractor,
     forwarded_auth: Option<Extension<ForwardedAuthHeader>>,
     Json(req): Json<PaymentRequest>,
 ) -> ApiResult<Json<PaymentResult>> {
+    let tenant_id = sec.tenant_id;
     let order_id = Uuid::parse_str(&req.order_id)
         .map_err(|_| ApiError::BadRequest { code: "invalid_order_id", trace_id: None, message: Some("Invalid orderId".into()) })?;
 
@@ -279,10 +282,11 @@ pub async fn process_payment(
 
 pub async fn void_payment(
     State(state): State<AppState>,
-    Extension(tenant_id): Extension<Uuid>,
+    SecurityCtxExtractor(sec): SecurityCtxExtractor,
     forwarded_auth: Option<Extension<ForwardedAuthHeader>>,
     Json(req): Json<PaymentVoidRequest>,
 ) -> ApiResult<Json<PaymentResult>> {
+    let tenant_id = sec.tenant_id;
     let order_id = Uuid::parse_str(&req.order_id)
         .map_err(|_| ApiError::BadRequest { code: "invalid_order_id", trace_id: None, message: Some("Invalid orderId".into()) })?;
 
@@ -401,9 +405,10 @@ pub(crate) struct Order {
 }
 
 pub async fn handle_external_order(
-    Extension(tenant_id): Extension<Uuid>,
+    SecurityCtxExtractor(sec): SecurityCtxExtractor,
     Json(order): Json<ExternalOrder>,
 ) -> ApiResult<Json<Order>> {
+    let tenant_id = sec.tenant_id;
     let order_svc_url =
         std::env::var("ORDER_SERVICE_URL").unwrap_or_else(|_| "http://localhost:8084".to_string());
     let client = Client::new();

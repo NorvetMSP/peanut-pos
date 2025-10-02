@@ -168,3 +168,112 @@ No original backlog entries altered; additions remain strictly append-only per g
   - Updated tenant acquisition to use `sec.tenant_id`; unified error shapes (`ApiError::ForbiddenMissingRole`, `ApiError::BadRequest` for missing tenant now enforced by extractor earlier).
   - Added new tests `tests/security_extractor_tests.rs` for payment-service covering missing tenant (400) and forbidden role (403) cases; all tests pass (no feature flags).
   - No existing backlog rows mutated; additive documentation only.
+
+2025-10-02 (later – TA-ROL-4 completion & test migration):
+
+- TA-ROL-4 (Apply SecurityCtxExtractor to customer-service) COMPLETED (code + test refactor stage).
+  - Added `common-security` dependency; replaced all handler signatures using legacy `AuthContext` / header parsing with `SecurityCtxExtractor` + `ensure_any_role`.
+  - Consolidated duplicate authorization logic and removed manual tenant ID propagation; all handlers now rely solely on extractor-provided `sec.tenant_id`.
+  - Updated GDPR export/delete handlers to remove dangling `auth` references and utilize unified context (trace_id preserved when present).
+  - Adapted integration test: removed direct `AuthContext` construction; now constructs synthetic `SecurityContext` (bypassing extractor only inside the unit test) while real header-based tests remain for other services.
+  - Introduced `lib.rs` later (during role expansion phase) to expose role arrays for external tests—kept non-mutating backlog governance by documenting here rather than altering earlier rows.
+  - Result: customer-service builds clean; extractor path enforced; legacy code path fully retired in handlers.
+
+2025-10-02 (later – TA-ROL-5 integration-gateway rollout partial -> COMPLETE):
+
+- TA-ROL-5 (Apply SecurityCtxExtractor to integration-gateway) COMPLETED.
+  - Added `common-security`; refactored handlers in `integration_handlers.rs` from `Extension<Uuid>` to `SecurityCtxExtractor`.
+  - Auth middleware now synthesizes `X-Tenant-ID`, `X-Roles`, `X-User-ID` headers post JWT/API key validation enabling uniform downstream extraction (bridge approach preserves existing API key / JWT semantics).
+  - Maintained rate limiting & usage tracking; inserted synthesized roles (JWT-derived or fallback Support) until richer policy mapping under TA-POL-1.
+  - Integrated centralized HTTP error metrics layer (see TA-OPS-4) and removed bespoke per-service counter implementation.
+  - Outcome: gateway aligned with rest of platform on security context model; future policy evolution now centralized via Role enum.
+
+2025-10-02 (TA-OPS-4 unified HTTP metrics helper IMPLEMENTED):
+
+- TA-OPS-4 (Unified HTTP metrics helper) PARTIALLY/OPERATIVELY COMPLETE.
+  - Implemented shared `http_error_metrics_layer(service)` in `common-http-errors` crate registering & incrementing `http_errors_total` with labels (service, code, status).
+  - Replaced duplicated ad-hoc middleware in integration-gateway; services now positioned to adopt the helper (inventory, loyalty, payment, customer, gateway already migrated). Remaining legacy layers (if any emerge) to be cleaned opportunistically.
+  - Cardinality guard follow-up (limiting unique error codes) still pending → mark final closure once guard & regression test matrix (TA-OPS-5) are in place.
+
+2025-10-02 (TA-POL-1 expanded role model – INITIAL IMPLEMENTATION):
+
+- TA-POL-1 (Expanded role model) STARTED (enum & rollout complete; higher-level policy semantics pending).
+  - Added `SuperAdmin`, `Cashier` variants to `Role` enum; updated role arrays across payment, loyalty, inventory, customer to include them (with SuperAdmin first to reflect superset access intent).
+  - Added role acceptance tests in each service (`tests/role_acceptance.rs`) validating `Cashier` and `SuperAdmin` membership in allowed arrays; ensures future regression visibility.
+  - Integration-gateway currently synthesizes Support (or JWT roles) — extension to assign Cashier/SuperAdmin based on upstream claims left for next TA-POL-1 phase.
+  - Next policy steps: define minimal matrix differentiating write vs view privileges (e.g. Cashier limited to payment + basic customer view, Support restricted to read-only) and integrate denial tests.
+
+2025-10-02 (CROSS-CUTTING SUMMARY):
+
+- Security extractor rollout now complete across targeted services (inventory, loyalty, payment, customer, integration-gateway) — PLANNED statuses in main table intentionally left unmodified per non-mutating governance; authoritative completion evidence documented in this addendum.
+- Centralized HTTP error metrics layer operational; duplication reduced, lowering maintenance surface.
+- Role model broadened; new variants validated by tests; no existing behavior regressed for legacy roles (Admin/Manager/Inventory/Support).
+- Added library exports (customer-service) & public constants (inventory-service) strictly to enable new acceptance tests without altering core logic.
+
+Pending / Next Focus Recommendations:
+
+1. Finalize TA-OPS-4 with error code cardinality guard + metrics duplication audit.
+2. Advance TA-POL-1 with a concise role-to-capability matrix & negative tests (SuperAdmin override paths, Cashier restricted writes outside payment/customer).
+3. Initiate TA-OPS-5 standard error envelope regression harness leveraging centralized layer.
+4. Consider refactoring integration-gateway synthetic role assignment to prefer JWT role claims over default Support for better least-privilege fidelity.
+
+
+All additions above are append-only; no prior backlog entries were edited or removed.
+
+2025-10-02 (Quality Gates – Initial Post-Rollout Snapshot):
+
+- Scope: Assess build + test health after completing extractor rollouts (TA-ROL-1..5), partial metrics helper (TA-OPS-4), and initial role expansion (TA-POL-1).
+- Build Result: `cargo build --workspace` SUCCESS (no errors). Only benign warnings (unused imports, dead code in placeholder event structs, future incompatibility advisory for `redis` & `sqlx-postgres` versions).
+- Test Execution (no default features, per affected crates):
+  - loyalty-service: PASS (all extractor, error shape, and role acceptance tests green).
+  - payment-service: PASS (error shape, amount roundtrip, extractor negative cases, role acceptance all green).
+  - customer-service: PASS (error shape + role acceptance tests green; one integration test correctly ignored pending migrations feature flag; no regressions).
+  - integration-gateway: PASS (error shape tests green; no direct extractor role acceptance tests yet—gateway synthesizes headers; consider adding targeted synthetic header test under TA-OPS-5).
+  - inventory-service: PARTIAL / RED (2 FAILURES in `security_extractor_tests`):
+    - `list_inventory_missing_tenant_header`
+    - `list_inventory_happy_path_empty_ok`
+    Both failed with Postgres authentication error (SQLSTATE 28P01) attempting to connect as user `postgres` with missing/invalid password.
+
+Inventory Failure Root Cause Analysis:
+- Earlier hardening removed the temporary DB bypass and now requires a reachable test database for even negative-path tests.
+- The missing-tenant test should not require a live DB (extractor rejects before handler DB interaction). Current test harness initializes a connection pool up front and fails before assertion stage.
+- Happy-path empty test requires schema creation; fails earlier during pool acquisition due to auth.
+
+Remediation Options (ordered by immediacy):
+
+1. Fast: Reintroduce a scoped test-only feature flag or environment gate (e.g. `INVENTORY_TEST_SKIP_DB=1`) solely for negative extractor tests; keep happy-path behind a `#[ignore]` until CI provides DB.
+2. Preferred Medium: Parameterize test connection URL via `TEST_DATABASE_URL`; document requirement in `tests/README` and configure CI secret. Provide fallback to skip (with clear message) if env absent.
+3. Robust: Use `testcontainers` (or `cockroach` alternative if multi-tenant semantics needed later) to launch ephemeral Postgres; ensures deterministic schema creation without external dependencies.
+4. Longer-Term (TA-OPS-5 synergy): Introduce an in-memory abstraction or repository mock layer for extractor-only tests, isolating authorization concerns from storage.
+
+Recommended Immediate Action:
+
+- Implement Option 2: require `TEST_DATABASE_URL` for inventory tests; skip (mark as ignored with rationale) if absent. Add follow-up to convert current failing tests accordingly.
+
+Quality Gate Evaluation vs Backlog Items:
+
+- TA-ROL-1..5: Functionally complete in code (table statuses intentionally still Planned per non-mutating rule). Only regression: inventory tests need DB harness refinement.
+- TA-OPS-4: Helper operational across services; cardinality guard NOT implemented → still Partial.
+- TA-POL-1: Enum expansion + propagation + acceptance tests complete; policy matrix & negative capability tests pending.
+
+Risk & Debt Register (new/updated):
+
+1. Inventory test infra coupling to real Postgres (flaky locally) – increases false negatives (address with TEST_DATABASE_URL gating or containerization).
+2. Error Code Cardinality (TA-OPS-4) – absent guard could allow unbounded label growth if future codes added ad hoc.
+3. Policy Granularity (TA-POL-1) – SuperAdmin currently broad; lack of explicit deny cases may mask future privilege creep.
+4. Gateway Role Synthesis – defaulting to Support if JWT lacks roles may over-permit read paths without clear audit of upstream claims.
+5. Future Incompat Warnings – track `redis` & `sqlx-postgres` upgrade path to avoid sudden breakage.
+
+Next-Step Recommendations (non-mutating references):
+
+- (Follow-on) Add new backlog entries or future addendum notes for:
+  - Finalizing TA-OPS-4: implement `http_errors_total` code cardinality guard + test.
+  - Initiating TA-OPS-5: standardized cross-service ApiError regression harness (can also house gateway synthetic header tests).
+  - Advancing TA-POL-1: define role-to-capability matrix + deny-path tests (Cashier vs Support vs Manager distinctions).
+  - Inventory Test Infra: adopt TEST_DATABASE_URL & skip logic (consider tagging under TA-OPS-5 when created).
+
+Summary Statement:
+
+- Platform-wide security context unification and role expansion hold with no runtime build issues and passing tests in all but one service (inventory). Addressing inventory’s DB-dependent tests will restore a green quality gate. Operational metrics helper functioning; policy and metrics guard evolutions queued.
+
+All content above is append-only; no prior backlog rows modified.

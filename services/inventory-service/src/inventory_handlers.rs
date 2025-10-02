@@ -13,7 +13,7 @@ use common_http_errors::ApiError;
 pub(crate) const LIST_INVENTORY_SQL: &str =
     "SELECT product_id, tenant_id, quantity, threshold FROM inventory WHERE tenant_id = $1";
 
-pub(crate) const INVENTORY_VIEW_ROLES: &[Role] = &[Role::Admin, Role::Manager, Role::Inventory];
+pub const INVENTORY_VIEW_ROLES: &[Role] = &[Role::SuperAdmin, Role::Admin, Role::Manager, Role::Inventory, Role::Cashier];
 
 #[derive(Debug, sqlx::FromRow, Serialize)]
 pub struct InventoryRecord {

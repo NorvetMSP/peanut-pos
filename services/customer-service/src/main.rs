@@ -76,8 +76,7 @@ async fn render_metrics() -> Result<String, StatusCode> {
     String::from_utf8(buffer).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
-const CUSTOMER_WRITE_ROLES: &[Role] = &[Role::Admin, Role::Manager, Role::Inventory];
-const CUSTOMER_VIEW_ROLES: &[Role]  = &[Role::Admin, Role::Manager, Role::Inventory];
+use customer_service::{CUSTOMER_VIEW_ROLES, CUSTOMER_WRITE_ROLES};
 const GDPR_MANAGE_ROLES: &[Role]    = &[Role::Admin];
 const GDPR_DELETED_NAME: &str = "[deleted]";
 

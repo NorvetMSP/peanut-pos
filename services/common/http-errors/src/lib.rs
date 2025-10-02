@@ -63,6 +63,41 @@ impl IntoResponse for ApiError {
 
 pub type ApiResult<T> = Result<T, ApiError>;
 
+// Shared HTTP error metrics middleware helper
+use once_cell::sync::Lazy;
+use prometheus::{IntCounterVec, Opts};
+use axum::{body::Body, http::Request};
+use axum::middleware::Next;
+
+static HTTP_ERRORS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    let c = IntCounterVec::new(
+        Opts::new(
+            "http_errors_total",
+            "Count of HTTP error responses emitted (status >= 400)",
+        ),
+        &["service", "code", "status"],
+    ).expect("http_errors_total");
+    let _ = prometheus::default_registry().register(Box::new(c.clone()));
+    c
+});
+
+/// Returns an Axum middleware function that records HTTP error counts.
+/// Usage: .layer(axum::middleware::from_fn(http_error_metrics_layer("service-name")))
+pub fn http_error_metrics_layer(service_name: &'static str) -> impl Fn(Request<Body>, Next) -> std::pin::Pin<Box<dyn std::future::Future<Output=Result<axum::response::Response, ApiError>> + Send>> + Clone + Send + Sync + 'static {
+    move |req: Request<Body>, next: Next| {
+        let svc = service_name;
+        Box::pin(async move {
+            let resp = next.run(req).await;
+            let status = resp.status();
+            if status.as_u16() >= 400 {
+                let code = resp.headers().get("X-Error-Code").and_then(|v| v.to_str().ok()).unwrap_or("unknown");
+                HTTP_ERRORS_TOTAL.with_label_values(&[svc, code, status.as_str()]).inc();
+            }
+            Ok(resp)
+        })
+    }
+}
+
 #[cfg(any(test, feature = "test-helpers"))]
 pub mod test_helpers {
     use super::*;

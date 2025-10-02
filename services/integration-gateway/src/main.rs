@@ -14,7 +14,6 @@ use axum::{
 use chrono::Utc;
 use common_auth::{JwtConfig, JwtVerifier};
 use common_http_errors::{ApiError};
-use axum::response::IntoResponse;
 use common_money::log_rounding_mode_once;
 use rdkafka::producer::FutureProducer;
 use reqwest::Client;
@@ -30,8 +29,7 @@ use tokio::sync::RwLock;
 use tokio::time::{interval, MissedTickBehavior};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tracing::{debug, info, warn};
-use once_cell::sync::Lazy;
-use prometheus::{IntCounterVec, Opts};
+// Replaced local HTTP error metrics with shared helper in common-http-errors
 use uuid::Uuid;
 
 mod alerts;
@@ -52,6 +50,8 @@ use crate::usage::UsageTracker;
 use integration_handlers::{
     handle_external_order, process_payment, void_payment, ForwardedAuthHeader,
 };
+use common_security::SecurityCtxExtractor; // ensure dependency in Cargo.toml if not present
+use common_security::roles::Role;
 use webhook_handlers::handle_coinbase_webhook;
 
 /// Shared application state
@@ -184,27 +184,7 @@ async fn metrics_endpoint(State(state): State<AppState>) -> Response {
     }
 }
 
-static HTTP_ERRORS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
-    let c = IntCounterVec::new(
-        Opts::new(
-            "http_errors_total",
-            "Count of HTTP error responses emitted (status >= 400)",
-        ),
-        &["service", "code", "status"],
-    ).expect("http_errors_total");
-    let _ = prometheus::default_registry().register(Box::new(c.clone()));
-    c
-});
-
-async fn http_error_metrics_mw(req: Request<Body>, next: Next) -> Result<Response, ApiError> {
-    let resp = next.run(req).await;
-    let status = resp.status();
-    if status.as_u16() >= 400 {
-        let code = resp.headers().get("X-Error-Code").and_then(|v| v.to_str().ok()).unwrap_or("unknown");
-        HTTP_ERRORS_TOTAL.with_label_values(&["integration-gateway", code, status.as_str()]).inc();
-    }
-    Ok(resp)
-}
+use common_http_errors::http_error_metrics_layer;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -336,7 +316,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/metrics", get(metrics_endpoint))
         .merge(protected_api)
         .with_state(state)
-        .layer(middleware::from_fn(http_error_metrics_adapter))
+    .layer(middleware::from_fn(http_error_metrics_adapter)) // existing adapter for ApiError mapping
+    .layer(middleware::from_fn(http_error_metrics_layer("integration-gateway")))
         .layer(cors);
 
     // Start server (bind host/port from env or defaults)
@@ -455,6 +436,21 @@ async fn auth_middleware(
         return Err(ApiError::Forbidden { trace_id: None });
     }
 
+    // Synthesize headers for SecurityCtxExtractor downstream compatibility
+    {
+        let headers_mut = request.headers_mut();
+        headers_mut.insert("X-Tenant-ID", HeaderValue::from_str(&tenant_id.to_string()).unwrap());
+        // Assign roles: if JWT claims present and have roles field, map; else default to Support role for now
+        if let Some(claims) = &claims_opt {
+            // Claims struct role extraction (string vector) assumed via reflection of common_auth
+            let role_csv = claims.roles.join(",");
+            headers_mut.insert("X-Roles", HeaderValue::from_str(&role_csv).unwrap_or(HeaderValue::from_static("support")));
+            headers_mut.insert("X-User-ID", HeaderValue::from_str(&claims.subject.to_string()).unwrap());
+        } else {
+            headers_mut.insert("X-Roles", HeaderValue::from_static("support"));
+            headers_mut.insert("X-User-ID", HeaderValue::from_str(&tenant_id.to_string()).unwrap());
+        }
+    }
     request.extensions_mut().insert(tenant_id);
     if let Some(header_value) = raw_auth_header.clone() {
         request
@@ -469,10 +465,9 @@ async fn auth_middleware(
 }
 
 async fn http_error_metrics_adapter(req: Request<Body>, next: Next) -> Result<Response, StatusCode> {
-    match http_error_metrics_mw(req, next).await {
-        Ok(resp) => Ok(resp),
-        Err(err) => Ok(err.into_response()),
-    }
+    // Adapter now just converts ApiError to Response; metrics captured by shared layer earlier.
+    let resp = next.run(req).await;
+    Ok(resp)
 }
 
 async fn load_active_keys(pool: &PgPool) -> anyhow::Result<HashMap<String, CachedKey>> {

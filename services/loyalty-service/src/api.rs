@@ -14,7 +14,7 @@ pub struct AppState {
     #[cfg(feature = "kafka")] pub producer: rdkafka::producer::FutureProducer,
 }
 
-pub const LOYALTY_VIEW_ROLES: &[Role] = &[Role::Admin, Role::Manager, Role::Inventory];
+pub const LOYALTY_VIEW_ROLES: &[Role] = &[Role::SuperAdmin, Role::Admin, Role::Manager, Role::Inventory, Role::Cashier];
 
 pub async fn get_points(
     State(state): State<AppState>,
