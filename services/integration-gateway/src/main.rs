@@ -40,7 +40,7 @@ use uuid::Uuid;
 use integration_gateway::app_state::{AppState, CachedKey};
 use integration_gateway::config::GatewayConfig;
 use integration_gateway::metrics::GatewayMetrics;
-use integration_gateway::rate_limiter::RateLimiter;
+use integration_gateway::rate_limiter::RedisRateLimiter;
 use integration_gateway::usage::UsageTracker;
 
 use integration_gateway::integration_handlers::{
@@ -113,13 +113,13 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    let rate_limiter = RateLimiter::new(
+    let rate_limiter = RedisRateLimiter::new(
         &config.redis_url,
         config.rate_limit_window_secs,
         config.redis_prefix.clone(),
     )
-    .await?;
-
+    .await
+    .expect("Failed to create rate limiter");
     let metrics = Arc::new(GatewayMetrics::new()?);
     // Create a small bounded channel representing an internal work queue (placeholder for real queue) and instrument it.
     let (tx, mut rx) = mpsc::channel::<()>(100);
@@ -167,13 +167,12 @@ async fn main() -> anyhow::Result<()> {
     let usage = UsageTracker::new(
         config.clone(),
         db_pool.clone(),
-    #[cfg(any(feature = "kafka", feature = "kafka-producer"))] Some(producer.clone()),
-        #[cfg(not(feature = "kafka"))] None,
+        #[cfg(any(feature = "kafka", feature = "kafka-producer"))] Some(producer.clone())
     );
     usage.spawn_background_tasks();
     let state = AppState {
     #[cfg(any(feature = "kafka", feature = "kafka-producer"))] kafka_producer: producer,
-        rate_limiter,
+        rate_limiter: std::sync::Arc::new(rate_limiter),
         key_cache,
         jwt_verifier,
         metrics: metrics.clone(),

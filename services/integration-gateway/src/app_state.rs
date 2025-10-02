@@ -4,7 +4,8 @@ use std::time::Instant;
 use chrono::Utc;
 use uuid::Uuid;
 use crate::metrics::GatewayMetrics;
-use crate::rate_limiter::RateLimiter;
+use crate::rate_limiter::RateLimiterEngine;
+#[cfg(any(test, feature = "kafka", feature = "kafka-producer"))] use crate::rate_limiter::InMemoryRateLimiter;
 use crate::usage::UsageTracker;
 use crate::config::GatewayConfig;
 use common_auth::JwtVerifier;
@@ -17,7 +18,7 @@ use crate::alerts::{post_alert_webhook, RateLimitAlertEvent};
 #[derive(Clone)]
 pub struct AppState {
     #[cfg(any(feature = "kafka", feature = "kafka-producer"))] pub kafka_producer: FutureProducer,
-    pub rate_limiter: RateLimiter,
+    pub rate_limiter: Arc<dyn RateLimiterEngine>,
     pub key_cache: Arc<tokio::sync::RwLock<HashMap<String, CachedKey>>>,
     pub jwt_verifier: Arc<JwtVerifier>,
     pub metrics: Arc<GatewayMetrics>,
@@ -37,6 +38,21 @@ impl AppState {
     pub fn record_api_key_metric(&self, allowed: bool) {
         let result = if allowed { "allowed" } else { "rejected" };
         self.metrics.record_api_key_request(result);
+    }
+
+    #[cfg(any(test, feature = "kafka", feature = "kafka-producer"))]
+    pub fn test_with_in_memory(rate_window_secs: u64, config: Arc<GatewayConfig>, metrics: Arc<GatewayMetrics>, usage: UsageTracker, jwt_verifier: Arc<JwtVerifier>) -> Self {
+        AppState {
+            #[cfg(any(feature = "kafka", feature = "kafka-producer"))] kafka_producer: rdkafka::ClientConfig::new().set("bootstrap.servers","localhost:9092").create().expect("test producer"),
+            rate_limiter: Arc::new(InMemoryRateLimiter::new(rate_window_secs)),
+            key_cache: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            jwt_verifier,
+            metrics,
+            usage,
+            config,
+            http_client: reqwest::Client::new(),
+            alert_state: Arc::new(Mutex::new(std::collections::HashMap::new())),
+        }
     }
 
     pub async fn maybe_alert_rate_limit(

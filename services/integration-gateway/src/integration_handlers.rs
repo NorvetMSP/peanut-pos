@@ -343,6 +343,12 @@ pub async fn void_payment(
         .map_err(|_| ApiError::BadRequest { code: "invalid_order_id", trace_id: None, message: Some("Invalid orderId".into()) })?;
     let tenant_id = sec.tenant_id;
     use tracing::info;
+    // Placeholder domain validation hook (order/payment existence, state checks) - future real integration.
+    #[cfg(feature = "future-order-validation")]
+    if let Err(err) = crate::validation::validate_void_request(order_id, tenant_id, &req.method).await {
+        return Err(ApiError::BadRequest { code: "void_validation_failed", trace_id: None, message: Some(err.to_string()) });
+    }
+
     let event = PaymentVoidedEvent {
         order_id,
         tenant_id,
@@ -351,15 +357,13 @@ pub async fn void_payment(
         reason: req.reason.clone(),
     };
     if let Ok(payload) = serde_json::to_string(&event) {
-        // Test capture path: if TEST_CAPTURE_KAFKA=1, push payload to a static vector for inspection.
         if std::env::var("TEST_CAPTURE_KAFKA").ok().as_deref() == Some("1") {
-            #[cfg(test)]
-            {
-                use std::sync::OnceLock;
-                static CAPTURED: OnceLock<std::sync::Mutex<Vec<String>>> = OnceLock::new();
-                let store = CAPTURED.get_or_init(|| std::sync::Mutex::new(Vec::new()));
-                store.lock().unwrap().push(payload.clone());
-            }
+            test_support::capture_payment_voided(&payload);
+        }
+        // Test shortcut: allow skipping actual broker send when running in capture mode without a Kafka cluster.
+        if std::env::var("TEST_KAFKA_NO_BROKER").ok().as_deref() == Some("1") {
+            info!(order_id = %order_id, "Skipped broker send (TEST_KAFKA_NO_BROKER=1)");
+            return Ok(Json(PaymentResult { status: "voided".into(), payment_url: None }));
         }
         if let Err(err) = state.kafka_producer
             .send(
@@ -388,5 +392,26 @@ pub async fn void_payment(
     let order_id = Uuid::parse_str(&req.order_id)
         .map_err(|_| ApiError::BadRequest { code: "invalid_order_id", trace_id: None, message: Some("Invalid orderId".into()) })?;
     let _ = (&order_id, &req.method);
+    // Non-kafka build: validation hook could still be wired later if needed.
     Ok(Json(PaymentResult { status: "voided".into(), payment_url: None }))
+}
+
+// Test support submodule exposing capture drain helpers (available when tests compile the crate)
+#[cfg(any(test, feature = "kafka", feature = "kafka-producer"))]
+pub mod test_support {
+    use std::sync::{Mutex, OnceLock};
+
+    static CAPTURED_PAYMENT_VOIDED: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
+
+    pub fn capture_payment_voided(payload: &str) {
+        let store = CAPTURED_PAYMENT_VOIDED.get_or_init(|| Mutex::new(Vec::new()));
+        store.lock().unwrap().push(payload.to_string());
+    }
+
+    pub fn take_captured_payment_voided() -> Vec<String> {
+        let store = CAPTURED_PAYMENT_VOIDED.get_or_init(|| Mutex::new(Vec::new()));
+        let mut guard = store.lock().unwrap();
+        let drained = guard.drain(..).collect();
+        drained
+    }
 }

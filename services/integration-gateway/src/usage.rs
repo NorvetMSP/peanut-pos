@@ -75,8 +75,7 @@ struct ApiKeyUsageSummary {
 
 impl UsageTracker {
     pub fn new(config: Arc<GatewayConfig>, pool: PgPool,
-    #[cfg(any(feature = "kafka", feature = "kafka-producer"))] producer: Option<FutureProducer>,
-        #[cfg(not(feature = "kafka"))] _producer: Option<()>
+    #[cfg(any(feature = "kafka", feature = "kafka-producer"))] producer: Option<FutureProducer>
     ) -> Self {
         Self { inner: Arc::new(UsageTrackerInner { pool,
             #[cfg(any(feature = "kafka", feature = "kafka-producer"))] producer: producer.expect("producer required when kafka feature enabled"),
