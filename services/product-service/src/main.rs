@@ -1,6 +1,6 @@
 ﻿use anyhow::Context;
 use axum::{
-    extract::{FromRef, State},
+    extract::State,
     http::{
         header::{ACCEPT, CONTENT_TYPE},
         HeaderName, HeaderValue, Method, StatusCode,
@@ -20,15 +20,15 @@ use tokio::{
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tracing::{debug, info, warn};
 
-mod product_handlers;
-mod audit_handlers;
-use product_handlers::{
+use product_service::product_handlers::{
     create_product, delete_product, list_product_audit, list_products, update_product,
 };
-use audit_handlers::audit_search;
+use product_service::audit_handlers::{audit_search, view_redactions_count, VIEW_REDACTIONS_LABELS};
+use product_service::app_state::AppState;
+
 // Legacy JSON metrics (will be deprecated once dashboards switch to Prometheus scrape)
 async fn audit_metrics(State(state): State<AppState>) -> axum::Json<serde_json::Value> {
-    if let Some(buf) = &state.audit_producer {
+    if let Some(buf) = state.audit_buffer() {
         let snap = buf.snapshot();
         axum::Json(serde_json::json!({
             "queued": snap.queued,
@@ -43,7 +43,7 @@ async fn audit_metrics(State(state): State<AppState>) -> axum::Json<serde_json::
 async fn metrics(State(state): State<AppState>) -> (StatusCode, String) {
     // Produce Prometheus text exposition format
     let mut out = String::with_capacity(512);
-    if let Some(buf) = &state.audit_producer {
+    if let Some(buf) = state.audit_buffer() {
         let snap = buf.snapshot();
         out.push_str("# HELP audit_buffer_queued Current in-memory buffered audit events\n");
         out.push_str("# TYPE audit_buffer_queued gauge\n");
@@ -64,23 +64,19 @@ async fn metrics(State(state): State<AppState>) -> (StatusCode, String) {
         out.push_str("\n# Audit coverage metrics\n");
         out.push_str(&cov);
     }
+    // View-layer redactions (TA-AUD-7)
+    out.push_str("# HELP audit_view_redactions_total Total sensitive field redactions applied at view layer\n");
+    out.push_str("# TYPE audit_view_redactions_total counter\n");
+    out.push_str(&format!("audit_view_redactions_total {}\n", view_redactions_count()));
+    if let Ok(map) = VIEW_REDACTIONS_LABELS.lock() {
+        for ((tenant, role, field), count) in map.iter() {
+            out.push_str(&format!("audit_view_redactions_total{{tenant_id=\"{}\",role=\"{}\",field=\"{}\"}} {}\n", tenant, role, field, count));
+        }
+    }
     (StatusCode::OK, out)
 }
 
-/// Shared application state
-#[derive(Clone)]
-pub struct AppState {
-    pub(crate) db: PgPool,
-    pub(crate) kafka_producer: FutureProducer,
-    pub(crate) jwt_verifier: Arc<JwtVerifier>,
-    pub(crate) audit_producer: Option<Arc<common_audit::BufferedAuditProducer<common_audit::KafkaAuditSink>>>,
-}
-
-impl FromRef<AppState> for Arc<JwtVerifier> {
-    fn from_ref(state: &AppState) -> Self {
-        state.jwt_verifier.clone()
-    }
-}
+// AppState now sourced from library module (app_state.rs)
 
 async fn health() -> &'static str {
     "ok"
@@ -114,7 +110,7 @@ async fn main() -> anyhow::Result<()> {
     let base = common_audit::AuditProducer::new(common_audit::KafkaAuditSink::new(kafka_producer.clone(), common_audit::AuditProducerConfig { topic: audit_topic.clone() }));
     let audit_producer = Some(Arc::new(common_audit::BufferedAuditProducer::new(base, 1024)));
     tracing::info!(topic = %audit_topic, "Audit producer initialized");
-    let state = AppState { db, kafka_producer, jwt_verifier, audit_producer };
+    let state = AppState::new(db, kafka_producer, jwt_verifier, audit_producer);
 
     let allowed_origins = [
         "http://localhost:3000",
@@ -161,8 +157,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/products/:id", put(update_product).delete(delete_product))
         .route("/products/:id/audit", get(list_product_audit))
         .route("/audit/events", get(audit_search))
-    .route("/internal/audit_metrics", get(audit_metrics))
-    .route("/internal/metrics", get(metrics))
+        .route("/internal/audit_metrics", get(audit_metrics))
+        .route("/internal/metrics", get(metrics))
         .with_state(state)
         .layer(cors);
     // Start server

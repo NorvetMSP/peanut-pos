@@ -3354,6 +3354,7 @@ dependencies = [
  "common-money",
  "common-security",
  "hyper 1.7.0",
+ "once_cell",
  "rdkafka",
  "serde",
  "serde_json",

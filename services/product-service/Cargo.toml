@@ -23,6 +23,7 @@ bigdecimal = { version = "0.3", features = ["serde"] }
 common-money = { path = "../common/money" }
 common-audit = { path = "../common/audit" }
 common-security = { path = "../common/security" }
+once_cell = "1"
 
 [features]
 # (No explicit offline feature; controlled via SQLX_OFFLINE env var.)

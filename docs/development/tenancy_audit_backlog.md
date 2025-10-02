@@ -54,7 +54,7 @@ Status: Planned | In-Progress | Done | Blocked | Deferred
 | TA-AUD-4 | Coverage scanner tool | AUD | Done | TA-AUD-1 | AST-based (syn) parser, per-service config, JSON report, Prometheus metrics file, CI 90% ratio gate |
 | TA-AUD-5 | Retention policy (TTL purge job) | AUD | Done | TA-AUD-2 | Background purge, env AUDIT_RETENTION_DAYS (default 30), dry-run, metrics (deleted total, last run) |
 | TA-AUD-6 | Redaction tagging + masking layer | AUD | Done | TA-AUD-2 | Configurable field paths env-driven, masking modes (off/log/enforce), metrics (redacted total, last timestamp) |
-| TA-AUD-7 | Role-based redacted view | AUD | Planned | TA-AUD-6 | Hide PII from non-admin roles |
+| TA-AUD-7 | Role-based redacted view | AUD | In-Progress | TA-AUD-6 | Apply privileged role check (e.g. Admin) in /audit/events; if requester not privileged, overlay redaction at response serialization for sensitive payload/meta keys. Add metadata labels enumerating redacted keys. Support query param `include_redacted=true` to return masked placeholders instead of omitting fields. Emit counter metric `audit_view_redactions_total` with labels (tenant_id, field, role). |
 | TA-PERF-1 | Outbox pattern for audit durability | PERF | Planned | TA-AUD-2 | Optional fallback when Kafka down |
 | TA-PERF-2 | Backpressure metrics & alerts | PERF | Planned | TA-AUD-1 | Alert on queue saturation |
 | TA-POL-1 | Expanded role model (Cashier vs Support) | POL | Planned | TA-ROL-* | Enum refinement |

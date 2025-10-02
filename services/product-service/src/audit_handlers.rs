@@ -2,8 +2,31 @@ use axum::{extract::{Query, State}, http::StatusCode, Json};
 use serde::Deserialize;
 use sqlx::PgPool;
 use uuid::Uuid;
-use crate::AppState;
+use crate::app_state::AppState;
 use common_security::{SecurityCtxExtractor, roles::{ensure_any_role, Role}};
+use std::sync::atomic::{AtomicU64, Ordering};
+use once_cell::sync::Lazy;
+use std::env;
+use crate::view_redaction::apply_redaction;
+
+// Global counter for view-layer redactions (TA-AUD-7)
+static VIEW_REDACTIONS_TOTAL: AtomicU64 = AtomicU64::new(0);
+// Simple in-memory tally map for label breakouts (not thread-safe high perf; acceptable interim) -> Vec<(tenant_id, role, field, count)>
+pub static VIEW_REDACTIONS_LABELS: Lazy<std::sync::Mutex<std::collections::HashMap<(uuid::Uuid, String, String), u64>>> = Lazy::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+pub fn view_redactions_count() -> u64 { VIEW_REDACTIONS_TOTAL.load(Ordering::Relaxed) }
+
+fn redaction_paths_from_env() -> &'static Vec<Vec<String>> {
+    static PATHS: Lazy<Vec<Vec<String>>> = Lazy::new(|| {
+        let raw = env::var("AUDIT_VIEW_REDACTION_PATHS").unwrap_or_else(|_| "".into());
+        raw.split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|p| p.split('.').map(|seg| seg.trim().to_string()).collect::<Vec<String>>())
+            .collect()
+    });
+    &PATHS
+}
 
 #[derive(Deserialize, Default)]
 pub struct AuditQuery {
@@ -16,6 +39,7 @@ pub struct AuditQuery {
     pub entity_id: Option<Uuid>,
     pub severity: Option<String>,
     pub trace_id: Option<Uuid>,
+    pub include_redacted: Option<bool>, // TA-AUD-7
 }
 
 pub async fn audit_search(
@@ -62,6 +86,12 @@ pub async fn audit_search(
     let rows = builder.build().fetch_all(pool).await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let mut data = Vec::with_capacity(rows.len());
+    let include_redacted = q.include_redacted.unwrap_or(false);
+    let privileged = sec.roles.iter().any(|r| *r == Role::Admin);
+
+    // Prepare redaction paths once
+    let redaction_paths = redaction_paths_from_env();
+    let mut total_view_redactions: u64 = 0;
     let mut next_cursor: Option<String> = None;
     let mut next_cursor_event_id: Option<Uuid> = None;
     for row in rows.iter() {
@@ -69,6 +99,36 @@ pub async fn audit_search(
         let occurred: chrono::DateTime<chrono::Utc> = row.try_get("occurred_at").unwrap();
     next_cursor = Some(occurred.to_rfc3339());
     next_cursor_event_id = row.try_get::<Uuid,_>("event_id").ok();
+        let mut payload = row.try_get::<serde_json::Value,_>("payload").unwrap_or(serde_json::json!({}));
+        let mut meta = row.try_get::<serde_json::Value,_>("meta").unwrap_or(serde_json::json!({}));
+        let mut redacted_fields: Vec<String> = Vec::new();
+
+    if !privileged && !redaction_paths.is_empty() {
+            // Simple object traversal only (no arrays wildcard support yet)
+            for path in redaction_paths.iter() {
+                if path.is_empty() { continue; }
+                // Try payload then meta
+                let mut target = None;
+                if let serde_json::Value::Object(_) = payload { target = Some((true, &mut payload)); }
+                if let Some((_, val)) = target {
+                    if apply_redaction(val, path, include_redacted) { redacted_fields.push(path.join(".")); continue; }
+                }
+                if let serde_json::Value::Object(_) = meta {
+                    if apply_redaction(&mut meta, path, include_redacted) { redacted_fields.push(path.join(".")); }
+                }
+            }
+            if !redacted_fields.is_empty() {
+                total_view_redactions += redacted_fields.len() as u64;
+                // Update label map
+                if let Ok(mut guard) = VIEW_REDACTIONS_LABELS.lock() {
+                    for f in &redacted_fields {
+                        let key = (sec.tenant_id, format!("{:?}", sec.roles.first().cloned().unwrap_or(Role::Unknown("none".into()))), f.clone());
+                        *guard.entry(key).or_insert(0) += 1;
+                    }
+                }
+            }
+        }
+
         data.push(serde_json::json!({
             "event_id": row.try_get::<Uuid,_>("event_id").ok(),
             "event_version": row.try_get::<i32,_>("event_version").ok(),
@@ -85,16 +145,23 @@ pub async fn audit_search(
             "source_service": row.try_get::<String,_>("source_service").ok(),
             "occurred_at": occurred.to_rfc3339(),
             "trace_id": row.try_get::<Option<Uuid>,_>("trace_id").ok().flatten(),
-            "payload": row.try_get::<serde_json::Value,_>("payload").unwrap_or(serde_json::json!({})),
-            "meta": row.try_get::<serde_json::Value,_>("meta").unwrap_or(serde_json::json!({})),
+            "payload": payload,
+            "meta": meta,
+            "redacted_fields": redacted_fields,
+            "include_redacted": include_redacted,
+            "privileged_view": privileged,
         }));
     }
+    if total_view_redactions > 0 { VIEW_REDACTIONS_TOTAL.fetch_add(total_view_redactions, Ordering::Relaxed); }
 
     Ok(Json(serde_json::json!({
         "data": data,
         "next_cursor": next_cursor,
         "next_cursor_event_id": next_cursor_event_id,
         "count": data.len(),
-        "limit": limit
+        "limit": limit,
+        "view_redactions_applied": total_view_redactions,
     })))
 }
+
+// redaction logic moved to view_redaction.rs

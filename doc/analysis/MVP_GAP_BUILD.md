@@ -335,6 +335,7 @@ Risks / Considerations:
 | 2025-10-01 | SEC-AUD-4 | Audit coverage scanner | ⛔→✅ | Added audit-coverage crate (syn AST parsing, config file, Prometheus metrics file, CI min ratio gate) replacing initial heuristic |
 | 2025-10-01 | SEC-AUD-5 | Audit retention job | ⛔→✅ | Added TTL purge task (env AUDIT_RETENTION_DAYS, dry-run mode, deletion & last-run metrics) |
 | 2025-10-01 | SEC-AUD-6 | Audit redaction layer | ⛔→✅ | Added configurable masking (env paths, modes off/log/enforce) + redaction metrics |
+| 2025-10-01 | SEC-AUD-7 | Role-based redacted audit view | ⛔→🌓 | Began TA-AUD-7: /audit/events now planning role privilege gating + response-time redaction overlay design (include_redacted param, metadata labels, view redactions metric) |
 
 ## 8. Open Questions / Decisions To Record
 
