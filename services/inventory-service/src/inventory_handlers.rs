@@ -1,23 +1,21 @@
 use crate::AppState;
 use axum::extract::{Query, State};
 use axum::{
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap},
     Json,
 };
 use common_auth::{
     ensure_role, tenant_id_from_request, AuthContext, ROLE_ADMIN, ROLE_CASHIER, ROLE_MANAGER,
-    ROLE_SUPER_ADMIN,
+    ROLE_SUPER_ADMIN, GuardError,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::{query, Row};
 use sqlx::query_as;
 use uuid::Uuid;
+use common_http_errors::ApiError;
 
 pub(crate) const LIST_INVENTORY_SQL: &str =
     "SELECT product_id, tenant_id, quantity, threshold FROM inventory WHERE tenant_id = $1";
-
-// (Previously had LIST_INVENTORY_ITEMS_* constants; removed to silence dead code warnings.
-// Query strings are now inlined in branch logic for flexibility during schema iteration.)
 
 pub(crate) const INVENTORY_VIEW_ROLES: &[&str] =
     &[ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_MANAGER, ROLE_CASHIER];
@@ -41,9 +39,17 @@ pub async fn list_inventory(
     auth: AuthContext,
     headers: HeaderMap,
     Query(params): Query<InventoryQueryParams>,
-) -> Result<Json<Vec<InventoryRecord>>, (StatusCode, String)> {
-    ensure_role(&auth, INVENTORY_VIEW_ROLES)?;
-    let tenant_id = tenant_id_from_request(&headers, &auth)?;
+) -> Result<Json<Vec<InventoryRecord>>, ApiError> {
+    if let Err(_) = ensure_role(&auth, INVENTORY_VIEW_ROLES) {
+        return Err(ApiError::ForbiddenMissingRole { role: "manager", trace_id: None });
+    }
+    let tenant_id = match tenant_id_from_request(&headers, &auth) {
+        Ok(t) => t,
+        Err(GuardError::MissingTenantHeader) => return Err(ApiError::BadRequest { code: "missing_tenant_header", trace_id: None, message: None }),
+        Err(GuardError::InvalidTenantHeader) => return Err(ApiError::BadRequest { code: "invalid_tenant_header", trace_id: None, message: None }),
+        Err(GuardError::TenantMismatch { .. }) => return Err(ApiError::Forbidden { trace_id: None }),
+        Err(GuardError::Forbidden { .. }) => return Err(ApiError::Forbidden { trace_id: None }),
+    };
     let records = if state.multi_location_enabled {
         if let Some(location_id) = params.location_id {
             let rows = query(
@@ -53,7 +59,7 @@ pub async fn list_inventory(
             .bind(location_id)
             .fetch_all(&state.db)
             .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+            .map_err(|e| ApiError::internal(e, None))?;
             rows.into_iter()
                 .map(|r| InventoryRecord {
                     product_id: r.get("product_id"),
@@ -70,7 +76,6 @@ pub async fn list_inventory(
             if ids.is_empty() {
                 Vec::new()
             } else {
-                // Build dynamic IN clause using UNNEST
                 let rows = query(
                     "SELECT product_id, tenant_id, SUM(quantity) as quantity, MIN(threshold) as threshold FROM inventory_items WHERE tenant_id = $1 AND location_id = ANY($2) GROUP BY product_id, tenant_id",
                 )
@@ -78,7 +83,7 @@ pub async fn list_inventory(
                 .bind(&ids)
                 .fetch_all(&state.db)
                 .await
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+                .map_err(|e| ApiError::internal(e, None))?;
                 rows.into_iter()
                     .map(|r| InventoryRecord {
                         product_id: r.get("product_id"),
@@ -95,7 +100,7 @@ pub async fn list_inventory(
             .bind(tenant_id)
             .fetch_all(&state.db)
             .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+            .map_err(|e| ApiError::internal(e, None))?;
             rows.into_iter()
                 .map(|r| InventoryRecord {
                     product_id: r.get("product_id"),
@@ -110,7 +115,7 @@ pub async fn list_inventory(
             .bind(tenant_id)
             .fetch_all(&state.db)
             .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?
+            .map_err(|e| ApiError::internal(e, None))?
     };
     Ok(Json(records))
 }
@@ -119,12 +124,13 @@ pub async fn list_inventory(
 mod tests {
     use super::*;
     use axum::extract::State;
-    use axum::http::{HeaderMap, StatusCode};
+    use axum::http::HeaderMap;
     use chrono::Utc;
     use common_auth::{Claims, JwtConfig, JwtVerifier};
     use sqlx::postgres::PgPoolOptions;
     use std::sync::Arc;
     use common_observability::InventoryMetrics;
+    use axum::response::IntoResponse; // bring trait into scope for ApiError.into_response()
 
     #[test]
     fn list_inventory_query_uses_parameter_placeholder() {
@@ -140,7 +146,7 @@ mod tests {
             .connect_lazy("postgres://postgres:postgres@localhost:5432/inventory_tests")
             .expect("should build lazy postgres pool");
         let verifier = Arc::new(JwtVerifier::new(JwtConfig::new("issuer", "audience")));
-        // For test, create a no-op producer (uses localhost default; failures won't impact logic here)
+        #[cfg(feature = "kafka")]
         let producer: rdkafka::producer::FutureProducer = rdkafka::ClientConfig::new()
             .set("bootstrap.servers", "localhost:9092")
             .create()
@@ -152,7 +158,7 @@ mod tests {
             reservation_default_ttl: std::time::Duration::from_secs(900),
             reservation_expiry_sweep: std::time::Duration::from_secs(60),
             dual_write_enabled: false,
-            kafka_producer: producer,
+            #[cfg(feature = "kafka")] kafka_producer: producer,
             metrics: Arc::new(InventoryMetrics::new()),
         };
 
@@ -173,7 +179,8 @@ mod tests {
         };
 
         let result = list_inventory(State(state), auth, HeaderMap::new(), Query(InventoryQueryParams::default())).await;
-        let (status, _) = result.expect_err("missing header should fail");
-        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let err = result.expect_err("missing header should fail");
+        let resp = err.into_response();
+        assert_eq!(resp.status(), axum::http::StatusCode::BAD_REQUEST);
     }
 }

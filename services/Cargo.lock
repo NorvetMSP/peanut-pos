@@ -1007,6 +1007,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "common-http-errors"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "http 0.2.12",
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
 name = "common-money"
 version = "0.1.0"
 dependencies = [
@@ -2367,6 +2378,7 @@ dependencies = [
  "axum",
  "chrono",
  "common-auth",
+ "common-http-errors",
  "common-money",
  "common-observability",
  "futures",
@@ -2381,6 +2393,7 @@ dependencies = [
  "testcontainers",
  "thiserror 1.0.69",
  "tokio",
+ "tower 0.5.2",
  "tower-http 0.5.2",
  "tracing",
  "tracing-subscriber",
@@ -3381,6 +3394,7 @@ dependencies = [
  "chrono",
  "common-audit",
  "common-auth",
+ "common-http-errors",
  "common-money",
  "common-security",
  "http 0.2.12",

@@ -23,6 +23,7 @@ bigdecimal = { version = "0.3", features = ["serde"] }
 common-money = { path = "../common/money" }
 common-audit = { path = "../common/audit", features=["kafka"] }
 common-security = { path = "../common/security" }
+common-http-errors = { path = "../common/http-errors" }
 once_cell = "1"
 prometheus = { version = "0.13", default-features = false, features = ["process"] }
 

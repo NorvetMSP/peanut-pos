@@ -1,4 +1,5 @@
 use crate::app_state::AppState;
+use crate::ApiError;
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
@@ -113,10 +114,10 @@ pub async fn update_product(
     SecurityCtxExtractor(sec): SecurityCtxExtractor,
     Path(product_id): axum::extract::Path<Uuid>,
     Json(upd): Json<UpdateProduct>,
-) -> Result<Json<Product>, (StatusCode, String)> {
+) -> Result<Json<Product>, ApiError> {
     // Temporary dual enforcement: old roles + new context roles
     if !sec.roles.iter().any(|r| matches!(r, Role::Admin | Role::Manager)) {
-        return Err((StatusCode::FORBIDDEN, "missing required role".into()));
+        return Err(ApiError::ForbiddenMissingRole { role: "Manager", trace_id: sec.trace_id });
     }
     let tenant_id = sec.tenant_id;
     let actor = AuditActor { id: sec.actor.id, name: sec.actor.name.clone(), email: sec.actor.email.clone() };
@@ -127,10 +128,10 @@ pub async fn update_product(
     .bind(tenant_id)
     .fetch_optional(&state.db)
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+    .map_err(|e| ApiError::internal(e, sec.trace_id))?;
     let existing = match existing {
         Some(product) => product,
-        None => return Err((StatusCode::NOT_FOUND, "Product not found".into())),
+        None => return Err(ApiError::NotFound { code: "product_not_found", trace_id: sec.trace_id }),
     };
     let image = normalize_image_input(upd.image);
     let product = query_as::<_, Product>(
@@ -144,8 +145,8 @@ pub async fn update_product(
         .bind(product_id)
         .bind(tenant_id)
         .fetch_one(&state.db)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+    .await
+    .map_err(|e| ApiError::internal(e, sec.trace_id))?;
     let changes = json!({
         "before": product_to_value(&existing),
         "after": product_to_value(&product),
@@ -179,9 +180,9 @@ pub async fn create_product(
     State(state): State<AppState>,
     SecurityCtxExtractor(sec): SecurityCtxExtractor,
     Json(new_product): Json<NewProduct>,
-) -> Result<Json<Product>, (StatusCode, String)> {
+) -> Result<Json<Product>, ApiError> {
     if !sec.roles.iter().any(|r| matches!(r, Role::Admin | Role::Manager)) {
-        return Err((StatusCode::FORBIDDEN, "missing required role".into()));
+        return Err(ApiError::ForbiddenMissingRole { role: "Manager", trace_id: sec.trace_id });
     }
     let tenant_id = sec.tenant_id;
     let actor = AuditActor { id: sec.actor.id, name: sec.actor.name.clone(), email: sec.actor.email.clone() };
@@ -207,8 +208,8 @@ pub async fn create_product(
         .bind(true)
         .bind(image)
         .fetch_one(&state.db)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+    .await
+    .map_err(|e| ApiError::internal(e, sec.trace_id))?;
 
     let changes = json!({
         "after": product_to_value(&product),
@@ -241,7 +242,7 @@ pub async fn create_product(
 pub async fn list_products(
     State(state): State<AppState>,
     SecurityCtxExtractor(sec): SecurityCtxExtractor,
-) -> Result<Json<Vec<Product>>, (StatusCode, String)> {
+) -> Result<Json<Vec<Product>>, ApiError> {
     let tenant_id = sec.tenant_id;
 
     let products = query_as::<_, Product>(
@@ -250,12 +251,7 @@ pub async fn list_products(
     .bind(tenant_id)
     .fetch_all(&state.db)
     .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Database error: {}", e),
-        )
-    })?;
+    .map_err(|e| ApiError::internal(e, sec.trace_id))?;
 
     Ok(Json(products))
 }
@@ -264,9 +260,9 @@ pub async fn delete_product(
     State(state): State<AppState>,
     SecurityCtxExtractor(sec): SecurityCtxExtractor,
     Path(product_id): axum::extract::Path<Uuid>,
-) -> Result<StatusCode, (StatusCode, String)> {
+) -> Result<StatusCode, ApiError> {
     if !sec.roles.iter().any(|r| matches!(r, Role::Admin | Role::Manager)) {
-        return Err((StatusCode::FORBIDDEN, "missing required role".into()));
+        return Err(ApiError::ForbiddenMissingRole { role: "Manager", trace_id: sec.trace_id });
     }
     let tenant_id = sec.tenant_id;
     let actor = AuditActor { id: sec.actor.id, name: sec.actor.name.clone(), email: sec.actor.email.clone() };
@@ -278,15 +274,10 @@ pub async fn delete_product(
     .bind(tenant_id)
     .fetch_optional(&state.db)
     .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Database error: {}", e),
-        )
-    })?;
+    .map_err(|e| ApiError::internal(e, sec.trace_id))?;
     let existing = match existing {
         Some(product) => product,
-        None => return Err((StatusCode::NOT_FOUND, "Product not found".into())),
+        None => return Err(ApiError::NotFound { code: "product_not_found", trace_id: sec.trace_id }),
     };
 
     let result = query("DELETE FROM products WHERE id = $1 AND tenant_id = $2")
@@ -294,15 +285,10 @@ pub async fn delete_product(
         .bind(tenant_id)
         .execute(&state.db)
         .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Database error: {}", e),
-            )
-        })?;
+        .map_err(|e| ApiError::internal(e, sec.trace_id))?;
 
     if result.rows_affected() == 0 {
-        return Err((StatusCode::NOT_FOUND, "Product not found".into()));
+        return Err(ApiError::NotFound { code: "product_not_found", trace_id: sec.trace_id });
     }
 
     let changes = json!({
@@ -352,9 +338,9 @@ pub async fn list_product_audit(
     SecurityCtxExtractor(sec): SecurityCtxExtractor,
     Path(product_id): axum::extract::Path<Uuid>,
     Query(params): Query<ProductAuditQuery>,
-) -> Result<Json<Vec<ProductAuditEntry>>, (StatusCode, String)> {
+) -> Result<Json<Vec<ProductAuditEntry>>, ApiError> {
     if !sec.roles.iter().any(|r| matches!(r, Role::Admin | Role::Manager)) {
-        return Err((StatusCode::FORBIDDEN, "missing required role".into()));
+        return Err(ApiError::ForbiddenMissingRole { role: "Manager", trace_id: sec.trace_id });
     }
     let tenant_id = sec.tenant_id;
 
@@ -377,12 +363,7 @@ pub async fn list_product_audit(
     .bind(limit)
     .fetch_all(&state.db)
     .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Database error: {}", e),
-        )
-    })?;
+    .map_err(|e| ApiError::internal(e, sec.trace_id))?;
 
     Ok(Json(entries))
 }

@@ -46,7 +46,8 @@ Status: Planned | In-Progress | Done | Blocked | Deferred
 | TA-ROL-3 | Apply SecurityCtxExtractor to payment-service | ROL | Planned | TA-FND-1 | Pre-req payment intent model |
 | TA-ROL-4 | Apply SecurityCtxExtractor to customer-service | ROL | Planned | TA-FND-1 | Remove per-handler tenant parsing |
 | TA-ROL-5 | Apply SecurityCtxExtractor to integration-gateway | ROL | Planned | TA-FND-1 | Propagate trace & roles downstream |
-| TA-FND-3 | Unified auth error JSON shape | FND | Planned | TA-FND-1 | {code,missing_role,trace_id} |
+| TA-FND-3 | Unified auth error JSON shape | FND | Done | TA-FND-1 | Implemented auth_error module returning {code,missing_role,trace_id}; integrated into product & audit handlers + test (auth_error_shape). |
+| TA-FND-4 | Cross-service unified HTTP error envelope | FND | In-Progress | TA-FND-3 | Shared crate in place. Product-service migrated (green). Inventory-service handlers + test migrated (Kafka-gated tests green). Next: roll out to remaining services & add error metrics layer. |
 | TA-AUD-1 | Buffered AuditProducer (async channel) | AUD | Done | TA-FND-2 | Integrated in product & order services |
 | TA-OPS-1 | Metrics: queue length & emit failures | OPS | Done | TA-AUD-1 | Prometheus /internal/metrics + JSON legacy endpoint (deprecate after dashboards) |
 | TA-AUD-2 | Audit consumer + Postgres read model | AUD | Done | TA-AUD-1 | Kafka->PG service, lag & latency histogram, failed counter, last ingest timestamp, optional batching |

@@ -11,9 +11,9 @@ use axum::{
 use common_auth::{JwtConfig, JwtVerifier};
 use common_money::log_rounding_mode_once;
 use futures::StreamExt;
-use rdkafka::consumer::{Consumer, StreamConsumer};
-use rdkafka::producer::FutureProducer;
-use rdkafka::Message;
+#[cfg(feature = "kafka")] use rdkafka::consumer::{Consumer, StreamConsumer};
+#[cfg(feature = "kafka")] use rdkafka::producer::FutureProducer;
+#[cfg(feature = "kafka")] use rdkafka::Message;
 use serde::Deserialize;
 use sqlx::{PgPool, Row};
 use prometheus::{Encoder, TextEncoder};
@@ -23,6 +23,7 @@ use tokio::net::TcpListener;
 use tokio::time::{interval, MissedTickBehavior};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tracing::{debug, info, warn};
+use inventory_service::DEFAULT_THRESHOLD; // import shared constant
 use uuid::Uuid;
 
 mod inventory_handlers;
@@ -32,7 +33,8 @@ use reservation_handlers::{create_reservation, release_reservation};
 mod location_handlers;
 use location_handlers::list_locations;
 
-pub(crate) const DEFAULT_THRESHOLD: i32 = 5;
+// (Removed placeholder error metrics layer; will reintroduce with proper implementation later)
+
 pub(crate) const DEFAULT_RESERVATION_TTL_SECS: i64 = 900; // 15 minutes
 
 #[derive(Deserialize)]
@@ -71,17 +73,17 @@ struct PaymentCompletedEvent {
 
 #[derive(Clone)]
 pub struct AppState {
-    pub(crate) db: PgPool,
-    pub(crate) jwt_verifier: Arc<JwtVerifier>,
+    pub db: PgPool,
+    pub jwt_verifier: Arc<JwtVerifier>,
     #[allow(dead_code)]
-    pub(crate) multi_location_enabled: bool,
+    pub multi_location_enabled: bool,
     #[allow(dead_code)]
-    pub(crate) reservation_default_ttl: Duration,
+    pub reservation_default_ttl: Duration,
     #[allow(dead_code)]
-    pub(crate) reservation_expiry_sweep: Duration,
-    pub(crate) dual_write_enabled: bool,
-    pub(crate) kafka_producer: FutureProducer,
-    pub(crate) metrics: Arc<InventoryMetrics>,
+    pub reservation_expiry_sweep: Duration,
+    pub dual_write_enabled: bool,
+    #[cfg(feature = "kafka")] pub kafka_producer: FutureProducer,
+    pub metrics: Arc<InventoryMetrics>,
 }
 
 // Metrics implementation now provided by common-observability crate.
@@ -123,6 +125,7 @@ async fn main() -> anyhow::Result<()> {
     let jwt_verifier = build_jwt_verifier_from_env().await?;
     spawn_jwks_refresh(jwt_verifier.clone());
 
+    #[cfg(feature = "kafka")]
     let consumer: StreamConsumer = rdkafka::ClientConfig::new()
         .set(
             "bootstrap.servers",
@@ -132,6 +135,7 @@ async fn main() -> anyhow::Result<()> {
         .set("enable.auto.commit", "true")
         .create()
         .expect("failed to create kafka consumer");
+    #[cfg(feature = "kafka")]
     consumer.subscribe(&[
         "order.completed",
         "order.voided",
@@ -139,6 +143,7 @@ async fn main() -> anyhow::Result<()> {
         "product.created",
     ])?;
 
+    #[cfg(feature = "kafka")]
     let producer: FutureProducer = rdkafka::ClientConfig::new()
         .set(
             "bootstrap.servers",
@@ -175,7 +180,7 @@ async fn main() -> anyhow::Result<()> {
         reservation_default_ttl: reservation_default_ttl,
         reservation_expiry_sweep: reservation_expiry_sweep,
         dual_write_enabled,
-        kafka_producer: producer.clone(),
+        #[cfg(feature = "kafka")] kafka_producer: producer.clone(),
         metrics: metrics.clone(),
     };
 
@@ -213,32 +218,36 @@ async fn main() -> anyhow::Result<()> {
         .with_state(state.clone())
         .layer(cors);
 
-    let db_for_consumer = db_pool.clone();
-    let multi_loc_for_consumer = state.multi_location_enabled;
-    tokio::spawn(async move {
-        let mut stream = consumer.stream();
-        while let Some(message) = stream.next().await {
-            match message {
-                Ok(m) => {
-                    let topic = m.topic();
-                    if let Some(Ok(text)) = m.payload_view::<str>() {
-                        if topic == "order.completed" {
-                            handle_order_completed(text, &db_for_consumer, &producer, multi_loc_for_consumer).await;
-                        } else if topic == "order.voided" {
-                            handle_order_voided(text, &db_for_consumer).await;
-                        } else if topic == "product.created" {
-                            handle_product_created(text, &db_for_consumer).await;
-                        } else if topic == "payment.completed" {
-                            if let Ok(evt) = serde_json::from_str::<PaymentCompletedEvent>(text) {
-                                tracing::debug!(order_id = %evt.order_id, tenant_id = %evt.tenant_id, amount = evt.amount, "Payment completed event received (no-op for inventory)");
+    #[cfg(feature = "kafka")]
+    {
+        let db_for_consumer = db_pool.clone();
+        let multi_loc_for_consumer = state.multi_location_enabled;
+        let producer = producer.clone();
+        tokio::spawn(async move {
+            let mut stream = consumer.stream();
+            while let Some(message) = stream.next().await {
+                match message {
+                    Ok(m) => {
+                        let topic = m.topic();
+                        if let Some(Ok(text)) = m.payload_view::<str>() {
+                            if topic == "order.completed" {
+                                handle_order_completed(text, &db_for_consumer, &producer, multi_loc_for_consumer).await;
+                            } else if topic == "order.voided" {
+                                handle_order_voided(text, &db_for_consumer).await;
+                            } else if topic == "product.created" {
+                                handle_product_created(text, &db_for_consumer).await;
+                            } else if topic == "payment.completed" {
+                                if let Ok(evt) = serde_json::from_str::<PaymentCompletedEvent>(text) {
+                                    tracing::debug!(order_id = %evt.order_id, tenant_id = %evt.tenant_id, amount = evt.amount, "Payment completed event received (no-op for inventory)");
+                                }
                             }
                         }
                     }
+                    Err(err) => tracing::error!(?err, "Kafka error"),
                 }
-                Err(err) => tracing::error!(?err, "Kafka error"),
             }
-        }
-    });
+        });
+    }
 
     // Spawn reservation expiration sweeper
     spawn_reservation_sweeper(state.clone());
@@ -256,6 +265,7 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "kafka")]
 async fn handle_order_completed(text: &str, db: &PgPool, producer: &FutureProducer, multi_location_enabled: bool) {
     match serde_json::from_str::<OrderCompletedEvent>(text) {
         Ok(event) => {
@@ -408,6 +418,7 @@ async fn handle_order_completed(text: &str, db: &PgPool, producer: &FutureProduc
                 return;
             }
 
+            #[cfg(feature = "kafka")]
             for (product_id, quantity, threshold) in alerts {
                 let alert = serde_json::json!({
                     "product_id": product_id,
@@ -573,6 +584,7 @@ async fn handle_order_voided(text: &str, db: &PgPool) {
     }
 }
 
+#[cfg(feature = "kafka")]
 async fn handle_product_created(text: &str, db: &PgPool) {
     match serde_json::from_str::<ProductCreatedEvent>(text) {
         Ok(event) => {
@@ -735,6 +747,7 @@ async fn expire_reservations(state: &AppState) -> anyhow::Result<()> {
                 "quantity": quantity,
                 "expired_at_epoch": expired_at,
             });
+            #[cfg(feature = "kafka")]
             if let Err(err) = state.kafka_producer.send(
                 rdkafka::producer::FutureRecord::to("inventory.reservation.expired")
                     .payload(&evt.to_string())
@@ -753,7 +766,7 @@ async fn expire_reservations(state: &AppState) -> anyhow::Result<()> {
                 "quantity": quantity,
                 "expired_at_epoch": expired_at,
             });
-            let _ = state.kafka_producer.send(
+            #[cfg(feature = "kafka")] let _ = state.kafka_producer.send(
                 rdkafka::producer::FutureRecord::to("audit.events")
                     .payload(&audit_evt.to_string())
                     .key(&tenant_id.to_string()),

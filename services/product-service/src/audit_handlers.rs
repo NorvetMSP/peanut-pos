@@ -1,4 +1,4 @@
-use axum::{extract::{Query, State}, http::StatusCode, Json};
+use axum::{extract::{Query, State}, Json};
 use serde::Deserialize;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use once_cell::sync::Lazy;
 use std::env;
 use crate::view_redaction::apply_redaction;
+use crate::ApiError;
 
 // Global counter for view-layer redactions (TA-AUD-7)
 static VIEW_REDACTIONS_TOTAL: AtomicU64 = AtomicU64::new(0);
@@ -67,10 +68,10 @@ pub async fn audit_search(
     SecurityCtxExtractor(sec): SecurityCtxExtractor,
     State(state): State<AppState>,
     Query(q): Query<AuditQuery>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     // Role enforcement (Admin or Support allowed)
     if let Err(_)= ensure_any_role(&sec, &[Role::Admin, Role::Support]) {
-        return Err((StatusCode::FORBIDDEN, "forbidden".into()));
+        return Err(ApiError::Forbidden { trace_id: sec.trace_id });
     }
 
     let mut limit = q.limit.unwrap_or(50);
@@ -97,14 +98,14 @@ pub async fn audit_search(
         if let Ok(ts) = chrono::DateTime::parse_from_rfc3339(before) { 
             builder.push(" AND (occurred_at < "); builder.push_bind(ts); builder.push(" OR (occurred_at = "); builder.push_bind(ts); if let Some(eid) = q.before_event_id { builder.push(" AND event_id < "); builder.push_bind(eid); } builder.push(") )");
         }
-        else { return Err((StatusCode::BAD_REQUEST, "invalid before timestamp".into())); }
+    else { return Err(ApiError::BadRequest { code: "invalid_before_timestamp", trace_id: sec.trace_id, message: None }); }
     }
 
     builder.push(" ORDER BY occurred_at DESC, event_id DESC LIMIT ");
     builder.push_bind(limit);
 
     let pool: &PgPool = &state.db;
-    let rows = builder.build().fetch_all(pool).await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let rows = builder.build().fetch_all(pool).await.map_err(|e| ApiError::internal(e, sec.trace_id))?;
 
     let mut data = Vec::with_capacity(rows.len());
     let include_redacted = q.include_redacted.unwrap_or(false);
