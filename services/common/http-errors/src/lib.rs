@@ -62,3 +62,36 @@ impl IntoResponse for ApiError {
 }
 
 pub type ApiResult<T> = Result<T, ApiError>;
+
+#[cfg(any(test, feature = "test-helpers"))]
+pub mod test_helpers {
+    use super::*;
+    use axum::body::to_bytes;
+    use axum::response::IntoResponse;
+
+    // Simple helper (not a macro) to assert error shape from an ApiError directly.
+    pub async fn assert_error_shape(err: ApiError, expected_code: &str) {
+        let resp = err.into_response();
+        let status = resp.status();
+        let headers = resp.headers().clone();
+        let body_bytes = to_bytes(resp.into_body(), 1024 * 64).await.expect("read body");
+        let text = String::from_utf8(body_bytes.to_vec()).expect("utf8 body");
+        assert!(text.contains(&format!("\"code\":\"{}\"", expected_code)), "body missing expected code: {} in {}", expected_code, text);
+        assert!(headers.get("X-Error-Code").is_some(), "missing X-Error-Code header");
+        if expected_code == "internal_error" {
+            assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    }
+}
+
+/// Test-only assertion macro for validating an ApiError's rendered response structure.
+/// Usage:
+/// assert_api_error!(err, "missing_role");
+#[cfg(any(test, feature = "test-helpers"))]
+#[macro_export]
+macro_rules! assert_api_error {
+    ($err:expr, $code:expr) => {{
+        let err: $crate::ApiError = $err; // type ascription if inference ambiguous
+        $crate::test_helpers::assert_error_shape(err, $code).await;
+    }};
+}

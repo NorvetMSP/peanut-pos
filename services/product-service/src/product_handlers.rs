@@ -8,15 +8,15 @@ use axum::{
 use chrono::{DateTime, Utc};
 // AuthContext no longer required in handlers; SecurityCtxExtractor provides actor & tenant.
 use common_security::{SecurityCtxExtractor, Role};
-use common_audit::AuditActor as SharedAuditActor;
-use rdkafka::producer::FutureRecord;
+#[cfg(feature = "kafka")] use common_audit::AuditActor as SharedAuditActor;
+#[cfg(feature = "kafka")] use rdkafka::producer::FutureRecord;
 use serde::ser::{SerializeStruct, Serializer};
 use serde::{Deserialize, Serialize};
 use bigdecimal::BigDecimal;
 use common_money::{normalize_scale, Money};
 use serde_json::{json, Value};
 use sqlx::{query, query_as, PgPool};
-use std::{env, time::Duration};
+use std::env;
 use uuid::Uuid;
 
 const INVENTORY_DEFAULT_THRESHOLD: i32 = 5;
@@ -58,6 +58,7 @@ pub struct AuditActor { // local representation for legacy DB audit table
 
 // Legacy role constant removed; all role checks now rely on Role enum via SecurityCtxExtractor.
 
+#[cfg(feature = "kafka")]
 fn shared(actor: &AuditActor) -> SharedAuditActor {
     SharedAuditActor { id: actor.id, name: actor.name.clone(), email: actor.email.clone() }
 }
@@ -152,6 +153,7 @@ pub async fn update_product(
         "after": product_to_value(&product),
     });
     record_product_audit(&state.db, &actor, product.id, tenant_id, "updated", changes.clone()).await;
+    #[cfg(feature = "kafka")]
     if let Some(audit) = &state.audit_producer { let _ = audit.emit(tenant_id, shared(&actor), "product", Some(product.id), "updated", "product-service", common_audit::AuditSeverity::Info, None, changes, json!({"source":"product-service"})).await; }
     Ok(Json(product))
 }
@@ -215,14 +217,17 @@ pub async fn create_product(
         "after": product_to_value(&product),
     });
     record_product_audit(&state.db, &actor, product.id, tenant_id, "created", changes.clone()).await;
+    #[cfg(feature = "kafka")]
     if let Some(audit) = &state.audit_producer { let _ = audit.emit(tenant_id, shared(&actor), "product", Some(product.id), "created", "product-service", common_audit::AuditSeverity::Info, None, json!({"after": product_to_value(&product)}), json!({"source":"product-service"})).await; }
 
+    #[cfg(feature = "kafka")]
     let event = serde_json::json!({
         "product_id": product.id,
         "tenant_id": tenant_id,
         "initial_quantity": 0,
         "threshold": INVENTORY_DEFAULT_THRESHOLD,
     });
+    #[cfg(feature = "kafka")]
     if let Err(err) = state
         .kafka_producer
         .send(
@@ -295,12 +300,15 @@ pub async fn delete_product(
         "before": product_to_value(&existing),
     });
     record_product_audit(&state.db, &actor, existing.id, tenant_id, "deleted", changes.clone()).await;
+    #[cfg(feature = "kafka")]
     if let Some(audit) = &state.audit_producer { let _ = audit.emit(tenant_id, shared(&actor), "product", Some(existing.id), "deleted", "product-service", common_audit::AuditSeverity::Info, None, json!({"before": product_to_value(&existing)}), json!({"source":"product-service"})).await; }
 
+    #[cfg(feature = "kafka")]
     let event = serde_json::json!({
         "product_id": product_id,
         "tenant_id": tenant_id,
     });
+    #[cfg(feature = "kafka")]
     if let Err(err) = state
         .kafka_producer
         .send(

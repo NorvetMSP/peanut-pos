@@ -1,4 +1,4 @@
-use prometheus::{IntCounter, Histogram, Registry};
+use prometheus::{IntCounter, Histogram, Registry, IntCounterVec};
 
 #[derive(Clone)]
 pub struct InventoryMetrics {
@@ -8,6 +8,7 @@ pub struct InventoryMetrics {
     pub audit_emit_failures: IntCounter,
     pub sweeper_duration_seconds: Histogram,
     pub heal_latency_seconds: Histogram,
+    pub http_errors_total: IntCounterVec,
 }
 
 impl InventoryMetrics {
@@ -37,11 +38,19 @@ impl InventoryMetrics {
                 "Time spent attempting to heal a dual-write divergence"
             ).buckets(vec![0.001,0.005,0.01,0.05,0.1,0.25,0.5])
         ).unwrap();
+        let http_errors_total = IntCounterVec::new(
+            prometheus::Opts::new(
+                "http_errors_total",
+                "Count of HTTP error responses emitted (status >= 400)"
+            ),
+            &["service", "code", "status"]
+        ).unwrap();
         let _ = registry.register(Box::new(dual_write_divergence.clone()));
         let _ = registry.register(Box::new(reservation_expired.clone()));
         let _ = registry.register(Box::new(audit_emit_failures.clone()));
         let _ = registry.register(Box::new(sweeper_duration_seconds.clone()));
         let _ = registry.register(Box::new(heal_latency_seconds.clone()));
-        InventoryMetrics { registry, dual_write_divergence, reservation_expired, audit_emit_failures, sweeper_duration_seconds, heal_latency_seconds }
+        let _ = registry.register(Box::new(http_errors_total.clone()));
+        InventoryMetrics { registry, dual_write_divergence, reservation_expired, audit_emit_failures, sweeper_duration_seconds, heal_latency_seconds, http_errors_total }
     }
 }

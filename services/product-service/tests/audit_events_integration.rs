@@ -1,23 +1,25 @@
 //! Integration test for /audit/events redaction behavior.
 //! Requires TEST_AUDIT_DB_URL env var pointing to a Postgres database.
-use axum::{Router, routing::get};
-use product_service::audit_handlers::audit_search;
-use product_service::app_state::AppState;
-use common_auth::{JwtConfig, JwtVerifier};
-use sqlx::PgPool;
-use std::{env, sync::Arc};
-use tower::util::ServiceExt; // for oneshot
-use uuid::Uuid;
-use hyper::Request;
-use axum::body::Body;
-use http_body_util::BodyExt; // for collect
+#[cfg(feature = "kafka")] use axum::{Router, routing::get};
+#[cfg(feature = "kafka")] use product_service::audit_handlers::audit_search;
+#[cfg(feature = "kafka")] use product_service::app_state::AppState;
+#[cfg(feature = "kafka")] use common_auth::{JwtConfig, JwtVerifier};
+#[cfg(feature = "kafka")] use sqlx::PgPool;
+#[cfg(feature = "kafka")] use std::{env, sync::Arc};
+#[cfg(feature = "kafka")] use tower::util::ServiceExt; // for oneshot
+#[cfg(feature = "kafka")] use uuid::Uuid;
+#[cfg(feature = "kafka")] use hyper::Request;
+#[cfg(feature = "kafka")] use axum::body::Body;
+#[cfg(feature = "kafka")] use http_body_util::BodyExt; // for collect
 
 // Minimal stub to build a JwtVerifier (unused by SecurityCtxExtractor but required in AppState)
+#[cfg(feature = "kafka")]
 async fn dummy_verifier() -> Arc<JwtVerifier> {
     let cfg = JwtConfig::new(String::from("http://example/issuer"), String::from("aud"));
     Arc::new(JwtVerifier::new(cfg))
 }
 
+#[cfg(feature = "kafka")]
 #[tokio::test]
 async fn audit_events_redaction_flow() {
     let db_url = match env::var("TEST_AUDIT_DB_URL") { Ok(v) => v, Err(_) => { eprintln!("skipping: TEST_AUDIT_DB_URL not set"); return; } };
@@ -75,7 +77,7 @@ async fn audit_events_redaction_flow() {
     env::set_var("AUDIT_VIEW_REDACTION_PATHS", "customer.email,audit.ip");
 
     // Build dummy Kafka producer (won't be used in this test) + audit buffer
-    use rdkafka::producer::FutureProducer;
+    #[cfg(feature = "kafka")] use rdkafka::producer::FutureProducer;
     let kafka: FutureProducer = rdkafka::ClientConfig::new()
         .set("bootstrap.servers","localhost:9092")
         .set("message.timeout.ms","5000")

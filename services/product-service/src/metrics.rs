@@ -39,6 +39,16 @@ pub static AUDIT_VIEW_REDACTIONS_LABELLED: Lazy<IntCounterVec> = Lazy::new(|| {
     v
 });
 
+// Unified HTTP error counter (labels: service, code, status)
+pub static HTTP_ERRORS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    let v = IntCounterVec::new(
+        prometheus::Opts::new("http_errors_total", "Count of HTTP error responses emitted (status >= 400)"),
+        &["service", "code", "status"],
+    ).unwrap();
+    REGISTRY.register(Box::new(v.clone())).ok();
+    v
+});
+
 // Last observed raw values to convert absolute snapshots into Prometheus counter deltas
 static LAST_BUFFER_EMITTED: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 static LAST_BUFFER_DROPPED: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));

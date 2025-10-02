@@ -1,6 +1,6 @@
-use axum::body::to_bytes;
 use axum::response::IntoResponse; // bring trait into scope
 use axum::extract::State;
+use http_body_util::BodyExt; // for collect()
 use uuid::Uuid;
 use sqlx::postgres::PgPoolOptions;
 use std::sync::Arc;
@@ -47,8 +47,9 @@ async fn list_inventory_missing_tenant_header_error_shape() {
     let err = result.expect_err("expected error");
     let resp = err.into_response();
     assert_eq!(resp.status(), axum::http::StatusCode::BAD_REQUEST);
-    let bytes = to_bytes(resp.into_body(), 1024).await.unwrap();
-    let text = String::from_utf8(bytes.to_vec()).unwrap();
+    // Collect the body (hyper 1.0 pattern via http-body-util)
+    let collected = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8(collected.to_vec()).unwrap();
     assert!(text.contains("missing_tenant_header"));
     assert!(text.contains("code"));
 }

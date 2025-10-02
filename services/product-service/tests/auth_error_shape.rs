@@ -10,6 +10,10 @@ use uuid::Uuid;
 use hyper::Request;
 use axum::body::Body;
 use http_body_util::BodyExt;
+#[cfg(feature = "kafka")] use rdkafka::producer::FutureProducer;
+#[cfg(not(feature = "kafka"))]
+#[test]
+fn skipped_auth_error_shape_without_kafka() { eprintln!("skipped auth_error_shape without kafka feature"); }
 
 async fn dummy_verifier() -> Arc<JwtVerifier> {
     // Avoid ambiguous Into<String> inference by passing plain &str literals
@@ -20,7 +24,10 @@ async fn dummy_verifier() -> Arc<JwtVerifier> {
 async fn unified_auth_error_shape() {
     let db_url = match env::var("TEST_AUDIT_DB_URL") { Ok(v) => v, Err(_) => { eprintln!("skipping: TEST_AUDIT_DB_URL not set"); return; } };
     let pool = PgPool::connect(&db_url).await.unwrap();
-    let kafka: rdkafka::producer::FutureProducer = rdkafka::ClientConfig::new().set("bootstrap.servers","localhost:9092").create().unwrap();
+    #[cfg(feature = "kafka")]
+    let kafka: FutureProducer = rdkafka::ClientConfig::new().set("bootstrap.servers","localhost:9092").create().unwrap();
+    #[cfg(not(feature = "kafka"))]
+    let kafka = (); // placeholder
     let verifier = dummy_verifier().await;
     let state = AppState::new(pool, kafka, verifier, None);
 
@@ -38,8 +45,6 @@ async fn unified_auth_error_shape() {
     assert_eq!(resp.status(), axum::http::StatusCode::FORBIDDEN);
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let text = String::from_utf8(body.to_vec()).unwrap();
-    // Expect JSON with code and missing_role
     assert!(text.contains("\"code\":\"missing_role\""));
-    // Should include the missing_role field specifying Manager (configured in handler conversion)
     assert!(text.contains("Manager"));
 }

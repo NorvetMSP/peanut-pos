@@ -10,7 +10,7 @@ use axum::{
 };
 use common_auth::{JwtConfig, JwtVerifier};
 use common_money::log_rounding_mode_once;
-use rdkafka::producer::FutureProducer;
+#[cfg(feature = "kafka")] use rdkafka::producer::FutureProducer;
 use sqlx::PgPool;
 use std::{env, net::SocketAddr, sync::Arc};
 use tokio::{
@@ -28,25 +28,50 @@ mod metrics;
 use metrics::{
     update_buffer_metrics,
     update_redaction_counters,
-    gather as gather_metrics
+    gather as gather_metrics,
+    HTTP_ERRORS_TOTAL,
 };
+use axum::middleware;
+use axum::body::Body;
+
+async fn error_metrics_mw(
+    req: axum::http::Request<Body>,
+    next: middleware::Next,
+) -> axum::response::Response {
+    let resp = next.run(req).await;
+    let status = resp.status();
+    if status.as_u16() >= 400 {
+        let code = resp
+            .headers()
+            .get("x-error-code")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("unknown");
+        HTTP_ERRORS_TOTAL
+            .with_label_values(&["product-service", code, status.as_str()])
+            .inc();
+    }
+    resp
+}
 use product_service::app_state::AppState;
 
 // Legacy JSON metrics (will be deprecated once dashboards switch to Prometheus scrape)
 async fn audit_metrics(State(state): State<AppState>) -> axum::Json<serde_json::Value> {
-    if let Some(buf) = state.audit_buffer() {
-        let snap = buf.snapshot();
-        axum::Json(serde_json::json!({
-            "queued": snap.queued,
-            "emitted": snap.emitted,
-            "dropped": snap.dropped
-        }))
-    } else {
-        axum::Json(serde_json::json!({"queued":0,"emitted":0,"dropped":0}))
+    #[cfg(feature = "kafka")]
+    {
+        if let Some(buf) = state.audit_buffer() {
+            let snap = buf.snapshot();
+            return axum::Json(serde_json::json!({
+                "queued": snap.queued,
+                "emitted": snap.emitted,
+                "dropped": snap.dropped
+            }));
+        }
     }
+    axum::Json(serde_json::json!({"queued":0,"emitted":0,"dropped":0}))
 }
 
 async fn metrics(State(state): State<AppState>) -> (StatusCode, String) {
+    #[cfg(feature = "kafka")]
     if let Some(buf) = state.audit_buffer() {
         let snap = buf.snapshot();
         update_buffer_metrics(snap.queued as u64, snap.emitted as u64, snap.dropped as u64);
@@ -81,6 +106,7 @@ async fn main() -> anyhow::Result<()> {
     migrator.set_ignore_missing(true);
     migrator.run(&db).await?;
     // Initialize Kafka producer for downstream events
+    #[cfg(feature = "kafka")]
     let kafka_producer: FutureProducer = rdkafka::ClientConfig::new()
         .set(
             "bootstrap.servers",
@@ -93,10 +119,17 @@ async fn main() -> anyhow::Result<()> {
     spawn_jwks_refresh(jwt_verifier.clone());
 
     // Build application state
+    #[cfg(feature = "kafka")]
     let audit_topic = env::var("AUDIT_TOPIC").unwrap_or_else(|_| "audit.events".to_string());
+    #[cfg(feature = "kafka")]
     let base = common_audit::AuditProducer::new(common_audit::KafkaAuditSink::new(kafka_producer.clone(), common_audit::AuditProducerConfig { topic: audit_topic.clone() }));
+    #[cfg(feature = "kafka")]
     let audit_producer = Some(Arc::new(common_audit::BufferedAuditProducer::new(base, 1024)));
-    tracing::info!(topic = %audit_topic, "Audit producer initialized");
+    #[cfg(feature = "kafka")] tracing::info!(topic = %audit_topic, "Audit producer initialized");
+    #[cfg(not(feature = "kafka"))]
+    let audit_producer: Option<Arc<()>> = None;
+    #[cfg(not(feature = "kafka"))]
+    let kafka_producer = (); // placeholder when kafka disabled
     let state = AppState::new(db, kafka_producer, jwt_verifier, audit_producer);
 
     let allowed_origins = [
@@ -147,6 +180,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/internal/audit_metrics", get(audit_metrics))
         .route("/internal/metrics", get(metrics))
         .with_state(state)
+        .layer(middleware::from_fn(error_metrics_mw))
         .layer(cors);
     // Start server
     let host = env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string());

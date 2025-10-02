@@ -7,14 +7,15 @@ use axum::{
     },
     routing::{delete, get, post},
     Router,
+    middleware,
+    body::Body,
 };
 use common_auth::{JwtConfig, JwtVerifier};
 use common_money::log_rounding_mode_once;
-use futures::StreamExt;
+#[cfg(feature = "kafka")] use futures::StreamExt; // only needed when kafka feature enabled
 #[cfg(feature = "kafka")] use rdkafka::consumer::{Consumer, StreamConsumer};
 #[cfg(feature = "kafka")] use rdkafka::producer::FutureProducer;
 #[cfg(feature = "kafka")] use rdkafka::Message;
-use serde::Deserialize;
 use sqlx::{PgPool, Row};
 use prometheus::{Encoder, TextEncoder};
 use common_observability::InventoryMetrics;
@@ -38,26 +39,26 @@ use location_handlers::list_locations;
 pub(crate) const DEFAULT_RESERVATION_TTL_SECS: i64 = 900; // 15 minutes
 
 #[derive(Deserialize)]
-struct OrderCompletedEvent {
+#[cfg(feature = "kafka")] struct OrderCompletedEvent {
     order_id: Uuid,
     tenant_id: Uuid,
     items: Vec<OrderItem>,
 }
 
 #[derive(Deserialize)]
-struct OrderVoidedEvent {
+#[cfg(feature = "kafka")] struct OrderVoidedEvent {
     order_id: Uuid,
     tenant_id: Uuid,
 }
 
 #[derive(Deserialize)]
-struct OrderItem {
+#[cfg(feature = "kafka")] struct OrderItem {
     product_id: Uuid,
     quantity: i32,
 }
 
 #[derive(Deserialize, Debug)]
-struct ProductCreatedEvent {
+#[cfg(feature = "kafka")] struct ProductCreatedEvent {
     product_id: Uuid,
     tenant_id: Uuid,
     initial_quantity: Option<i32>,
@@ -65,7 +66,7 @@ struct ProductCreatedEvent {
 }
 
 #[derive(Deserialize, Debug)]
-struct PaymentCompletedEvent {
+#[cfg(feature = "kafka")] struct PaymentCompletedEvent {
     order_id: Uuid,
     tenant_id: Uuid,
     amount: f64,
@@ -205,6 +206,28 @@ async fn main() -> anyhow::Result<()> {
             HeaderName::from_static("x-tenant-id"),
         ]);
 
+    // Error metrics middleware using dedicated state (Arc<InventoryMetrics>) passed via from_fn_with_state.
+    async fn error_metrics_mw(
+        State(metrics): State<Arc<InventoryMetrics>>,
+        req: axum::http::Request<Body>,
+        next: middleware::Next,
+    ) -> axum::response::Response {
+        let resp = next.run(req).await;
+        let status = resp.status();
+        if status.as_u16() >= 400 {
+            let code = resp
+                .headers()
+                .get("x-error-code")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("unknown");
+            metrics
+                .http_errors_total
+                .with_label_values(&["inventory-service", code, status.as_str()])
+                .inc();
+        }
+        resp
+    }
+
     let app = Router::new()
         .route("/healthz", get(health))
         .route("/inventory", get(list_inventory))
@@ -215,7 +238,8 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/locations", get(list_locations))
         .route("/metrics", get(metrics_endpoint))
-        .with_state(state.clone())
+    .with_state(state.clone())
+    .layer(middleware::from_fn_with_state(metrics.clone(), error_metrics_mw))
         .layer(cors);
 
     #[cfg(feature = "kafka")]
@@ -233,7 +257,9 @@ async fn main() -> anyhow::Result<()> {
                             if topic == "order.completed" {
                                 handle_order_completed(text, &db_for_consumer, &producer, multi_loc_for_consumer).await;
                             } else if topic == "order.voided" {
-                                handle_order_voided(text, &db_for_consumer).await;
+                                #[cfg(feature = "kafka")] {
+                                    handle_order_voided(text, &db_for_consumer).await;
+                                }
                             } else if topic == "product.created" {
                                 handle_product_created(text, &db_for_consumer).await;
                             } else if topic == "payment.completed" {
@@ -481,6 +507,7 @@ async fn handle_order_completed(text: &str, db: &PgPool, producer: &FutureProduc
     }
 }
 
+#[cfg(feature = "kafka")]
 async fn handle_order_voided(text: &str, db: &PgPool) {
     match serde_json::from_str::<OrderVoidedEvent>(text) {
         Ok(event) => {
@@ -739,7 +766,7 @@ async fn expire_reservations(state: &AppState) -> anyhow::Result<()> {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs();
-            let evt = serde_json::json!({
+            let _evt = serde_json::json!({
                 "type": "reservation.expired",
                 "tenant_id": tenant_id,
                 "product_id": product_id,
@@ -757,7 +784,7 @@ async fn expire_reservations(state: &AppState) -> anyhow::Result<()> {
                 tracing::error!(?err, tenant_id = %tenant_id, order_id = %order_id, "Failed to emit inventory.reservation.expired");
             }
             // Audit event
-            let audit_evt = serde_json::json!({
+            let _audit_evt = serde_json::json!({
                 "action": "inventory.reservation.expired",
                 "schema_version": 1,
                 "tenant_id": tenant_id,

@@ -16,19 +16,21 @@ thiserror = "1"
 hyper = "1"
 uuid = { version = "1", features = ["v4", "serde"] }
 sqlx = { version = "0.7", features = ["runtime-tokio-native-tls", "postgres", "macros", "migrate", "uuid", "chrono", "bigdecimal"] }
-rdkafka = { version = "0.29", default-features = false, features = ["cmake-build", "tokio", "libz", "libz-static"] }
+rdkafka = { version = "0.29", default-features = false, features = ["cmake-build", "tokio", "libz", "libz-static"], optional = true }
 tower-http = { version = "0.5", features = ["cors"] }
 chrono = { version = "0.4", features = ["serde"] }
 bigdecimal = { version = "0.3", features = ["serde"] }
 common-money = { path = "../common/money" }
-common-audit = { path = "../common/audit", features=["kafka"] }
+common-audit = { path = "../common/audit", features=["kafka"], optional = true }
 common-security = { path = "../common/security" }
 common-http-errors = { path = "../common/http-errors" }
 once_cell = "1"
 prometheus = { version = "0.13", default-features = false, features = ["process"] }
+tower = { version = "0.5", features = ["util"] }
 
 [features]
-# (No explicit offline feature; controlled via SQLX_OFFLINE env var.)
+default = []
+kafka = ["rdkafka", "common-audit"]
 
 [dev-dependencies]
 tower = "0.5"

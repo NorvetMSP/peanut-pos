@@ -192,7 +192,7 @@ pub async fn create_reservation(
     tx.commit().await.map_err(|err| ApiError::internal(err, None))?;
 
     // Emit audit event (best-effort)
-    let event = serde_json::json!({
+    let _event = serde_json::json!({
         "action": "inventory.reservation.created",
         "schema_version": 1,
         "tenant_id": tenant_id,

@@ -1,21 +1,29 @@
-use axum::{routing::get, Router};
-use product_service::audit_handlers::audit_search;
-use product_service::app_state::AppState;
-use common_auth::{JwtConfig, JwtVerifier};
-use sqlx::PgPool;
-use std::{env, sync::Arc};
-use tower::util::ServiceExt;
-use uuid::Uuid;
-use hyper::Request;
-use axum::body::Body;
-use http_body_util::BodyExt; // for collect
+#[cfg(feature = "kafka")] use axum::{routing::get, Router};
+#[cfg(feature = "kafka")] use product_service::audit_handlers::audit_search;
+#[cfg(feature = "kafka")] use product_service::app_state::AppState;
+#[cfg(feature = "kafka")] use common_auth::{JwtConfig, JwtVerifier};
+#[cfg(feature = "kafka")] use sqlx::PgPool;
+#[cfg(feature = "kafka")] use std::{env, sync::Arc};
+#[cfg(feature = "kafka")] use tower::util::ServiceExt;
+#[cfg(feature = "kafka")] use uuid::Uuid;
+#[cfg(feature = "kafka")] use hyper::Request;
+#[cfg(feature = "kafka")] use axum::body::Body;
+#[cfg(feature = "kafka")] use http_body_util::BodyExt; // for collect
+#[cfg(feature = "kafka")]
 use rdkafka::producer::FutureProducer;
+#[cfg(not(feature = "kafka"))]
+#[test]
+fn skipped_without_kafka_feature() {
+    eprintln!("skipped metrics_prometheus tests without kafka feature");
+}
 
+#[cfg(feature = "kafka")]
 async fn dummy_verifier() -> Arc<JwtVerifier> {
     let cfg = JwtConfig::new(String::from("http://issuer"), String::from("aud"));
     Arc::new(JwtVerifier::new(cfg))
 }
 
+#[cfg(feature = "kafka")]
 #[tokio::test]
 async fn prometheus_metrics_exposed() {
     let db_url = match env::var("TEST_AUDIT_DB_URL") { Ok(v) => v, Err(_) => { eprintln!("skipping metrics test: TEST_AUDIT_DB_URL not set"); return; } };

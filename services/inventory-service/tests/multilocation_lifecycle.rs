@@ -1,7 +1,6 @@
 //! Integration test for multi-location reservation lifecycle (create -> expire -> restock).
 //! NOTE: Spins up ephemeral Postgres with testcontainers; requires Docker available.
 
-use uuid::Uuid;
 use reqwest::Client;
 use std::{env, time::Duration};
 use tokio::process::Command;
