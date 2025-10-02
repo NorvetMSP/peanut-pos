@@ -1,5 +1,6 @@
 use axum::extract::{Extension, State};
-use axum::{http::StatusCode, Json};
+use axum::{Json};
+use common_http_errors::{ApiError, ApiResult};
 use rdkafka::producer::{FutureProducer, FutureRecord};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -54,9 +55,9 @@ pub async fn process_payment(
     Extension(tenant_id): Extension<Uuid>,
     forwarded_auth: Option<Extension<ForwardedAuthHeader>>,
     Json(req): Json<PaymentRequest>,
-) -> Result<Json<PaymentResult>, (StatusCode, String)> {
+) -> ApiResult<Json<PaymentResult>> {
     let order_id = Uuid::parse_str(&req.order_id)
-        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid orderId".to_string()))?;
+        .map_err(|_| ApiError::BadRequest { code: "invalid_order_id", trace_id: None, message: Some("Invalid orderId".into()) })?;
 
     if req.method.eq_ignore_ascii_case("crypto") {
         let mut use_stub = std::env::var("COINBASE_STUB_MODE")
@@ -146,7 +147,7 @@ pub async fn process_payment(
                     &reason,
                 )
                 .await;
-                return Err((StatusCode::BAD_GATEWAY, reason));
+                return Err(ApiError::Internal { trace_id: None, message: Some(reason) });
             }
         };
         if !api_resp.status().is_success() {
@@ -159,10 +160,7 @@ pub async fn process_payment(
                 &reason,
             )
             .await;
-            return Err((
-                StatusCode::BAD_GATEWAY,
-                "Failed to create crypto charge".into(),
-            ));
+            return Err(ApiError::Internal { trace_id: None, message: Some("Failed to create crypto charge".into()) });
         }
         let resp_body: serde_json::Value = match api_resp.json().await {
             Ok(body) => body,
@@ -176,7 +174,7 @@ pub async fn process_payment(
                     &reason,
                 )
                 .await;
-                return Err((StatusCode::BAD_GATEWAY, "Invalid Coinbase response".into()));
+                return Err(ApiError::Internal { trace_id: None, message: Some("Invalid Coinbase response".into()) });
             }
         };
         let hosted_url = resp_body
@@ -194,10 +192,7 @@ pub async fn process_payment(
                 &reason,
             )
             .await;
-            return Err((
-                StatusCode::BAD_GATEWAY,
-                "Failed to create crypto charge".into(),
-            ));
+            return Err(ApiError::Internal { trace_id: None, message: Some("Failed to create crypto charge".into()) });
         }
         tracing::info!(order_id = %order_id, hosted_url, "Created Coinbase charge");
         return Ok(Json(PaymentResult {
@@ -230,7 +225,7 @@ pub async fn process_payment(
                     &reason,
                 )
                 .await;
-                return Err((StatusCode::BAD_GATEWAY, reason));
+                return Err(ApiError::Internal { trace_id: None, message: Some(reason) });
             }
         };
         if !pay_resp.status().is_success() {
@@ -243,7 +238,7 @@ pub async fn process_payment(
                 &reason,
             )
             .await;
-            return Err((StatusCode::BAD_GATEWAY, "Payment was declined".into()));
+            return Err(ApiError::Internal { trace_id: None, message: Some("Payment was declined".into()) });
         }
         let _approval =
             pay_resp
@@ -273,10 +268,7 @@ pub async fn process_payment(
         .await
     {
         tracing::error!("Failed to send payment.completed: {:?}", err);
-        return Err((
-            StatusCode::BAD_GATEWAY,
-            "Failed to notify payment completion".into(),
-        ));
+        return Err(ApiError::Internal { trace_id: None, message: Some("Failed to notify payment completion".into()) });
     }
 
     Ok(Json(PaymentResult {
@@ -290,9 +282,9 @@ pub async fn void_payment(
     Extension(tenant_id): Extension<Uuid>,
     forwarded_auth: Option<Extension<ForwardedAuthHeader>>,
     Json(req): Json<PaymentVoidRequest>,
-) -> Result<Json<PaymentResult>, (StatusCode, String)> {
+) -> ApiResult<Json<PaymentResult>> {
     let order_id = Uuid::parse_str(&req.order_id)
-        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid orderId".to_string()))?;
+        .map_err(|_| ApiError::BadRequest { code: "invalid_order_id", trace_id: None, message: Some("Invalid orderId".into()) })?;
 
     if req.method.eq_ignore_ascii_case("card") {
         let pay_svc_url = std::env::var("PAYMENT_SERVICE_URL")
@@ -311,12 +303,12 @@ pub async fn void_payment(
         }
         let pay_resp = pay_request.send().await.map_err(|err| {
             let reason = format!("Payment service error: {err}");
-            (StatusCode::BAD_GATEWAY, reason)
+            ApiError::Internal { trace_id: None, message: Some(reason) }
         })?;
         if !pay_resp.status().is_success() {
             let status = pay_resp.status();
             let reason = format!("Payment void declined (status {status})");
-            return Err((StatusCode::BAD_GATEWAY, reason));
+            return Err(ApiError::Internal { trace_id: None, message: Some(reason) });
         }
     } else if req.method.eq_ignore_ascii_case("crypto") {
         tracing::info!(order_id = %order_id, "Stub crypto void processed");
@@ -329,12 +321,7 @@ pub async fn void_payment(
         amount: req.amount,
         reason: req.reason.clone(),
     };
-    let payload = serde_json::to_string(&pay_event).map_err(|err| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to serialize payment.voided: {err}"),
-        )
-    })?;
+    let payload = serde_json::to_string(&pay_event).map_err(|err| ApiError::Internal { trace_id: None, message: Some(format!("Failed to serialize payment.voided: {err}")) })?;
 
     if let Err(err) = state
         .kafka_producer
@@ -416,7 +403,7 @@ pub(crate) struct Order {
 pub async fn handle_external_order(
     Extension(tenant_id): Extension<Uuid>,
     Json(order): Json<ExternalOrder>,
-) -> Result<Json<Order>, (StatusCode, String)> {
+) -> ApiResult<Json<Order>> {
     let order_svc_url =
         std::env::var("ORDER_SERVICE_URL").unwrap_or_else(|_| "http://localhost:8084".to_string());
     let client = Client::new();
@@ -426,30 +413,16 @@ pub async fn handle_external_order(
         .json(&order)
         .send()
         .await
-        .map_err(|e| {
-            (
-                StatusCode::BAD_GATEWAY,
-                format!("Order service request failed: {}", e),
-            )
-        })?;
+        .map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Order service request failed: {}", e)) })?;
     if !resp.status().is_success() {
         let code = if resp.status().is_client_error() {
-            StatusCode::BAD_REQUEST
+            ApiError::BadRequest { code: "order_service_error", trace_id: None, message: Some(format!("Order service error status {}", resp.status())) }
         } else {
-            StatusCode::BAD_GATEWAY
+            ApiError::Internal { trace_id: None, message: Some(format!("Order service error status {}", resp.status())) }
         };
-        let err_text = resp
-            .text()
-            .await
-            .unwrap_or_else(|_| "Unknown error".to_string());
-        return Err((code, format!("Order service error: {}", err_text)));
+        return Err(code);
     }
 
-    let created_order = resp.json::<Order>().await.map_err(|e| {
-        (
-            StatusCode::BAD_GATEWAY,
-            format!("Invalid response from Order Service: {}", e),
-        )
-    })?;
+    let created_order = resp.json::<Order>().await.map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Invalid response from Order Service: {}", e)) })?;
     Ok(Json(created_order))
 }

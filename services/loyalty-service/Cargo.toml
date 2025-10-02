@@ -7,20 +7,24 @@ edition = "2021"
 tower-http = { version = "0.5", features = ["cors"] }
 common-auth = { path = "../common/auth" }
 common-money = { path = "../common/money" }
+common-http-errors = { path = "../common/http-errors" }
 anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt","env-filter"] }
 axum = "0.7"
-futures = "0.3"
-rdkafka = { version = "0.29", default-features = false, features = ["cmake-build", "tokio", "libz", "libz-static"] }
+futures = { version = "0.3", optional = true }
+rdkafka = { version = "0.29", default-features = false, features = ["cmake-build", "tokio", "libz", "libz-static"], optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sqlx = { version = "0.7", features = ["runtime-tokio-native-tls", "postgres", "macros", "uuid", "bigdecimal"] }
 tokio = { version = "1", features = ["full"] }
 uuid = { version = "1", features = ["v4", "serde"] }
+once_cell = "1.19"
+prometheus = "0.13"
 
 [features]
+default = []
+kafka = ["rdkafka", "futures"]
 # Enables running integration tests that require external services (e.g., Postgres, Kafka)
-integration = []
-# (No explicit offline feature; controlled via SQLX_OFFLINE env var.)
+integration = ["kafka"]
 

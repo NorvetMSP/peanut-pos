@@ -3,6 +3,10 @@ name = "payment-service"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = []
+test-helpers = []
+
 [dependencies]
 common-auth = { path = "../common/auth" }
 tower-http = { version = "0.5", features = ["cors"] }
@@ -18,3 +22,7 @@ hyper = "1"
 uuid = { version = "1", features = ["v4", "serde"] }
 bigdecimal = { version = "0.3", features = ["serde"] }
 common-money = { path = "../common/money" }
+common-http-errors = { path = "../common/http-errors" }
+once_cell = "1.19"
+prometheus = "0.13"
+tower = "0.5"

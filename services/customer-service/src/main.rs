@@ -13,6 +13,7 @@ use common_auth::{
     ensure_role, tenant_id_from_request, AuthContext, JwtConfig, JwtVerifier, ROLE_ADMIN,
     ROLE_CASHIER, ROLE_MANAGER, ROLE_SUPER_ADMIN,
 };
+use common_http_errors::{ApiError, ApiResult};
 use common_crypto::{decrypt_field, deterministic_hash, encrypt_field, CryptoError, MasterKey};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -28,8 +29,53 @@ use tokio::net::TcpListener;
 use tokio::time::{interval, MissedTickBehavior};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tracing::{debug, info, warn, error};
+use once_cell::sync::Lazy;
+use prometheus::{IntCounterVec, Opts, TextEncoder, Encoder};
+use common_auth::GuardError;
 use common_money::log_rounding_mode_once;
 use uuid::Uuid;
+
+static HTTP_ERRORS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    let c = IntCounterVec::new(
+        Opts::new(
+            "http_errors_total",
+            "Count of HTTP error responses emitted (status >= 400)",
+        ),
+        &["service", "code", "status"],
+    )
+    .expect("http_errors_total");
+    let _ = prometheus::default_registry().register(Box::new(c.clone()));
+    c
+});
+
+async fn track_http_errors(
+    req: axum::http::Request<axum::body::Body>,
+    next: axum::middleware::Next,
+) -> Result<axum::response::Response, axum::response::Response> {
+    let resp = next.run(req).await;
+    let status = resp.status();
+    if status.as_u16() >= 400 {
+        let code = resp
+            .headers()
+            .get("X-Error-Code")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("unknown");
+        HTTP_ERRORS_TOTAL
+            .with_label_values(&["customer-service", code, status.as_str()])
+            .inc();
+    }
+    Ok(resp)
+}
+
+async fn render_metrics() -> Result<String, StatusCode> {
+    let encoder = TextEncoder::new();
+    let metric_families = prometheus::gather();
+    let mut buffer = Vec::new();
+    if encoder.encode(&metric_families, &mut buffer).is_err() {
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+    String::from_utf8(buffer).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
 
 const CUSTOMER_WRITE_ROLES: &[&str] = &[ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_MANAGER, ROLE_CASHIER];
 const CUSTOMER_VIEW_ROLES: &[&str] = &[ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_MANAGER, ROLE_CASHIER];
@@ -43,7 +89,7 @@ struct AppState {
     master_key: Arc<MasterKey>,
 }
 
-type ApiResult<T> = Result<T, (StatusCode, String)>;
+// ApiResult now comes from common-http-errors (Result<T, ApiError>)
 
 impl FromRef<AppState> for Arc<JwtVerifier> {
     fn from_ref(state: &AppState) -> Self {
@@ -203,7 +249,9 @@ async fn main() -> anyhow::Result<()> {
         .route("/customers/:id/gdpr/export", post(gdpr_export_customer))
         .route("/customers/:id/gdpr/delete", post(gdpr_delete_customer))
         .route("/healthz", get(|| async { "ok" }))
+        .route("/internal/metrics", get(render_metrics))
         .with_state(state)
+        .layer(axum::middleware::from_fn(track_http_errors))
         .layer(cors);
 
     let host = env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
@@ -227,8 +275,8 @@ async fn create_customer(
     headers: HeaderMap,
     Json(new_cust): Json<NewCustomer>,
 ) -> ApiResult<Json<Customer>> {
-    ensure_role(&auth, CUSTOMER_WRITE_ROLES)?;
-    let tenant_id = tenant_id_from_request(&headers, &auth)?;
+    ensure_role(&auth, CUSTOMER_WRITE_ROLES).map_err(|_| ApiError::ForbiddenMissingRole { role: "customer_write", trace_id: None })?;
+    let tenant_id = tenant_id_from_request(&headers, &auth).map_err(|g| guard_to_api_error(g))?;
     let customer_id = Uuid::new_v4();
 
     let mut key_cache = TenantKeyCache::new(&state, tenant_id);
@@ -318,7 +366,7 @@ async fn create_customer(
     .bind(Some(Utc::now()))
     .fetch_one(&state.db)
     .await
-    .map_err(internal_err)?;
+    .map_err(|e| db_internal(e))?;
 
     let customer = hydrate_customer_row(row, &mut key_cache).await?;
     Ok(Json(customer))
@@ -330,8 +378,8 @@ async fn search_customers(
     headers: HeaderMap,
     Query(params): Query<SearchParams>,
 ) -> ApiResult<Json<Vec<Customer>>> {
-    ensure_role(&auth, CUSTOMER_VIEW_ROLES)?;
-    let tenant_id = tenant_id_from_request(&headers, &auth)?;
+    ensure_role(&auth, CUSTOMER_VIEW_ROLES).map_err(|_| ApiError::ForbiddenMissingRole { role: "customer_view", trace_id: None })?;
+    let tenant_id = tenant_id_from_request(&headers, &auth).map_err(|g| guard_to_api_error(g))?;
 
     let mut key_cache = TenantKeyCache::new(&state, tenant_id);
     let active_key = key_cache.active().await?;
@@ -394,7 +442,7 @@ async fn search_customers(
     .bind(phone_hash.as_deref())
     .fetch_all(&state.db)
     .await
-    .map_err(internal_err)?;
+    .map_err(|e| db_internal(e))?;
 
     let customers = hydrate_customer_rows(rows, &mut key_cache).await?;
     Ok(Json(customers))
@@ -406,8 +454,8 @@ async fn get_customer(
     headers: HeaderMap,
     Path(customer_id): Path<Uuid>,
 ) -> ApiResult<Json<Customer>> {
-    ensure_role(&auth, CUSTOMER_VIEW_ROLES)?;
-    let tenant_id = tenant_id_from_request(&headers, &auth)?;
+    ensure_role(&auth, CUSTOMER_VIEW_ROLES).map_err(|_| ApiError::ForbiddenMissingRole { role: "customer_view", trace_id: None })?;
+    let tenant_id = tenant_id_from_request(&headers, &auth).map_err(|g| guard_to_api_error(g))?;
 
     let mut key_cache = TenantKeyCache::new(&state, tenant_id);
 
@@ -429,8 +477,8 @@ async fn get_customer(
     .bind(customer_id)
     .fetch_optional(&state.db)
     .await
-    .map_err(internal_err)?
-    .ok_or((StatusCode::NOT_FOUND, "Customer not found".into()))?;
+    .map_err(|e| db_internal(e))?
+    .ok_or(ApiError::NotFound { code: "customer_not_found", trace_id: None })?;
 
     let customer = hydrate_customer_row(row, &mut key_cache).await?;
     Ok(Json(customer))
@@ -443,8 +491,8 @@ async fn update_customer(
     Path(customer_id): Path<Uuid>,
     Json(payload): Json<UpdateCustomerRequest>,
 ) -> ApiResult<Json<Customer>> {
-    ensure_role(&auth, CUSTOMER_WRITE_ROLES)?;
-    let tenant_id = tenant_id_from_request(&headers, &auth)?;
+    ensure_role(&auth, CUSTOMER_WRITE_ROLES).map_err(|_| ApiError::ForbiddenMissingRole { role: "customer_write", trace_id: None })?;
+    let tenant_id = tenant_id_from_request(&headers, &auth).map_err(|g| guard_to_api_error(g))?;
     let mut key_cache = TenantKeyCache::new(&state, tenant_id);
 
     let existing = sqlx::query!(
@@ -470,8 +518,8 @@ async fn update_customer(
     )
     .fetch_optional(&state.db)
     .await
-    .map_err(internal_err)?
-    .ok_or((StatusCode::NOT_FOUND, "Customer not found".into()))?;
+    .map_err(|e| db_internal(e))?
+    .ok_or(ApiError::NotFound { code: "customer_not_found", trace_id: None })?;
 
     let UpdateCustomerRequest { name, email, phone } = payload;
 
@@ -500,7 +548,7 @@ async fn update_customer(
     if let Some(candidate) = name.as_ref() {
         let trimmed = candidate.trim();
         if trimmed.is_empty() {
-            return Err((StatusCode::BAD_REQUEST, "Name must not be empty".into()));
+            return Err(ApiError::BadRequest { code: "invalid_name", trace_id: None, message: Some("Name must not be empty".into()) });
         }
         if trimmed != existing.name {
             final_name = trimmed.to_string();
@@ -630,8 +678,8 @@ async fn update_customer(
     )
     .fetch_optional(&state.db)
     .await
-    .map_err(internal_err)?
-    .ok_or((StatusCode::NOT_FOUND, "Customer not found".into()))?;
+    .map_err(|e| db_internal(e))?
+    .ok_or(ApiError::NotFound { code: "customer_not_found", trace_id: None })?;
 
     let customer = hydrate_customer_row(row, &mut key_cache).await?;
     Ok(Json(customer))
@@ -643,8 +691,8 @@ async fn gdpr_export_customer(
     headers: HeaderMap,
     Path(customer_id): Path<Uuid>,
 ) -> ApiResult<Json<GdprExportResponse>> {
-    ensure_role(&auth, GDPR_MANAGE_ROLES)?;
-    let tenant_id = tenant_id_from_request(&headers, &auth)?;
+    ensure_role(&auth, GDPR_MANAGE_ROLES).map_err(|_| ApiError::ForbiddenMissingRole { role: "gdpr_manage", trace_id: None })?;
+    let tenant_id = tenant_id_from_request(&headers, &auth).map_err(|g| guard_to_api_error(g))?;
 
     let mut key_cache = TenantKeyCache::new(&state, tenant_id);
 
@@ -666,8 +714,8 @@ async fn gdpr_export_customer(
     .bind(customer_id)
     .fetch_optional(&state.db)
     .await
-    .map_err(internal_err)?
-    .ok_or((StatusCode::NOT_FOUND, "Customer not found".into()))?;
+    .map_err(|e| db_internal(e))?
+    .ok_or(ApiError::NotFound { code: "customer_not_found", trace_id: None })?;
 
     let customer = hydrate_customer_row(row, &mut key_cache).await?;
     let metadata = json!({
@@ -687,7 +735,7 @@ async fn gdpr_export_customer(
         metadata,
     )
     .await
-    .map_err(internal_err)?;
+    .map_err(|e| db_internal(e))?;
 
     info!(tenant_id = %tenant_id, customer_id = %customer_id, export_id = %export_id, "GDPR export completed");
     Ok(Json(GdprExportResponse {
@@ -702,8 +750,8 @@ async fn gdpr_delete_customer(
     headers: HeaderMap,
     Path(customer_id): Path<Uuid>,
 ) -> ApiResult<Json<GdprDeleteResponse>> {
-    ensure_role(&auth, GDPR_MANAGE_ROLES)?;
-    let tenant_id = tenant_id_from_request(&headers, &auth)?;
+    ensure_role(&auth, GDPR_MANAGE_ROLES).map_err(|_| ApiError::ForbiddenMissingRole { role: "gdpr_manage", trace_id: None })?;
+    let tenant_id = tenant_id_from_request(&headers, &auth).map_err(|g| guard_to_api_error(g))?;
 
     let row = sqlx::query_as::<_, CustomerRow>(
         "SELECT
@@ -723,13 +771,13 @@ async fn gdpr_delete_customer(
     .bind(customer_id)
     .fetch_optional(&state.db)
     .await
-    .map_err(internal_err)?
-    .ok_or((StatusCode::NOT_FOUND, "Customer not found".into()))?;
+    .map_err(|e| db_internal(e))?
+    .ok_or(ApiError::NotFound { code: "customer_not_found", trace_id: None })?;
 
     let had_email = row.email.is_some() || row.email_encrypted.is_some();
     let had_phone = row.phone.is_some() || row.phone_encrypted.is_some();
 
-    let mut tx = state.db.begin().await.map_err(internal_err)?;
+    let mut tx = state.db.begin().await.map_err(|e| db_internal(e))?;
     let result = sqlx::query(
         "UPDATE customers
          SET name = $1,
@@ -748,11 +796,11 @@ async fn gdpr_delete_customer(
     .bind(customer_id)
     .execute(&mut *tx)
     .await
-    .map_err(internal_err)?;
+    .map_err(|e| db_internal(e))?;
 
     if result.rows_affected() == 0 {
-        tx.rollback().await.map_err(internal_err)?;
-        return Err((StatusCode::NOT_FOUND, "Customer not found".into()));
+        tx.rollback().await.map_err(|e| db_internal(e))?;
+        return Err(ApiError::NotFound { code: "customer_not_found", trace_id: None });
     }
 
     let metadata = json!({
@@ -772,9 +820,9 @@ async fn gdpr_delete_customer(
         metadata,
     )
     .await
-    .map_err(internal_err)?;
+    .map_err(|e| db_internal(e))?;
 
-    tx.commit().await.map_err(internal_err)?;
+    tx.commit().await.map_err(|e| db_internal(e))?;
     info!(tenant_id = %tenant_id, customer_id = %customer_id, tombstone_id = %tombstone_id, "GDPR delete completed");
     Ok(Json(GdprDeleteResponse {
         tombstone_id,
@@ -835,18 +883,10 @@ async fn decrypt_optional_field(
     let Some(ciphertext) = encrypted else {
         return Ok(None);
     };
-    let version = key_version.ok_or((
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "Encrypted value missing key version".into(),
-    ))?;
+    let version = key_version.ok_or(ApiError::Internal { trace_id: None, message: Some("Encrypted value missing key version".into()) })?;
     let key = key_cache.by_version(version).await?;
     let plaintext = decrypt_field(&key, &ciphertext).map_err(crypto_err)?;
-    String::from_utf8(plaintext).map(Some).map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Decrypted value was not valid UTF-8".into(),
-        )
-    })
+    String::from_utf8(plaintext).map(Some).map_err(|_| ApiError::Internal { trace_id: None, message: Some("Decrypted value was not valid UTF-8".into()) })
 }
 
 async fn load_tenant_dek(
@@ -866,7 +906,7 @@ async fn load_tenant_dek(
         .bind(version)
         .fetch_optional(db)
         .await
-        .map_err(internal_err)?
+        .map_err(|e| db_internal(e))?
     } else {
         sqlx::query_as::<_, TenantKeyRow>(
             "SELECT key_version, encrypted_key
@@ -878,7 +918,7 @@ async fn load_tenant_dek(
         .bind(tenant_id)
         .fetch_optional(db)
         .await
-        .map_err(internal_err)?
+        .map_err(|e| db_internal(e))?
     };
 
     let row = row.ok_or_else(|| {
@@ -887,10 +927,7 @@ async fn load_tenant_dek(
             None => "active".to_string(),
         };
         warn!(tenant_id = %tenant_id, scope = %scope, "Missing tenant data key");
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("No {scope} tenant data key found for tenant {tenant_id}"),
-        )
+        ApiError::Internal { trace_id: None, message: Some(format!("No {scope} tenant data key found for tenant {tenant_id}")) }
     })?;
 
     let TenantKeyRow {
@@ -902,10 +939,7 @@ async fn load_tenant_dek(
         .decrypt_tenant_dek(&encrypted_key)
         .map_err(|err| {
             error!(tenant_id = %tenant_id, version = key_version, error = ?err, "Failed to decrypt tenant data key");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to decrypt tenant data key".into(),
-            )
+            ApiError::Internal { trace_id: None, message: Some("Failed to decrypt tenant data key".into()) }
         })?;
     Ok(TenantDek {
         version: key_version,
@@ -961,19 +995,21 @@ fn normalize_phone(value: &str) -> String {
     value.chars().filter(|c| c.is_ascii_digit()).collect()
 }
 
-fn crypto_err(err: CryptoError) -> (StatusCode, String) {
+fn crypto_err(err: CryptoError) -> ApiError {
     error!(error = ?err, "Crypto operation failed");
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "Crypto operation failed".into(),
-    )
+    ApiError::Internal { trace_id: None, message: Some("Crypto operation failed".into()) }
 }
 
-fn internal_err(err: sqlx::Error) -> (StatusCode, String) {
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        format!("DB error: {}", err),
-    )
+fn db_internal(err: sqlx::Error) -> ApiError {
+    ApiError::Internal { trace_id: None, message: Some(format!("DB error: {}", err)) }
+}
+
+fn guard_to_api_error(err: GuardError) -> ApiError {
+    match err {
+        GuardError::MissingTenantHeader | GuardError::InvalidTenantHeader => ApiError::BadRequest { code: "invalid_tenant", trace_id: None, message: Some("Invalid or missing tenant header".into()) },
+        GuardError::TenantMismatch { .. } => ApiError::Forbidden { trace_id: None },
+        GuardError::Forbidden { .. } => ApiError::Forbidden { trace_id: None },
+    }
 }
 
 async fn build_jwt_verifier_from_env() -> anyhow::Result<Arc<JwtVerifier>> {
@@ -1134,12 +1170,7 @@ mod tests {
             }),
         )
         .await
-        .map_err(|(status, body)| {
-            io::Error::new(
-                io::ErrorKind::Other,
-                format!("create_customer failed: {status} {body}"),
-            )
-        })?
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("create_customer failed: {:?}", e)))?
         .0;
 
         let customer_id = created.id;
@@ -1156,12 +1187,7 @@ mod tests {
             }),
         )
         .await
-        .map_err(|(status, body)| {
-            io::Error::new(
-                io::ErrorKind::Other,
-                format!("update_customer failed: {status} {body}"),
-            )
-        })?
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("update_customer failed: {:?}", e)))?
         .0;
 
         assert_eq!(updated.name, "Alice Cooper");

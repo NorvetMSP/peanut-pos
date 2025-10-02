@@ -1,6 +1,5 @@
 use anyhow::Context;
 use axum::{
-    extract::FromRef,
     http::{
         header::{ACCEPT, CONTENT_TYPE},
         HeaderName, HeaderValue, Method,
@@ -8,7 +7,10 @@ use axum::{
     routing::{get, post},
     Router,
 };
-use common_auth::{JwtConfig, JwtVerifier, ROLE_ADMIN, ROLE_CASHIER, ROLE_SUPER_ADMIN};
+use common_auth::{JwtConfig, JwtVerifier};
+use once_cell::sync::Lazy;
+use prometheus::{Registry, IntCounterVec, Opts};
+use axum::middleware;
 use common_money::log_rounding_mode_once;
 use std::{env, net::SocketAddr, sync::Arc, time::Duration};
 use tokio::net::TcpListener;
@@ -16,21 +18,8 @@ use tokio::time::{interval, MissedTickBehavior};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tracing::{debug, info, warn};
 
-mod payment_handlers;
-use payment_handlers::{process_card_payment, void_card_payment};
+use payment_service::{payment_handlers::{process_card_payment, void_card_payment}, AppState};
 
-const PAYMENT_ROLES: &[&str] = &[ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_CASHIER];
-
-#[derive(Clone)]
-struct AppState {
-    jwt_verifier: Arc<JwtVerifier>,
-}
-
-impl FromRef<AppState> for Arc<JwtVerifier> {
-    fn from_ref(state: &AppState) -> Self {
-        state.jwt_verifier.clone()
-    }
-}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -63,11 +52,32 @@ async fn main() -> anyhow::Result<()> {
             HeaderName::from_static("x-tenant-id"),
         ]);
 
+    static PAYMENT_REGISTRY: Lazy<Registry> = Lazy::new(|| Registry::new());
+    static HTTP_ERRORS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+        let v = IntCounterVec::new(
+            Opts::new("http_errors_total", "Count of HTTP error responses emitted (status >= 400)"),
+            &["service", "code", "status"],
+        ).unwrap();
+        PAYMENT_REGISTRY.register(Box::new(v.clone())).ok();
+        v
+    });
+
+    async fn http_error_metrics(req: axum::http::Request<axum::body::Body>, next: axum::middleware::Next) -> axum::response::Response {
+        let resp = next.run(req).await;
+        let status = resp.status();
+        if status.as_u16() >= 400 {
+            let code = resp.headers().get("X-Error-Code").and_then(|v| v.to_str().ok()).unwrap_or("unknown");
+            HTTP_ERRORS_TOTAL.with_label_values(&["payment-service", code, status.as_str()]).inc();
+        }
+        resp
+    }
+
     let app = Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route("/payments", post(process_card_payment))
         .route("/payments/void", post(void_card_payment))
         .with_state(state)
+        .layer(middleware::from_fn(http_error_metrics))
         .layer(cors);
 
     let host = env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string());

@@ -13,6 +13,8 @@ use axum::{
 };
 use chrono::Utc;
 use common_auth::{JwtConfig, JwtVerifier};
+use common_http_errors::{ApiError};
+use axum::response::IntoResponse;
 use common_money::log_rounding_mode_once;
 use rdkafka::producer::FutureProducer;
 use reqwest::Client;
@@ -28,6 +30,8 @@ use tokio::sync::RwLock;
 use tokio::time::{interval, MissedTickBehavior};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tracing::{debug, info, warn};
+use once_cell::sync::Lazy;
+use prometheus::{IntCounterVec, Opts};
 use uuid::Uuid;
 
 mod alerts;
@@ -180,6 +184,28 @@ async fn metrics_endpoint(State(state): State<AppState>) -> Response {
     }
 }
 
+static HTTP_ERRORS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    let c = IntCounterVec::new(
+        Opts::new(
+            "http_errors_total",
+            "Count of HTTP error responses emitted (status >= 400)",
+        ),
+        &["service", "code", "status"],
+    ).expect("http_errors_total");
+    let _ = prometheus::default_registry().register(Box::new(c.clone()));
+    c
+});
+
+async fn http_error_metrics_mw(req: Request<Body>, next: Next) -> Result<Response, ApiError> {
+    let resp = next.run(req).await;
+    let status = resp.status();
+    if status.as_u16() >= 400 {
+        let code = resp.headers().get("X-Error-Code").and_then(|v| v.to_str().ok()).unwrap_or("unknown");
+        HTTP_ERRORS_TOTAL.with_label_values(&["integration-gateway", code, status.as_str()]).inc();
+    }
+    Ok(resp)
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().with_env_filter("info").init();
@@ -310,6 +336,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/metrics", get(metrics_endpoint))
         .merge(protected_api)
         .with_state(state)
+        .layer(middleware::from_fn(http_error_metrics_adapter))
         .layer(cors);
 
     // Start server (bind host/port from env or defaults)
@@ -330,7 +357,7 @@ async fn auth_middleware(
     state: AppState,
     mut request: Request<Body>,
     next: Next,
-) -> Result<Response, StatusCode> {
+) -> Result<Response, ApiError> {
     let headers = request.headers();
     let raw_auth_header = headers
         .get(header::AUTHORIZATION)
@@ -347,15 +374,15 @@ async fn auth_middleware(
     let (limiter_key, tenant_id, identity_label) = if let Some(token) = bearer {
         let claims = state.jwt_verifier.verify(token).map_err(|err| {
             warn!(error = %err, "JWT verification failed");
-            StatusCode::UNAUTHORIZED
+            ApiError::Forbidden { trace_id: None }
         })?;
         if let Some(header_tid) = headers
             .get("X-Tenant-ID")
             .and_then(|value| value.to_str().ok())
         {
-            let header_uuid = Uuid::parse_str(header_tid).map_err(|_| StatusCode::BAD_REQUEST)?;
+            let header_uuid = Uuid::parse_str(header_tid).map_err(|_| ApiError::BadRequest { code: "invalid_tenant", trace_id: None, message: Some("Invalid tenant header".into()) })?;
             if header_uuid != claims.tenant_id {
-                return Err(StatusCode::FORBIDDEN);
+                return Err(ApiError::Forbidden { trace_id: None });
             }
         }
         claims_opt = Some(claims.clone());
@@ -370,24 +397,24 @@ async fn auth_middleware(
         let cached = cache
             .get(&hashed_key)
             .cloned()
-            .ok_or(StatusCode::UNAUTHORIZED)?;
+            .ok_or(ApiError::Forbidden { trace_id: None })?;
         drop(cache);
         if let Some(header_tid) = headers
             .get("X-Tenant-ID")
             .and_then(|value| value.to_str().ok())
         {
-            let header_uuid = Uuid::parse_str(header_tid).map_err(|_| StatusCode::BAD_REQUEST)?;
+            let header_uuid = Uuid::parse_str(header_tid).map_err(|_| ApiError::BadRequest { code: "invalid_tenant", trace_id: None, message: Some("Invalid tenant header".into()) })?;
             if header_uuid != cached.tenant_id {
-                return Err(StatusCode::FORBIDDEN);
+                return Err(ApiError::Forbidden { trace_id: None });
             }
         }
         usage_context = Some((cached.tenant_id, hashed_key.clone(), cached.key_suffix));
         (format!("api:{}", hashed_key), cached.tenant_id, "api")
     } else if let Some(tid_str) = headers.get("X-Tenant-ID").and_then(|h| h.to_str().ok()) {
-        let parsed = Uuid::parse_str(tid_str).map_err(|_| StatusCode::BAD_REQUEST)?;
+        let parsed = Uuid::parse_str(tid_str).map_err(|_| ApiError::BadRequest { code: "invalid_tenant", trace_id: None, message: Some("Invalid tenant header".into()) })?;
         (format!("tenant-header:{}", parsed), parsed, "tenant_header")
     } else {
-        return Err(StatusCode::UNAUTHORIZED);
+        return Err(ApiError::Forbidden { trace_id: None });
     };
 
     let decision = state
@@ -396,7 +423,7 @@ async fn auth_middleware(
         .await
         .map_err(|err| {
             warn!(?err, "Rate limiter failure");
-            StatusCode::INTERNAL_SERVER_ERROR
+            ApiError::Internal { trace_id: None, message: Some("Rate limiter failure".into()) }
         })?;
 
     state
@@ -425,7 +452,7 @@ async fn auth_middleware(
                 decision.current,
             )
             .await;
-        return Err(StatusCode::TOO_MANY_REQUESTS);
+        return Err(ApiError::Forbidden { trace_id: None });
     }
 
     request.extensions_mut().insert(tenant_id);
@@ -439,6 +466,13 @@ async fn auth_middleware(
     }
 
     Ok(next.run(request).await)
+}
+
+async fn http_error_metrics_adapter(req: Request<Body>, next: Next) -> Result<Response, StatusCode> {
+    match http_error_metrics_mw(req, next).await {
+        Ok(resp) => Ok(resp),
+        Err(err) => Ok(err.into_response()),
+    }
 }
 
 async fn load_active_keys(pool: &PgPool) -> anyhow::Result<HashMap<String, CachedKey>> {
