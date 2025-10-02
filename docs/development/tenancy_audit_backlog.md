@@ -54,7 +54,7 @@ Status: Planned | In-Progress | Done | Blocked | Deferred
 | TA-AUD-4 | Coverage scanner tool | AUD | Done | TA-AUD-1 | AST-based (syn) parser, per-service config, JSON report, Prometheus metrics file, CI 90% ratio gate |
 | TA-AUD-5 | Retention policy (TTL purge job) | AUD | Done | TA-AUD-2 | Background purge, env AUDIT_RETENTION_DAYS (default 30), dry-run, metrics (deleted total, last run) |
 | TA-AUD-6 | Redaction tagging + masking layer | AUD | Done | TA-AUD-2 | Configurable field paths env-driven, masking modes (off/log/enforce), metrics (redacted total, last timestamp) |
-| TA-AUD-7 | Role-based redacted view | AUD | In-Progress | TA-AUD-6 | Apply privileged role check (e.g. Admin) in /audit/events; if requester not privileged, overlay redaction at response serialization for sensitive payload/meta keys. Add metadata labels enumerating redacted keys. Support query param `include_redacted=true` to return masked placeholders instead of omitting fields. Emit counter metric `audit_view_redactions_total` with labels (tenant_id, field, role). |
+| TA-AUD-7 | Role-based redacted view | AUD | Done | TA-AUD-6 | Privileged (Admin) gating implemented; response-layer redaction with masking/removal variant and metrics + labeled counters. Reusable `redact_event_fields` helper & unit tests (mask/remove/noop) plus full HTTP integration test validating Support vs Admin + include_redacted masking path. |
 | TA-PERF-1 | Outbox pattern for audit durability | PERF | Planned | TA-AUD-2 | Optional fallback when Kafka down |
 | TA-PERF-2 | Backpressure metrics & alerts | PERF | Planned | TA-AUD-1 | Alert on queue saturation |
 | TA-POL-1 | Expanded role model (Cashier vs Support) | POL | Planned | TA-ROL-* | Enum refinement |
@@ -62,6 +62,7 @@ Status: Planned | In-Progress | Done | Blocked | Deferred
 | TA-DOC-1 | Developer guide: emitting audit event | DOC | Planned | TA-AUD-1 | CONTRIBUTING snippet |
 | TA-DOC-2 | Architecture doc: audit pipeline phases | DOC | Planned | TA-AUD-2 | Sequence & flow diagrams |
 | TA-OPS-2 | Schema compliance linter / macro | OPS | Planned | TA-AUD-1 | Build-time validation |
+| TA-OPS-3 | Prometheus client metrics migration | OPS | Planned | TA-OPS-1 | Replace manual text exposition with official client library (counters/gauges + labeled redaction metrics). |
 | TA-AUD-8 | Multi-sink support (Kafka + Search) | AUD | Deferred | TA-AUD-3 | Latency-driven follow-on |
 | TA-FUT-1 | Search backend evaluation | FUT | Planned | TA-AUD-2 | PG vs ES vs ClickHouse bench |
 | TA-FUT-2 | Tenant isolation study (RLS vs shared) | FUT | Planned | — | Decision doc |

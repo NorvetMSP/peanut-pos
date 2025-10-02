@@ -16,6 +16,27 @@ pub static VIEW_REDACTIONS_LABELS: Lazy<std::sync::Mutex<std::collections::HashM
 
 pub fn view_redactions_count() -> u64 { VIEW_REDACTIONS_TOTAL.load(Ordering::Relaxed) }
 
+/// Apply configured redaction paths to payload & meta returning (payload, meta, redacted_field_paths, redaction_count)
+pub fn redact_event_fields(mut payload: serde_json::Value, mut meta: serde_json::Value, redaction_paths: &[Vec<String>], include_redacted: bool) -> (serde_json::Value, serde_json::Value, Vec<String>, u64) {
+    let mut redacted_fields = Vec::new();
+    if redaction_paths.is_empty() { return (payload, meta, redacted_fields, 0); }
+    for path in redaction_paths.iter() {
+        if path.is_empty() { continue; }
+        let mut applied = false;
+        if let serde_json::Value::Object(_) = payload {
+            if apply_redaction(&mut payload, path, include_redacted) { applied = true; }
+        }
+        if !applied {
+            if let serde_json::Value::Object(_) = meta {
+                if apply_redaction(&mut meta, path, include_redacted) { applied = true; }
+            }
+        }
+        if applied { redacted_fields.push(path.join(".")); }
+    }
+    let count = redacted_fields.len() as u64;
+    (payload, meta, redacted_fields, count)
+}
+
 fn redaction_paths_from_env() -> &'static Vec<Vec<String>> {
     static PATHS: Lazy<Vec<Vec<String>>> = Lazy::new(|| {
         let raw = env::var("AUDIT_VIEW_REDACTION_PATHS").unwrap_or_else(|_| "".into());
@@ -99,32 +120,15 @@ pub async fn audit_search(
         let occurred: chrono::DateTime<chrono::Utc> = row.try_get("occurred_at").unwrap();
     next_cursor = Some(occurred.to_rfc3339());
     next_cursor_event_id = row.try_get::<Uuid,_>("event_id").ok();
-        let mut payload = row.try_get::<serde_json::Value,_>("payload").unwrap_or(serde_json::json!({}));
-        let mut meta = row.try_get::<serde_json::Value,_>("meta").unwrap_or(serde_json::json!({}));
-        let mut redacted_fields: Vec<String> = Vec::new();
-
-    if !privileged && !redaction_paths.is_empty() {
-            // Simple object traversal only (no arrays wildcard support yet)
-            for path in redaction_paths.iter() {
-                if path.is_empty() { continue; }
-                // Try payload then meta
-                let mut target = None;
-                if let serde_json::Value::Object(_) = payload { target = Some((true, &mut payload)); }
-                if let Some((_, val)) = target {
-                    if apply_redaction(val, path, include_redacted) { redacted_fields.push(path.join(".")); continue; }
-                }
-                if let serde_json::Value::Object(_) = meta {
-                    if apply_redaction(&mut meta, path, include_redacted) { redacted_fields.push(path.join(".")); }
-                }
-            }
-            if !redacted_fields.is_empty() {
-                total_view_redactions += redacted_fields.len() as u64;
-                // Update label map
-                if let Ok(mut guard) = VIEW_REDACTIONS_LABELS.lock() {
-                    for f in &redacted_fields {
-                        let key = (sec.tenant_id, format!("{:?}", sec.roles.first().cloned().unwrap_or(Role::Unknown("none".into()))), f.clone());
-                        *guard.entry(key).or_insert(0) += 1;
-                    }
+        let payload_raw = row.try_get::<serde_json::Value,_>("payload").unwrap_or(serde_json::json!({}));
+        let meta_raw = row.try_get::<serde_json::Value,_>("meta").unwrap_or(serde_json::json!({}));
+        let (payload, meta, redacted_fields, applied_count) = if !privileged { redact_event_fields(payload_raw, meta_raw, redaction_paths, include_redacted) } else { (payload_raw, meta_raw, Vec::new(), 0) };
+        if applied_count > 0 {
+            total_view_redactions += applied_count;
+            if let Ok(mut guard) = VIEW_REDACTIONS_LABELS.lock() {
+                for f in &redacted_fields {
+                    let key = (sec.tenant_id, format!("{:?}", sec.roles.first().cloned().unwrap_or(Role::Unknown("none".into()))), f.clone());
+                    *guard.entry(key).or_insert(0) += 1;
                 }
             }
         }

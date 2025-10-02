@@ -1,3 +1,4 @@
+#![cfg(not(feature = "kafka"))]
 use common_audit::{extract_actor_from_headers, AuditActor, AuditProducer, NoopAuditSink, AuditSeverity};
 use axum::http::HeaderMap;
 use uuid::Uuid;

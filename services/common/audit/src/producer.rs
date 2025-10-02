@@ -1,4 +1,5 @@
-use crate::{AuditActor, AuditEvent, AuditError, AuditResult, AUDIT_EVENT_VERSION, AuditSeverity};
+use crate::{AuditActor, AuditEvent, AuditResult, AUDIT_EVENT_VERSION, AuditSeverity};
+#[cfg(feature = "kafka")] use crate::AuditError;
 use chrono::Utc;
 use uuid::Uuid;
 #[cfg(feature = "kafka")] use rdkafka::producer::{FutureProducer, FutureRecord};
@@ -15,11 +16,12 @@ pub trait AuditSink: Send + Sync + 'static {
     async fn emit(&self, event: AuditEvent) -> AuditResult<()>;
 }
 
+#[cfg(feature = "kafka")]
 #[derive(Clone)]
-pub struct KafkaAuditSink { #[cfg(feature = "kafka")] pub(crate) inner: FutureProducer, pub(crate) config: AuditProducerConfig }
+pub struct KafkaAuditSink { pub(crate) inner: FutureProducer, pub(crate) config: AuditProducerConfig }
 
+#[cfg(feature = "kafka")]
 impl KafkaAuditSink {
-    #[cfg(feature = "kafka")]
     pub fn new(inner: FutureProducer, config: AuditProducerConfig) -> Self { Self { inner, config } }
 }
 
@@ -81,7 +83,7 @@ impl<S: AuditSink> AuditProducer<S> {
 
 /// Buffered wrapper around an inner AuditProducer to reduce per-request latency.
 pub struct BufferedAuditProducer<S: AuditSink> {
-    inner: Arc<AuditProducer<S>>,
+    _inner: Arc<AuditProducer<S>>,
     tx: mpsc::Sender<AuditEvent>,
     _bg: JoinHandle<()>,
     pub queued: Arc<AtomicU64>,
@@ -106,7 +108,7 @@ impl<S: AuditSink> BufferedAuditProducer<S> {
                 q_clone.fetch_sub(1, Ordering::Relaxed);
             }
         });
-        Self { inner, tx, _bg: bg, queued, dropped, emitted }
+    Self { _inner: inner, tx, _bg: bg, queued, dropped, emitted }
     }
 
     /// Return a point-in-time snapshot of internal counters for external metrics scraping.

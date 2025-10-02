@@ -14,7 +14,7 @@ chrono = { version = "0.4", features=["serde"] }
 rdkafka = { version = "0.29", features=["cmake-build", "libz", "libz-static"] }
 sqlx = { version = "0.7", features=["runtime-tokio-native-tls","postgres","macros","uuid","chrono","json"] }
 tokio = { version = "1", features=["macros","rt-multi-thread","time","signal"] }
-common-audit = { path = "../common/audit" }
+common-audit = { path = "../common/audit", features=["kafka"] }
 axum = { version = "0.7", features=["json"] }
 
 [features]

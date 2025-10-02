@@ -5,7 +5,7 @@ authors = ["NovaPOS Team"]
 edition = "2021"
 
 [features]
-default = ["kafka"]
+# Do not enable Kafka by default so test builds avoid native Kafka+zlib linkage
 kafka = ["rdkafka"]
 
 [dependencies]
