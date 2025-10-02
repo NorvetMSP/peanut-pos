@@ -32,9 +32,16 @@ chrono = { version = "0.4", features = ["serde"] }
 once_cell = "1"
 tower = "0.5"
 
+[dev-dependencies]
+futures = "0.3"
+
 [features]
-# kafka gating (TA-FND-5): enable Kafka producer + audit publishing when on.
-kafka = ["rdkafka"]
+# kafka-producer: canonical full producer feature (rdkafka + emission paths)
+kafka-producer = ["rdkafka"]
+# kafka (legacy alias retained for backward compatibility / existing scripts)
+kafka = ["kafka-producer"]
+# lightweight core (placeholder for future if only type referencing needed)
+kafka-core = []
 # default no-kafka to allow lightweight local dev unless explicitly enabled.
 default = []
 

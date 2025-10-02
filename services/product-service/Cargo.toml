@@ -30,7 +30,8 @@ tower = { version = "0.5", features = ["util"] }
 
 [features]
 default = []
-kafka = ["rdkafka", "common-audit"]
+kafka-producer = ["rdkafka", "common-audit"]
+kafka = ["kafka-producer"]
 
 [dev-dependencies]
 tower = "0.5"

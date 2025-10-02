@@ -11,11 +11,11 @@ use axum::{
     routing::{get, post},
     Router,
 };
-use chrono::Utc;
+// chrono::Utc not directly used in main after state extraction
 use common_auth::{JwtConfig, JwtVerifier};
 use common_http_errors::{ApiError};
 use common_money::log_rounding_mode_once;
-#[cfg(feature = "kafka")] use rdkafka::producer::FutureProducer;
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))] use rdkafka::producer::FutureProducer;
 use reqwest::Client;
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Row};
@@ -33,137 +33,22 @@ use tracing::{debug, info, warn};
 // Replaced local HTTP error metrics with shared helper in common-http-errors
 use uuid::Uuid;
 
-mod alerts;
-mod config;
-mod events;
-mod integration_handlers;
-mod metrics;
-mod rate_limiter;
-mod usage;
-mod webhook_handlers;
+// Library modules declared in lib.rs; avoid redeclaring to prevent duplicate crate instances.
 
-use crate::alerts::{post_alert_webhook, RateLimitAlertEvent};
-#[cfg(feature = "kafka")] use crate::alerts::publish_rate_limit_alert;
-use crate::config::GatewayConfig;
-use crate::metrics::GatewayMetrics;
-use crate::rate_limiter::RateLimiter;
-use crate::usage::UsageTracker;
+// use integration_gateway::alerts::{post_alert_webhook, RateLimitAlertEvent}; // not needed in main after state extraction
+// Removed direct alert publish import; alerting handled within handlers when feature-enabled.
+use integration_gateway::app_state::{AppState, CachedKey};
+use integration_gateway::config::GatewayConfig;
+use integration_gateway::metrics::GatewayMetrics;
+use integration_gateway::rate_limiter::RateLimiter;
+use integration_gateway::usage::UsageTracker;
 
-use integration_handlers::{
+use integration_gateway::integration_handlers::{
     handle_external_order, process_payment, void_payment, ForwardedAuthHeader,
 };
-#[allow(unused_imports)] use common_security::SecurityCtxExtractor; // may be unused in some test/feature combinations
-#[allow(unused_imports)] use common_security::roles::Role; // may be unused under certain feature sets
-use webhook_handlers::handle_coinbase_webhook;
+// Security context extraction occurs inside handler modules; no direct main.rs usage.
+use integration_gateway::webhook_handlers::handle_coinbase_webhook;
 
-/// Shared application state
-#[derive(Clone)]
-pub struct AppState {
-    #[cfg(feature = "kafka")] pub kafka_producer: FutureProducer,
-    pub rate_limiter: RateLimiter,
-    pub key_cache: Arc<RwLock<HashMap<String, CachedKey>>>,
-    pub jwt_verifier: Arc<JwtVerifier>,
-    pub metrics: Arc<GatewayMetrics>,
-    pub usage: UsageTracker,
-    pub config: Arc<GatewayConfig>,
-    pub http_client: Client,
-    pub alert_state: Arc<Mutex<HashMap<String, Instant>>>,
-}
-
-#[derive(Clone)]
-pub struct CachedKey {
-    pub tenant_id: Uuid,
-    pub key_suffix: String,
-}
-
-impl AppState {
-    pub fn record_api_key_metric(&self, allowed: bool) {
-        let result = if allowed { "allowed" } else { "rejected" };
-        self.metrics.record_api_key_request(result);
-    }
-
-    pub async fn maybe_alert_rate_limit(
-        &self,
-        identity: &str,
-        tenant_id: Option<Uuid>,
-        key_hash: Option<&str>,
-        key_suffix: Option<&str>,
-        limit: u32,
-        current: i64,
-    ) {
-        let threshold = (limit as f64 * self.config.rate_limit_burst_multiplier).ceil() as i64;
-        if current < threshold {
-            return;
-        }
-        let alert_key = key_hash
-            .map(|hash| format!("api:{}", hash))
-            .unwrap_or_else(|| format!("identity:{}", identity));
-        {
-            let mut guard = self.alert_state.lock().unwrap();
-            let now = Instant::now();
-            if let Some(last) = guard.get(&alert_key) {
-                if now.duration_since(*last).as_secs() < self.config.rate_limit_alert_cooldown_secs {
-                    return;
-                }
-            }
-            guard.insert(alert_key.clone(), now);
-        }
-
-        let suffix_display = key_suffix.unwrap_or("-");
-        let message = format!(
-            "Rate limit burst detected identity={} tenant={:?} key_suffix={} count={} limit={} window={}s",
-            identity,
-            tenant_id,
-            suffix_display,
-            current,
-            limit,
-            self.config.rate_limit_window_secs,
-        );
-
-        warn!(
-            ?tenant_id,
-            key_hash,
-            key_suffix,
-            identity,
-            current,
-            limit,
-            window = self.config.rate_limit_window_secs,
-            message,
-            "Rate limit burst detected"
-        );
-
-    #[allow(unused_variables)]
-    let event = RateLimitAlertEvent {
-            action: "gateway.rate_limit.alert",
-            tenant_id,
-            key_hash: key_hash.map(|value| value.to_string()),
-            key_suffix: key_suffix.map(|value| value.to_string()),
-            identity: identity.to_string(),
-            limit,
-            count: current,
-            window_seconds: self.config.rate_limit_window_secs,
-            occurred_at: Utc::now(),
-            message: message.clone(),
-        };
-        #[cfg(feature = "kafka")]
-        if let Err(err) = publish_rate_limit_alert(&self.kafka_producer, &self.config.alert_topic, &event).await {
-            warn!(?err, "Failed to publish rate limit alert");
-        }
-
-        if let Some(url) = &self.config.security_alert_webhook_url {
-            if let Err(err) = post_alert_webhook(
-                &self.http_client,
-                url,
-                self.config.security_alert_webhook_bearer.as_deref(),
-                &message,
-            )
-            .await
-            {
-                warn!(?err, "Failed to post security alert webhook");
-            }
-        }
-    }
-}
 
 async fn health() -> &'static str {
     "ok"
@@ -268,7 +153,7 @@ async fn main() -> anyhow::Result<()> {
     spawn_jwks_refresh(jwt_verifier.clone());
 
     // Initialize Kafka producer (feature gated)
-    #[cfg(feature = "kafka")]
+    #[cfg(any(feature = "kafka", feature = "kafka-producer"))]
     let producer: FutureProducer = rdkafka::ClientConfig::new()
         .set(
             "bootstrap.servers",
@@ -282,12 +167,12 @@ async fn main() -> anyhow::Result<()> {
     let usage = UsageTracker::new(
         config.clone(),
         db_pool.clone(),
-        #[cfg(feature = "kafka")] Some(producer.clone()),
+    #[cfg(any(feature = "kafka", feature = "kafka-producer"))] Some(producer.clone()),
         #[cfg(not(feature = "kafka"))] None,
     );
     usage.spawn_background_tasks();
     let state = AppState {
-        #[cfg(feature = "kafka")] kafka_producer: producer,
+    #[cfg(any(feature = "kafka", feature = "kafka-producer"))] kafka_producer: producer,
         rate_limiter,
         key_cache,
         jwt_verifier,

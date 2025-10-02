@@ -28,9 +28,14 @@ common-security = { path = "../common/security" }
 common-http-errors = { path = "../common/http-errors" }
 prometheus = "0.13"
 once_cell = "1.19"
-tower = "0.4"
+tower = "0.5"
 
 [features]
 default = []
-kafka = ["rdkafka", "common-audit"]
+# Canonical producer feature
+kafka-producer = ["rdkafka", "common-audit/kafka-producer"]
+# Backward-compatible alias
+kafka = ["kafka-producer"]
+# Lightweight core (no rdkafka linkage)
+kafka-core = ["common-audit/kafka-core"]
 

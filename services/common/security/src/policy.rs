@@ -32,9 +32,13 @@ fn allowed_roles(cap: Capability) -> &'static [Role] {
 
 pub fn ensure_capability(ctx: &SecurityContext, cap: Capability) -> Result<(), SecurityError> {
     let allowed = allowed_roles(cap);
-    if ctx.roles.iter().any(|r| allowed.iter().any(|a| a == r)) { return Ok(()); }
+    if ctx.roles.iter().any(|r| allowed.iter().any(|a| a == r)) {
+        CAPABILITY_CHECKS_TOTAL.with_label_values(&[cap.as_str(), "allow"]).inc();
+        return Ok(());
+    }
     tracing::warn!(?cap, roles = ?ctx.roles, tenant_id = %ctx.tenant_id, "capability_denied");
     CAPABILITY_DENIALS_TOTAL.with_label_values(&[cap.as_str()]).inc();
+    CAPABILITY_CHECKS_TOTAL.with_label_values(&[cap.as_str(), "deny"]).inc();
     Err(SecurityError::Forbidden)
 }
 
@@ -65,12 +69,21 @@ pub async fn emit_capability_denial_audit(
     }
 }
 
-// ---- Metrics (Capability Denials) ----
+// ---- Metrics (Capability Denials + Checks) ----
 static CAPABILITY_DENIALS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
     let c = IntCounterVec::new(
         Opts::new("capability_denials_total", "Total count of capability authorization denials by capability"),
         &["capability"],
     ).expect("capability_denials_total");
+    let _ = prometheus::default_registry().register(Box::new(c.clone()));
+    c
+});
+
+static CAPABILITY_CHECKS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    let c = IntCounterVec::new(
+        Opts::new("capability_checks_total", "Total capability authorization checks by capability and outcome (allow|deny)"),
+        &["capability", "outcome"],
+    ).expect("capability_checks_total");
     let _ = prometheus::default_registry().register(Box::new(c.clone()));
     c
 });

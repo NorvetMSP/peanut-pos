@@ -1,15 +1,15 @@
 use crate::config::GatewayConfig;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-#[cfg(feature = "kafka")] use rdkafka::producer::{FutureProducer, FutureRecord};
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))] use rdkafka::producer::{FutureProducer, FutureRecord};
 use serde::Serialize;
 use sqlx::PgPool;
 use std::collections::HashMap;
 use std::sync::Arc;
-#[cfg(feature = "kafka")] use std::time::Duration as StdDuration;
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))] use std::time::Duration as StdDuration;
 use tokio::sync::Mutex;
 use tokio::time::{interval, Duration, MissedTickBehavior};
-#[cfg(feature = "kafka")] use tracing::error;
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))] use tracing::error;
 use tracing::warn;
 use uuid::Uuid;
 
@@ -20,7 +20,7 @@ pub struct UsageTracker {
 
 struct UsageTrackerInner {
     pool: PgPool,
-    #[cfg(feature = "kafka")] producer: FutureProducer,
+    #[cfg(any(feature = "kafka", feature = "kafka-producer"))] producer: FutureProducer,
     topic: String,
     flush_secs: u64,
     summary_secs: u64,
@@ -75,11 +75,11 @@ struct ApiKeyUsageSummary {
 
 impl UsageTracker {
     pub fn new(config: Arc<GatewayConfig>, pool: PgPool,
-        #[cfg(feature = "kafka")] producer: Option<FutureProducer>,
+    #[cfg(any(feature = "kafka", feature = "kafka-producer"))] producer: Option<FutureProducer>,
         #[cfg(not(feature = "kafka"))] _producer: Option<()>
     ) -> Self {
         Self { inner: Arc::new(UsageTrackerInner { pool,
-            #[cfg(feature = "kafka")] producer: producer.expect("producer required when kafka feature enabled"),
+            #[cfg(any(feature = "kafka", feature = "kafka-producer"))] producer: producer.expect("producer required when kafka feature enabled"),
             topic: config.audit_topic.clone(),
             flush_secs: config.api_usage_flush_secs,
             summary_secs: config.api_usage_summary_secs,
@@ -228,7 +228,7 @@ impl UsageTracker {
             return Ok(());
         }
 
-        #[cfg(feature = "kafka")]
+    #[cfg(any(feature = "kafka", feature = "kafka-producer"))]
         {
             for summary in summaries {
                 let event = ApiKeyUsageSummary { action: "api_key.usage.summary", tenant_id: summary.tenant_id, key_hash: summary.key_hash.clone(), key_suffix: summary.key_suffix.clone(), window_start: summary.window_start, window_end: summary.window_end, request_count: summary.request_count, rejected_count: summary.rejected_count };

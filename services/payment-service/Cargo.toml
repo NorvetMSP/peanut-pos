@@ -6,8 +6,12 @@ edition = "2021"
 [features]
 default = []
 test-helpers = []
-# Enable audit/Kafka integration paths for capability denial events. Forward to common-security & common-audit.
-kafka = ["common-security/kafka", "common-audit/kafka", "rdkafka"]
+# Canonical producer feature (full rdkafka path & audit emission)
+kafka-producer = ["common-security/kafka", "common-audit/kafka-producer", "rdkafka"]
+# Legacy alias retained for scripts / older docs
+kafka = ["kafka-producer"]
+# Lightweight core (no rdkafka) for compile-only references
+kafka-core = ["common-security/kafka-core", "common-audit/kafka-core"]
 
 [dependencies]
 common-auth = { path = "../common/auth" }

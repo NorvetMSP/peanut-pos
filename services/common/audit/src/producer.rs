@@ -1,9 +1,9 @@
 use crate::{AuditActor, AuditEvent, AuditResult, AUDIT_EVENT_VERSION, AuditSeverity};
-#[cfg(feature = "kafka")] use crate::AuditError;
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))] use crate::AuditError;
 use chrono::Utc;
 use uuid::Uuid;
-#[cfg(feature = "kafka")] use rdkafka::producer::{FutureProducer, FutureRecord};
-#[cfg(feature = "kafka")] use std::time::Duration;
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))] use rdkafka::producer::{FutureProducer, FutureRecord};
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))] use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
@@ -16,16 +16,17 @@ pub trait AuditSink: Send + Sync + 'static {
     async fn emit(&self, event: AuditEvent) -> AuditResult<()>;
 }
 
-#[cfg(feature = "kafka")]
+// Real Kafka sink implementation (requires rdkafka)
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))]
 #[derive(Clone)]
 pub struct KafkaAuditSink { pub(crate) inner: FutureProducer, pub(crate) config: AuditProducerConfig }
 
-#[cfg(feature = "kafka")]
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))]
 impl KafkaAuditSink {
     pub fn new(inner: FutureProducer, config: AuditProducerConfig) -> Self { Self { inner, config } }
 }
 
-#[cfg(feature = "kafka")]
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))]
 #[async_trait::async_trait]
 impl AuditSink for KafkaAuditSink {
     async fn emit(&self, event: AuditEvent) -> AuditResult<()> {
@@ -36,6 +37,20 @@ impl AuditSink for KafkaAuditSink {
         Ok(())
     }
 }
+
+// Stub KafkaAuditSink for kafka-core feature (compile-time type presence, no rdkafka linkage)
+#[cfg(all(feature = "kafka-core", not(any(feature = "kafka", feature = "kafka-producer"))))]
+#[derive(Clone)]
+pub struct KafkaAuditSink { pub(crate) config: AuditProducerConfig }
+
+#[cfg(all(feature = "kafka-core", not(any(feature = "kafka", feature = "kafka-producer"))))]
+impl KafkaAuditSink {
+    pub fn new<T>(_inner: T, config: AuditProducerConfig) -> Self { Self { config } }
+}
+
+#[cfg(all(feature = "kafka-core", not(any(feature = "kafka", feature = "kafka-producer"))))]
+#[async_trait::async_trait]
+impl AuditSink for KafkaAuditSink { async fn emit(&self, _event: AuditEvent) -> AuditResult<()> { Ok(()) } }
 
 pub struct NoopAuditSink;
 

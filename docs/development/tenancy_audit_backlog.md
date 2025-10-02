@@ -415,6 +415,22 @@ Note: Main backlog table left unmodified per append-only governance; this sectio
   3. Alert heuristic: sustained spike in a specific capability denies (could indicate misconfigured role assignment or attempted abuse).
 - Risk Assessment: Minimal — counter increment is O(1); contention negligible given low deny frequency expectation compared to read paths.
 - Backlog Mapping: Supports TA-OPS class observability goals; not adding new table row (append-only governance) — evidence recorded here.
+
+2025-10-02 (Capability Checks Metric – Denial Rate Foundation):
+
+- Added Prometheus counter `capability_checks_total{capability,outcome}` where `outcome` ∈ {`allow`,`deny`} in `common-security::policy`.
+- Purpose: Enables calculation of denial rate = denies / (allows + denies) per capability; supports proactive tuning and UX guidance.
+- Interaction with `capability_denials_total`: Redundant for absolute deny counts, but retained for backwards compatibility and simpler dashboards already referencing it.
+- Implementation Details:
+  - Increment on both paths inside `ensure_capability` (before returning).
+  - Uses bounded label sets (enum + two outcomes) → stable cardinality.
+  - Registered in default registry; no feature flags.
+- Next Visualization Steps:
+  1. Grafana: SingleStat or time-series panel showing top N denial rates (sort by rate, threshold >0.05 for highlight).
+  2. Alert: High sustained denial rate (e.g. >30% over 15m) for a capability triggers review (could indicate role misconfiguration).
+  3. Derive success-only panel (stacked area) to show capability usage distribution across tenants (future: add tenant label gate—beware cardinality).
+- Follow-Up Consideration: Potential histogram `capability_eval_latency_seconds` if policy evaluation grows beyond static table (future policy engine spike TA-POL-2).
+- Governance: Append-only evidence; no main backlog table mutation.
 - Risk: Potential silent omission of expected events if production deploy omits `--features kafka`; mitigation: document run instructions & add CI check ensuring feature enabled for release profile.
 - Next: Proceed with TA-PERF-2 (backpressure metrics) and TA-PERF-3 (rate limiter metrics) instrumentation; then overflow saturation telemetry (TA-OPS-9).
 

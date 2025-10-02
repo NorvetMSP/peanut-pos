@@ -28,7 +28,9 @@ common-http-errors = { path = "../common/http-errors" }
 tower = "0.5"
 
 [features]
-kafka = ["rdkafka"]
+kafka-producer = ["rdkafka"] # full producer
+kafka = ["kafka-producer"]
+kafka-core = []
 
 
 #! Removed duplicate features block

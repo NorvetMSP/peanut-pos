@@ -1,10 +1,10 @@
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
-#[cfg(feature = "kafka")] use rdkafka::producer::{FutureProducer, FutureRecord};
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))] use rdkafka::producer::{FutureProducer, FutureRecord};
 use reqwest::Client;
 use serde::Serialize;
 use serde_json::json;
-#[cfg(feature = "kafka")] use std::time::Duration;
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))] use std::time::Duration;
 use tracing::{info, warn};
 use uuid::Uuid;
 
@@ -22,7 +22,7 @@ pub struct RateLimitAlertEvent {
     pub message: String,
 }
 
-#[cfg(feature = "kafka")]
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))]
 pub async fn publish_rate_limit_alert(producer: &FutureProducer, topic: &str, event: &RateLimitAlertEvent) -> Result<()> {
     if topic.trim().is_empty() { return Ok(()); }
     let payload = serde_json::to_string(event)?;
@@ -31,7 +31,7 @@ pub async fn publish_rate_limit_alert(producer: &FutureProducer, topic: &str, ev
     Ok(())
 }
 
-#[cfg(not(feature = "kafka"))]
+#[cfg(not(any(feature = "kafka", feature = "kafka-producer")))]
 pub async fn publish_rate_limit_alert(_producer: &(), _topic: &str, _event: &RateLimitAlertEvent) -> Result<()> {
     // No-op when kafka disabled
     Ok(())

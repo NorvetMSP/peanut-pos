@@ -27,7 +27,9 @@ common-audit = { path = "../common/audit" }
 
 [features]
 default = []
-kafka = ["rdkafka", "futures"]
+kafka-producer = ["rdkafka", "futures"]
+kafka = ["kafka-producer"]
+kafka-core = []
 # Enables running integration tests that require external services (e.g., Postgres, Kafka)
-integration = ["kafka"]
+integration = ["kafka-producer"]
 

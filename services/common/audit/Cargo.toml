@@ -5,8 +5,13 @@ authors = ["NovaPOS Team"]
 edition = "2021"
 
 [features]
-# Do not enable Kafka by default so test builds avoid native Kafka+zlib linkage
-kafka = ["rdkafka"]
+# Split features:
+# - kafka-core: expose KafkaAuditSink stub (no rdkafka linkage) enabling code to compile against the type without native deps.
+# - kafka-producer: enables real rdkafka producer implementation.
+# - kafka: backward-compat umbrella enabling kafka-producer.
+kafka-core = []
+kafka-producer = ["rdkafka"]
+kafka = ["kafka-producer"]
 
 [dependencies]
 axum = { version = "0.7", features=["json"] }

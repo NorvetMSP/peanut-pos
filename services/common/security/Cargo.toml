@@ -6,8 +6,9 @@ license = "Apache-2.0"
 
 [features]
 default = []
-# Forward kafka feature to common-audit for KafkaAuditSink type usage in emit_capability_denial_audit
-kafka = ["common-audit/kafka"]
+kafka-core = ["common-audit/kafka-core"]
+kafka-producer = ["common-audit/kafka-producer"]
+kafka = ["kafka-producer"]
 
 [dependencies]
 axum = { version = "0.7", features = ["macros"] }
