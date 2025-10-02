@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 common-auth = { path = "../common/auth" }
+common-security = { path = "../common/security" }
 common-money = { path = "../common/money" }
 common-observability = { path = "../common/observability" }
 tower-http = { version = "0.5", features = ["cors"] }

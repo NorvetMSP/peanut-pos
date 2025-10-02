@@ -6,9 +6,11 @@ edition = "2021"
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 common-auth = { path = "../common/auth" }
+common-security = { path = "../common/security" }
 common-crypto = { path = "../common/crypto" }
 common-money = { path = "../common/money" }
 common-http-errors = { path = "../common/http-errors" }
+common-audit = { path = "../common/audit" }
 tower-http = { version = "0.5", features = ["cors"] }
 anyhow = "1"
 tracing = "0.1"

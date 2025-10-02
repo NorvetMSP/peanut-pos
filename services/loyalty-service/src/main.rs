@@ -1,6 +1,6 @@
 use anyhow::Context;
 use axum::{
-    extract::{FromRef, Query, State},
+    extract::FromRef,
     http::{
         header::{ACCEPT, CONTENT_TYPE},
         HeaderName, HeaderValue, Method,
@@ -8,11 +8,7 @@ use axum::{
     routing::get,
     Router,
 };
-use common_auth::{
-    ensure_role, tenant_id_from_request, AuthContext, JwtConfig, JwtVerifier, ROLE_ADMIN,
-    ROLE_CASHIER, ROLE_MANAGER, ROLE_SUPER_ADMIN,
-};
-use common_http_errors::ApiError;
+use common_auth::{ JwtConfig, JwtVerifier };
 use common_money::log_rounding_mode_once;
 #[cfg(feature = "kafka")] use futures::StreamExt;
 #[cfg(feature = "kafka")] use rdkafka::consumer::{Consumer, StreamConsumer};
@@ -21,7 +17,6 @@ use common_money::log_rounding_mode_once;
 use serde::Deserialize;
 use sqlx::PgPool;
 use std::{
-    collections::HashMap,
     env,
     net::{IpAddr, SocketAddr},
     sync::Arc,
@@ -33,6 +28,9 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
+mod api; // expose library module for tests & reuse
+pub use crate::api::{AppState, get_points, LOYALTY_VIEW_ROLES};
+
 #[derive(Debug, Deserialize)]
 struct CompletedEvent {
     order_id: Uuid,
@@ -41,45 +39,8 @@ struct CompletedEvent {
     customer_id: Option<Uuid>,
 }
 
-#[derive(Clone)]
-struct AppState {
-    db: PgPool,
-    jwt_verifier: Arc<JwtVerifier>,
-    #[cfg(feature = "kafka")] producer: FutureProducer,
-}
-
 impl FromRef<AppState> for Arc<JwtVerifier> {
-    fn from_ref(state: &AppState) -> Self {
-        state.jwt_verifier.clone()
-    }
-}
-
-const LOYALTY_VIEW_ROLES: &[&str] = &[ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_MANAGER, ROLE_CASHIER];
-
-async fn get_points(
-    State(state): State<AppState>,
-    auth: AuthContext,
-    Query(params): Query<HashMap<String, String>>,
-    headers: axum::http::HeaderMap,
-) -> Result<String, ApiError> {
-    ensure_role(&auth, LOYALTY_VIEW_ROLES).map_err(|_| ApiError::ForbiddenMissingRole { role: "loyalty_view", trace_id: None })?;
-    let tenant_id = tenant_id_from_request(&headers, &auth).map_err(|_| ApiError::BadRequest { code: "missing_tenant", trace_id: None, message: Some("Missing tenant id".into()) })?;
-
-    let cust_id = params
-        .get("customer_id")
-        .and_then(|s| Uuid::parse_str(s).ok())
-        .ok_or(ApiError::BadRequest { code: "missing_customer_id", trace_id: None, message: Some("customer_id required".into()) })?;
-
-    let rec = sqlx::query!(
-        r#"SELECT points FROM loyalty_points WHERE customer_id = $1 AND tenant_id = $2"#,
-        cust_id,
-        tenant_id
-    )
-    .fetch_one(&state.db)
-    .await
-    .map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("DB error: {}", e)) })?;
-
-    Ok(rec.points.to_string())
+    fn from_ref(state: &AppState) -> Self { state.jwt_verifier.clone() }
 }
 
 #[tokio::main]
@@ -180,71 +141,12 @@ async fn main() -> anyhow::Result<()> {
         .layer(cors);
 
     let host = env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
-    let port: u16 = env::var("PORT")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(8088);
-    let ip: IpAddr = host.parse()?;
-    let addr = SocketAddr::from((ip, port));
-    println!("starting loyalty-service on {addr}");
+    let port: u16 = env::var("PORT").ok().and_then(|v| v.parse().ok()).unwrap_or(8088);
+    let addr: SocketAddr = format!("{host}:{port}").parse()?;
+    info!(%addr, "Starting loyalty-service HTTP server");
     let listener = TcpListener::bind(addr).await?;
-    axum::serve(listener, app.into_make_service()).await?;
-
+    axum::serve(listener, app).await?;
     Ok(())
-}
-
-#[cfg(feature = "kafka")]
-async fn handle_completed_event(
-    evt: &CompletedEvent,
-    cust_id: Uuid,
-    db: &PgPool,
-    producer: &FutureProducer,
-) {
-    let delta = if evt.total >= 0.0 {
-        evt.total.floor() as i32
-    } else {
-        -(evt.total.abs().floor() as i32)
-    };
-
-    if delta != 0 {
-        let _ = sqlx::query!(
-            r#"INSERT INTO loyalty_points (customer_id, tenant_id, points)
-                VALUES ($1, $2, $3)
-                ON CONFLICT (customer_id, tenant_id) DO UPDATE
-                SET points = loyalty_points.points + EXCLUDED.points"#,
-            cust_id,
-            evt.tenant_id,
-            delta
-        )
-        .execute(db)
-        .await;
-    }
-
-    if let Ok(record) = sqlx::query!(
-        r#"SELECT points FROM loyalty_points WHERE customer_id = $1 AND tenant_id = $2"#,
-        cust_id,
-        evt.tenant_id
-    )
-    .fetch_one(db)
-    .await
-    {
-        let new_balance = record.points;
-        let loyalty_event = serde_json::json!({
-            "order_id": evt.order_id,
-            "customer_id": cust_id,
-            "tenant_id": evt.tenant_id,
-            "points_delta": delta,
-            "new_balance": new_balance
-        });
-        let _ = producer
-            .send(
-                FutureRecord::to("loyalty.updated")
-                    .payload(&loyalty_event.to_string())
-                    .key(&evt.tenant_id.to_string()),
-                Duration::from_secs(0),
-            )
-            .await;
-    }
 }
 
 #[cfg(all(test, feature = "kafka"))]

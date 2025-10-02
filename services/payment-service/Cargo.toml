@@ -9,6 +9,7 @@ test-helpers = []
 
 [dependencies]
 common-auth = { path = "../common/auth" }
+common-security = { path = "../common/security" }
 tower-http = { version = "0.5", features = ["cors"] }
 axum = "0.7"
 tokio = { version = "1", features = ["full"] }

@@ -45,6 +45,15 @@ pub async fn seed_inventory_basics(pool: &PgPool) -> (Uuid, Uuid, Uuid) {
     (tenant_id, product_id, loc)
 }
 
+/// Ensure minimal tables exist for inventory tests when migrations are not executed.
+pub async fn ensure_inventory_schema(pool: &PgPool) -> Result<(), sqlx::Error> {
+    sqlx::query("CREATE TABLE IF NOT EXISTS inventory (product_id uuid, tenant_id uuid, quantity int, threshold int)")
+        .execute(pool).await?;
+    sqlx::query("CREATE TABLE IF NOT EXISTS inventory_items (product_id uuid, tenant_id uuid, location_id uuid, quantity int, threshold int)")
+        .execute(pool).await?;
+    Ok(())
+}
+
 /// Issue a dev JWT using the repo's dev private key.
 pub fn issue_dev_jwt(tenant_id: Uuid, roles: &[&str], issuer: &str, audience: &str) -> String {
     #[derive(serde::Serialize)]

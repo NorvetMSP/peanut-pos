@@ -1,8 +1,9 @@
 use std::sync::Arc;
-use common_auth::{JwtVerifier, ROLE_ADMIN, ROLE_CASHIER, ROLE_SUPER_ADMIN};
+use common_auth::JwtVerifier;
+use common_security::roles::Role;
 use axum::extract::FromRef;
 
-pub const PAYMENT_ROLES: &[&str] = &[ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_CASHIER];
+pub const PAYMENT_ROLES: &[Role] = &[Role::Admin, Role::Manager, Role::Inventory]; // Temporary mapping until expanded role model (POL-1)
 
 #[derive(Clone)]
 pub struct AppState {
