@@ -1,5 +1,5 @@
 use axum::{Router, routing::get, http::{Request, StatusCode, HeaderValue}};
-use loyalty_service::{api::get_points, api::AppState};
+use loyalty_service::{get_points, AppState};
 use sqlx::postgres::PgPoolOptions;
 use std::sync::Arc;
 use common_auth::{JwtVerifier, JwtConfig};
@@ -20,6 +20,7 @@ async fn missing_tenant_400() {
     let req = Request::builder().uri("/points?customer_id=aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa").body(axum::body::Body::empty()).unwrap();
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(resp.headers().get("X-Error-Code").unwrap(), "missing_tenant_id");
 }
 
 #[tokio::test]
@@ -32,4 +33,17 @@ async fn forbidden_role_403() {
     h.insert("X-User-ID", HeaderValue::from_static("22222222-2222-2222-2222-222222222222"));
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    assert_eq!(resp.headers().get("X-Error-Code").unwrap(), "missing_role");
+}
+
+#[tokio::test]
+async fn internal_error_500() {
+    use axum::{routing::get};
+    use common_http_errors::ApiError;
+    async fn boom() -> Result<String, ApiError> { Err(ApiError::Internal { trace_id: None, message: Some("synthetic".into()) }) }
+    let app = Router::new().route("/boom", get(boom));
+    let req = Request::builder().uri("/boom").body(axum::body::Body::empty()).unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(resp.headers().get("X-Error-Code").unwrap(), "internal_error");
 }

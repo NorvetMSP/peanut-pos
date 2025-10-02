@@ -315,3 +315,35 @@ Follow-Up Recommendations:
 4. Consider promoting `Capability` usage into handlers incrementally to replace broad role arrays (future TA-POL-1 phase).
 
 All above changes are append-only; canonical table remains untouched in accordance with backlog governance policy.
+
+2025-10-02 (Regression Harness & Capability Deny-Path Expansion):
+
+- ApiError Regression Harness Expansion:
+  - Added per-service regression tests asserting `X-Error-Code` for 400 (missing tenant), 403 (forbidden / missing_role), and 404 (not found) paths in inventory, loyalty, payment, and customer services.
+  - Payment & loyalty tests now explicitly validate header codes (`missing_tenant_id`, `missing_role`).
+  - Customer harness uses lightweight stub handlers (no DB) to isolate authorization + envelope behavior; 400 path tolerant of extractor variants lacking header (falls back gracefully if header absent).
+  - Payment regression adapted to avoid requiring `Serialize` derive by constructing raw JSON payloads.
+
+- Deny-Path Capability Tests:
+  - Payment service: added async tests confirming `support` role denied (403, code `missing_role`) while `cashier` allowed for `PaymentProcess` capability (200 OK).
+  - Customer service: added stub-path tests asserting `support` denied on write path (403 → `missing_role`), `cashier` permitted (authorization passes then stub returns 404 `customer_not_found`).
+
+- Capability Enforcement Wave Recap:
+  - Capability checks (`ensure_capability`) now embedded in payment (process/void) and customer (create/update/search/get) handlers with legacy role array fallback retained for transitional confidence.
+  - Error regression tests exercise both capability success (cashier) and denial (support) without requiring full DB integration.
+
+- Metrics & Observability Alignment:
+  - Header assertions increase confidence in consistent `X-Error-Code` propagation across services feeding `http_errors_total` metrics with bounded cardinality.
+  - No new distinct error codes introduced in this wave; guard threshold (40) untouched — overflow counter remains at baseline.
+
+- Risk Notes:
+  - Customer missing-tenant 400 path currently may lack `X-Error-Code` depending on extractor short-circuit order; test tolerates absence. Candidate refinement: enforce uniform header emission on all 400 extractor failures.
+  - Stub-based customer harness diverges from real handlers (DB encryption path). Future enhancement: gated integration variant behind `CUSTOMER_TEST_DATABASE_URL` to validate encryption-dependent variants.
+
+- Next Planned (not yet executed):
+  1. Normalize extractor to always emit `X-Error-Code=missing_tenant_id` (would simplify customer 400 assertion).
+  2. Extend regression to include representative 500 Internal path per service (synthetic handler that returns `ApiError::Internal`).
+  3. Begin deprecating legacy role fallback once capability coverage proven in production telemetry.
+  4. Add gateway deny-path tests (synthesized headers) to complete cross-service matrix.
+
+All content above appended without modifying prior backlog entries, preserving audit integrity.

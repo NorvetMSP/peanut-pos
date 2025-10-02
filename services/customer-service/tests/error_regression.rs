@@ -51,6 +51,9 @@ async fn missing_tenant_400_create() {
     let req = Request::builder().uri("/customers").method("POST").header("content-type","application/json").body(axum::body::Body::from(json_body)).unwrap();
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST); // missing tenant header rejected by extractor
+    if let Some(code) = resp.headers().get("X-Error-Code") {
+        assert_eq!(code, "missing_tenant_id");
+    }
 }
 
 #[tokio::test]
@@ -64,6 +67,7 @@ async fn forbidden_role_403_create() {
     h.insert("X-User-ID", HeaderValue::from_static("22222222-2222-2222-2222-222222222222"));
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    assert_eq!(resp.headers().get("X-Error-Code").unwrap(), "missing_role");
 }
 
 #[tokio::test]
@@ -77,4 +81,46 @@ async fn not_found_404_get() {
     h.insert("X-User-ID", HeaderValue::from_static("22222222-2222-2222-2222-222222222222"));
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    assert_eq!(resp.headers().get("X-Error-Code").unwrap(), "customer_not_found");
+}
+
+#[tokio::test]
+async fn support_role_denied_customer_write() {
+    let app = Router::new().route("/customers", post(create_customer_stub)).with_state(state());
+    let json_body = r#"{ "name": "User", "email": "u@example.com" }"#;
+    let mut req = Request::builder().uri("/customers").method("POST").header("content-type","application/json").body(axum::body::Body::from(json_body)).unwrap();
+    let h = req.headers_mut();
+    h.insert("X-Tenant-ID", HeaderValue::from_static("11111111-1111-1111-1111-111111111111"));
+    h.insert("X-Roles", HeaderValue::from_static("support"));
+    h.insert("X-User-ID", HeaderValue::from_static("99999999-9999-9999-9999-999999999999"));
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    assert_eq!(resp.headers().get("X-Error-Code").unwrap(), "missing_role");
+}
+
+#[tokio::test]
+async fn cashier_role_allowed_customer_write_path_then_404() {
+    let app = Router::new().route("/customers", post(create_customer_stub)).with_state(state());
+    let json_body = r#"{ "name": "User", "email": "u@example.com" }"#;
+    let mut req = Request::builder().uri("/customers").method("POST").header("content-type","application/json").body(axum::body::Body::from(json_body)).unwrap();
+    let h = req.headers_mut();
+    h.insert("X-Tenant-ID", HeaderValue::from_static("11111111-1111-1111-1111-111111111111"));
+    h.insert("X-Roles", HeaderValue::from_static("cashier"));
+    h.insert("X-User-ID", HeaderValue::from_static("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"));
+    let resp = app.oneshot(req).await.unwrap();
+    // After auth passes we get our stubbed NotFound
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    assert_eq!(resp.headers().get("X-Error-Code").unwrap(), "customer_not_found");
+}
+
+#[tokio::test]
+async fn internal_error_500() {
+    use axum::routing::get;
+    use common_http_errors::ApiError;
+    async fn boom() -> Result<String, ApiError> { Err(ApiError::Internal { trace_id: None, message: Some("synthetic".into()) }) }
+    let app = Router::new().route("/boom", get(boom));
+    let req = Request::builder().uri("/boom").method("GET").body(axum::body::Body::empty()).unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(resp.headers().get("X-Error-Code").unwrap(), "internal_error");
 }

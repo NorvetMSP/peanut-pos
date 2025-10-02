@@ -1,28 +1,15 @@
-use inventory_service::{AppState, create_reservation};
+use inventory_service::create_reservation;
+mod test_utils;
+use test_utils::lazy_app_state;
 use axum::{Router, routing::post};
 use axum::http::{Request, HeaderValue, StatusCode};
-use sqlx::postgres::PgPoolOptions;
-use std::sync::Arc;
-use common_observability::InventoryMetrics;
 use tower::ServiceExt;
 use uuid::Uuid;
 use serde_json::json;
 
 #[tokio::test]
 async fn create_reservation_rejects_empty_items() {
-    let pool = PgPoolOptions::new().connect_lazy("postgres://postgres:postgres@localhost:5432/inventory_tests").unwrap();
-    let jwt_verifier = Arc::new(common_auth::JwtVerifier::new(common_auth::JwtConfig::new("issuer","aud")));
-    #[cfg(feature = "kafka")] let producer: rdkafka::producer::FutureProducer = rdkafka::ClientConfig::new().set("bootstrap.servers","localhost:9092").create().unwrap();
-    let state = AppState {
-        db: pool,
-        jwt_verifier,
-        multi_location_enabled: false,
-        reservation_default_ttl: std::time::Duration::from_secs(900),
-        reservation_expiry_sweep: std::time::Duration::from_secs(60),
-        dual_write_enabled: false,
-        #[cfg(feature = "kafka")] kafka_producer: producer,
-        metrics: Arc::new(InventoryMetrics::new()),
-    };
+    let state = lazy_app_state();
 
     let app = Router::new().route("/inventory/reservations", post(create_reservation)).with_state(state);
 
@@ -42,4 +29,5 @@ async fn create_reservation_rejects_empty_items() {
 
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "empty items should be rejected");
+    assert_eq!(resp.headers().get("X-Error-Code").unwrap(), "empty_reservation");
 }

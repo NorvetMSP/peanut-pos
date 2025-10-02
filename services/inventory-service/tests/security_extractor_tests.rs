@@ -1,6 +1,6 @@
-use inventory_service::{AppState, list_inventory};
+use inventory_service::{list_inventory, AppState};
 mod test_utils; // bring in tests/test_utils.rs
-use test_utils::ensure_inventory_schema;
+use test_utils::{ensure_inventory_schema, lazy_app_state};
 use axum::http::{Request, StatusCode, HeaderValue};
 use axum::{routing::get, Router};
 use sqlx::postgres::PgPoolOptions;
@@ -12,26 +12,7 @@ use uuid::Uuid;
 
 #[tokio::test]
 async fn list_inventory_missing_tenant_header() {
-    // This test only exercises extractor rejection; no DB interaction should occur.
-    // Use lazy pool to avoid requiring a live Postgres unless handler logic executes (it won't on missing tenant).
-    let db_url = std::env::var("TEST_DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://postgres:postgres@localhost:5432/inventory_tests".to_string());
-    let pool = PgPoolOptions::new()
-        .connect_lazy(&db_url)
-        .expect("lazy pool");
-    // JwtVerifier not used directly now; placeholder from common-auth path via inventory_service AppState
-    let jwt_verifier = Arc::new(common_auth::JwtVerifier::new(common_auth::JwtConfig::new("issuer","aud")));
-    #[cfg(feature = "kafka")] let producer: rdkafka::producer::FutureProducer = rdkafka::ClientConfig::new().set("bootstrap.servers","localhost:9092").create().unwrap();
-    let state = AppState {
-        db: pool,
-        jwt_verifier,
-        multi_location_enabled: false,
-        reservation_default_ttl: std::time::Duration::from_secs(900),
-        reservation_expiry_sweep: std::time::Duration::from_secs(60),
-        dual_write_enabled: false,
-        #[cfg(feature = "kafka")] kafka_producer: producer,
-        metrics: Arc::new(InventoryMetrics::new()),
-    };
+    let state = lazy_app_state();
 
     // Real extractor path: simply call endpoint without required header
     let app = Router::new().route("/inventory", get(list_inventory)).with_state(state);
@@ -39,25 +20,12 @@ async fn list_inventory_missing_tenant_header() {
     // Intentionally omit X-Tenant-ID -> extractor should 400 (rejection)
     let response = app.oneshot(req).await.unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(response.headers().get("X-Error-Code").unwrap(), "missing_tenant_id");
 }
 
 #[tokio::test]
 async fn list_inventory_cross_tenant_forbidden_when_mismatch() {
-    let pool = PgPoolOptions::new()
-        .connect_lazy("postgres://postgres:postgres@localhost:5432/inventory_tests")
-        .expect("lazy pool");
-    let jwt_verifier = Arc::new(common_auth::JwtVerifier::new(common_auth::JwtConfig::new("issuer","aud")));
-    #[cfg(feature = "kafka")] let producer: rdkafka::producer::FutureProducer = rdkafka::ClientConfig::new().set("bootstrap.servers","localhost:9092").create().unwrap();
-    let state = AppState {
-        db: pool,
-        jwt_verifier,
-        multi_location_enabled: false,
-        reservation_default_ttl: std::time::Duration::from_secs(900),
-        reservation_expiry_sweep: std::time::Duration::from_secs(60),
-        dual_write_enabled: false,
-        #[cfg(feature = "kafka")] kafka_producer: producer,
-        metrics: Arc::new(InventoryMetrics::new()),
-    };
+    let state = lazy_app_state();
 
     let app = Router::new().route("/inventory", get(list_inventory)).with_state(state);
 

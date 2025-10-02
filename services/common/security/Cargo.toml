@@ -16,3 +16,4 @@ thiserror = "1"
 headers = "0.4"
 common-audit = { path = "../audit" }
 common-auth = { path = "../auth" }
+common-http-errors = { path = "../http-errors" }

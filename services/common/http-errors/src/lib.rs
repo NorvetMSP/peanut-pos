@@ -65,7 +65,7 @@ pub type ApiResult<T> = Result<T, ApiError>;
 
 // Shared HTTP error metrics middleware helper
 use once_cell::sync::Lazy;
-use prometheus::{IntCounterVec, Opts, IntCounter};
+use prometheus::{IntCounterVec, Opts, IntCounter, IntGauge};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::collections::HashSet;
 use std::sync::Mutex;
@@ -93,6 +93,15 @@ static HTTP_ERROR_CODE_OVERFLOW_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
     c
 });
 
+static HTTP_ERROR_CODES_DISTINCT: Lazy<IntGauge> = Lazy::new(|| {
+    let g = IntGauge::new(
+        "http_error_codes_distinct",
+        "Current number of distinct HTTP error codes being tracked (capped by guard)",
+    ).expect("http_error_codes_distinct");
+    let _ = prometheus::default_registry().register(Box::new(g.clone()));
+    g
+});
+
 // Cardinality guard: limit the number of distinct error codes to avoid metrics explosion.
 const MAX_ERROR_CODES: usize = 40; // tunable threshold
 static ERROR_CODE_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -117,7 +126,8 @@ pub fn http_error_metrics_layer(service_name: &'static str) -> impl Fn(Request<B
                     } else {
                         if ERROR_CODE_COUNT.load(Ordering::Relaxed) < MAX_ERROR_CODES {
                             set.insert(raw_code.to_string());
-                            ERROR_CODE_COUNT.fetch_add(1, Ordering::Relaxed);
+                            let new = ERROR_CODE_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+                            HTTP_ERROR_CODES_DISTINCT.set(new as i64);
                             raw_code
                         } else {
                             HTTP_ERROR_CODE_OVERFLOW_TOTAL.inc();
@@ -132,11 +142,11 @@ pub fn http_error_metrics_layer(service_name: &'static str) -> impl Fn(Request<B
     }
 }
 
-#[cfg(any(test, feature = "test-helpers"))]
 pub mod test_helpers {
     use super::*;
     use axum::body::to_bytes;
     use axum::response::IntoResponse;
+    use std::sync::MutexGuard;
 
     // Simple helper (not a macro) to assert error shape from an ApiError directly.
     pub async fn assert_error_shape(err: ApiError, expected_code: &str) {
@@ -151,12 +161,30 @@ pub mod test_helpers {
             assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
         }
     }
+
+    /// Test-only: simulate recording an error code just like the middleware would (without building an HTTP response)
+    pub fn simulate_error_code(code: &str) {
+        // Mirror guard logic
+        let mut set: MutexGuard<HashSet<String>> = OBSERVED_CODES.lock().expect("lock observed codes");
+        if set.contains(code) {
+            return; // duplicate ignored for distinct tracking
+        }
+        if ERROR_CODE_COUNT.load(Ordering::Relaxed) < MAX_ERROR_CODES {
+            set.insert(code.to_string());
+            let new = ERROR_CODE_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+            HTTP_ERROR_CODES_DISTINCT.set(new as i64);
+        } else {
+            HTTP_ERROR_CODE_OVERFLOW_TOTAL.inc();
+        }
+    }
+
+    pub fn distinct_gauge() -> i64 { HTTP_ERROR_CODES_DISTINCT.get() }
+    pub fn overflow_count() -> u64 { HTTP_ERROR_CODE_OVERFLOW_TOTAL.get() as u64 }
 }
 
 /// Test-only assertion macro for validating an ApiError's rendered response structure.
 /// Usage:
 /// assert_api_error!(err, "missing_role");
-#[cfg(any(test, feature = "test-helpers"))]
 #[macro_export]
 macro_rules! assert_api_error {
     ($err:expr, $code:expr) => {{

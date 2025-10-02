@@ -3,6 +3,38 @@ use uuid::Uuid;
 use reqwest::Client;
 use chrono::Utc;
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+use inventory_service::AppState;
+use common_observability::InventoryMetrics;
+use common_auth::{JwtVerifier, JwtConfig};
+use std::sync::Arc;
+
+/// Build an AppState with a lazily-connected pool suitable for negative-path tests
+/// that short-circuit before any DB interaction (e.g. extractor rejections, early
+/// validation failures). This avoids requiring a running Postgres for those tests.
+pub fn lazy_app_state() -> AppState {
+    let db_url = std::env::var("TEST_DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://postgres:postgres@localhost:5432/inventory_tests".to_string());
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .connect_lazy(&db_url)
+        .expect("lazy pool");
+    let jwt_verifier = Arc::new(JwtVerifier::new(JwtConfig::new("issuer","aud")));
+    #[cfg(feature = "kafka")]
+    let producer: rdkafka::producer::FutureProducer = rdkafka::ClientConfig::new()
+        .set("bootstrap.servers","localhost:9092")
+        .create()
+        .expect("kafka producer");
+    AppState {
+        db: pool,
+        jwt_verifier,
+        multi_location_enabled: false,
+        reservation_default_ttl: std::time::Duration::from_secs(900),
+        reservation_expiry_sweep: std::time::Duration::from_secs(60),
+        dual_write_enabled: false,
+        #[cfg(feature = "kafka")]
+        kafka_producer: producer,
+        metrics: Arc::new(InventoryMetrics::new()),
+    }
+}
 
 /// Seed tenant + product + default location + legacy inventory & inventory_items row.
 /// Returns (tenant_id, product_id, location_id).
