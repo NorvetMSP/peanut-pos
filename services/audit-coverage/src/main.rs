@@ -3,7 +3,7 @@ use regex::Regex;
 use serde::Serialize;
 use rayon::prelude::*;
 use structopt::StructOpt;
-use std::{path::PathBuf, fs};
+use std::{path::{PathBuf, Path}, fs};
 use anyhow::Result;
 use syn::{visit::Visit, ItemFn};
 use quote::ToTokens;
@@ -56,7 +56,7 @@ struct Config {
     min_ratio: Option<f64>,
 }
 
-fn load_service_config(dir: &PathBuf) -> Config {
+fn load_service_config(dir: &Path) -> Config {
     let mut cfg = Config::default();
     let config_path = dir.join("audit_coverage.toml");
     if let Ok(text) = fs::read_to_string(&config_path) {
@@ -81,7 +81,7 @@ fn main() -> Result<()> {
     if verb_list.is_empty() && !root_cfg.verbs.is_empty() { verb_list = root_cfg.verbs.clone(); }
     if verb_list.is_empty() { verb_list = vec!["create","update","delete","refund","void","adjust"].into_iter().map(|s| s.to_string()).collect(); }
     let verb_regex = Regex::new(&format!("(?i)\\b({})\\b", verb_list.join("|")))?;
-    let audit_call_regex = Regex::new(r"audit_producer\\.emit\\(")?;
+    let audit_call_regex = Regex::new(r"audit_producer\.emit\(")?;
     let ignore_tag = "// audit:ignore";
 
     // Collect rust files under *-service/src excluding target dirs

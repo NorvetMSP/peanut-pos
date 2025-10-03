@@ -502,8 +502,8 @@ pub async fn create_order(
         }
     };
 
-    let order = match {
-    let conn = tx
+    let insert_result = {
+        let conn = tx
             .acquire()
             .await
             .map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to acquire transaction connection: {e}")) })?;
@@ -525,7 +525,8 @@ pub async fn create_order(
         .bind(idempotency_key.as_deref())
         .fetch_one(&mut *conn)
         .await
-    } {
+    };
+    let order = match insert_result {
         Ok(order) => order,
         Err(e) => {
             if let Err(release_err) = release_inventory(

@@ -148,7 +148,7 @@ async fn main() -> anyhow::Result<()> {
     use once_cell::sync::Lazy;
     use prometheus::{Registry, IntCounterVec, Opts};
     use axum::middleware;
-    static LOYALTY_REGISTRY: Lazy<Registry> = Lazy::new(|| Registry::new());
+    static LOYALTY_REGISTRY: Lazy<Registry> = Lazy::new(Registry::new);
     static HTTP_ERRORS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
         let v = IntCounterVec::new(
             Opts::new("http_errors_total", "Count of HTTP error responses emitted (status >= 400)"),

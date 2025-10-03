@@ -87,7 +87,7 @@ async fn main() -> anyhow::Result<()> {
     let consumer: StreamConsumer = rdkafka::ClientConfig::new()
         .set(
             "bootstrap.servers",
-            &env::var("KAFKA_BOOTSTRAP").unwrap_or("localhost:9092".into()),
+            env::var("KAFKA_BOOTSTRAP").unwrap_or("localhost:9092".into()),
         )
         .set("group.id", "analytics-service")
         .set("enable.auto.commit", "true")
@@ -98,7 +98,7 @@ async fn main() -> anyhow::Result<()> {
     let producer: FutureProducer = rdkafka::ClientConfig::new()
         .set(
             "bootstrap.servers",
-            &env::var("KAFKA_BOOTSTRAP").unwrap_or("localhost:9092".into()),
+            env::var("KAFKA_BOOTSTRAP").unwrap_or("localhost:9092".into()),
         )
         .create()
         .expect("failed to create kafka producer");
@@ -129,7 +129,7 @@ async fn main() -> anyhow::Result<()> {
                                                 let mut counts = product_counts_ref.lock().unwrap();
                                                 let tenant_counts = counts
                                                     .entry(tenant_id)
-                                                    .or_insert_with(HashMap::new);
+                                                    .or_default();
                                                 for item in arr {
                                                     if let Some(pid_str) = item
                                                         .get("product_id")

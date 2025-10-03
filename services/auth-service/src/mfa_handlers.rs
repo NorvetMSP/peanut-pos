@@ -145,7 +145,7 @@ pub async fn verify_mfa_enrollment(
         }
     };
 
-    let code = normalize_mfa_code(&payload.code).ok_or_else(|| AuthError::mfa_invalid())?;
+    let code = normalize_mfa_code(&payload.code).ok_or_else(AuthError::mfa_invalid)?;
 
     if !verify_totp_code(&pending_secret, &code) {
         warn!(

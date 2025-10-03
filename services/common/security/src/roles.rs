@@ -17,7 +17,7 @@ pub enum Role {
 }
 
 impl Role {
-    pub fn from_str(s: &str) -> Self {
+    pub fn parse_role(s: &str) -> Self {
         match s {
             "admin" | "Admin" => Role::Admin,
             "manager" | "Manager" => Role::Manager,
@@ -30,8 +30,16 @@ impl Role {
     }
 }
 
+impl std::str::FromStr for Role {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Role::parse_role(s))
+    }
+}
+
 pub fn ensure_role(ctx: &SecurityContext, required: Role) -> Result<(), SecurityError> {
-    if ctx.roles.iter().any(|r| *r == required) { return Ok(()); }
+    if ctx.roles.contains(&required) { return Ok(()); }
     warn!(tenant_id = %ctx.tenant_id, ?required, roles = ?ctx.roles, "role_check_failed");
     Err(SecurityError::Forbidden)
 }

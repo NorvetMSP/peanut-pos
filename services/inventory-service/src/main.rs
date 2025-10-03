@@ -179,8 +179,8 @@ async fn main() -> anyhow::Result<()> {
         db: db_pool.clone(),
         jwt_verifier,
         multi_location_enabled,
-        reservation_default_ttl: reservation_default_ttl,
-        reservation_expiry_sweep: reservation_expiry_sweep,
+    reservation_default_ttl,
+    reservation_expiry_sweep,
         dual_write_enabled,
     #[cfg(any(feature = "kafka", feature = "kafka-producer"))] kafka_producer: producer.clone(),
         metrics: metrics.clone(),
@@ -823,7 +823,7 @@ async fn expire_reservations(state: &AppState) -> anyhow::Result<()> {
                         let product_id: Uuid = row.get("product_id");
                         let sum_qty: Option<i64> = row.get("sum_qty");
                         if let Some(sum_qty) = sum_qty {
-                            if let Ok(legacy) = sqlx::query(
+                            if let Ok(Some(lrow)) = sqlx::query(
                                 "SELECT quantity FROM inventory WHERE tenant_id = $1 AND product_id = $2"
                             )
                             .bind(tenant_id)
@@ -831,11 +831,9 @@ async fn expire_reservations(state: &AppState) -> anyhow::Result<()> {
                             .fetch_optional(&state.db)
                             .await
                             {
-                                if let Some(lrow) = legacy {
-                                    let legacy_qty: i32 = lrow.get("quantity");
-                                    if legacy_qty != sum_qty as i32 {
-                                        tracing::warn!(product_id = %product_id, tenant_id = %tenant_id, legacy = legacy_qty, agg = sum_qty, "Dual-write divergence detected (sweeper)");
-                                    }
+                                let legacy_qty: i32 = lrow.get("quantity");
+                                if legacy_qty != sum_qty as i32 {
+                                    tracing::warn!(product_id = %product_id, tenant_id = %tenant_id, legacy = legacy_qty, agg = sum_qty, "Dual-write divergence detected (sweeper)");
                                 }
                             }
                         }

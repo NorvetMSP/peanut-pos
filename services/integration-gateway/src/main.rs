@@ -134,17 +134,13 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(async move {
             use tokio::time::sleep;
             use std::time::Duration;
-            loop {
-                // Periodically measure depth by peeking (rx capacity not exposed; derive via internal len approximation if available in future)
-                // For now we simply set depth to 0 when empty and update on receive events.
-                if let Some(_) = rx.recv().await {
-                    // After each item, pretend current depth decreases by 1.
-                    // In a real implementation we'd capture length via a wrapper.
-                    metrics_clone.update_channel_depth(0);
-                    sleep(Duration::from_millis(50)).await;
-                } else {
-                    break;
-                }
+            // Periodically measure depth by peeking (rx capacity not exposed; derive via internal len approximation if available in future)
+            // For now we simply set depth to 0 when empty and update on receive events.
+            while (rx.recv().await).is_some() {
+                // After each item, pretend current depth decreases by 1.
+                // In a real implementation we'd capture length via a wrapper.
+                metrics_clone.update_channel_depth(0);
+                sleep(Duration::from_millis(50)).await;
             }
         });
     }

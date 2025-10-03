@@ -51,7 +51,7 @@ pub async fn process_card_payment(
     _headers: HeaderMap,
     Json(req): Json<PaymentRequest>,
 ) -> Result<Json<PaymentResponse>, ApiError> {
-    if let Err(_) = ensure_capability(&sec, Capability::PaymentProcess) {
+    if ensure_capability(&sec, Capability::PaymentProcess).is_err() {
     #[cfg(any(feature = "kafka", feature = "kafka-producer"))] emit_capability_denial_audit(state.audit_producer.as_ref().map(|a| &**a), &sec, Capability::PaymentProcess, "payment-service").await;
         return Err(ApiError::ForbiddenMissingRole { role: "payment_access", trace_id: sec.trace_id });
     }
@@ -79,7 +79,7 @@ pub async fn void_card_payment(
     _headers: HeaderMap,
     Json(req): Json<VoidPaymentRequest>,
 ) -> Result<Json<VoidPaymentResponse>, ApiError> {
-    if let Err(_) = ensure_capability(&sec, Capability::PaymentProcess) {
+    if ensure_capability(&sec, Capability::PaymentProcess).is_err() {
     #[cfg(any(feature = "kafka", feature = "kafka-producer"))] emit_capability_denial_audit(state.audit_producer.as_ref().map(|a| &**a), &sec, Capability::PaymentProcess, "payment-service").await;
         return Err(ApiError::ForbiddenMissingRole { role: "payment_access", trace_id: sec.trace_id });
     }

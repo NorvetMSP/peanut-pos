@@ -90,7 +90,7 @@ struct OrderItemFinancialRow {
 }
 
 // --- Error metrics (mirrors product/inventory services) ---
-static ORDER_REGISTRY: Lazy<Registry> = Lazy::new(|| Registry::new());
+static ORDER_REGISTRY: Lazy<Registry> = Lazy::new(Registry::new);
 static HTTP_ERRORS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
     let v = IntCounterVec::new(
         Opts::new("http_errors_total", "Count of HTTP error responses emitted (status >= 400)"),

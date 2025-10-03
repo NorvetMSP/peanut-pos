@@ -27,8 +27,14 @@ fn tenant_from_headers(headers: &HeaderMap) -> Option<Uuid> {
 fn roles_from_headers(headers: &HeaderMap) -> Vec<Role> {
     headers.get("X-Roles")
         .and_then(|v| v.to_str().ok())
-        .map(|csv| csv.split(',').filter(|s| !s.is_empty()).map(Role::from_str).collect())
-        .unwrap_or_else(|| Vec::new())
+        .map(|csv| {
+            csv
+                .split(',')
+                .filter(|s| !s.is_empty())
+                .map(|s| s.parse::<Role>().unwrap())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn trace_id_from_headers(headers: &HeaderMap) -> Option<Uuid> {
@@ -60,8 +66,10 @@ impl<S> FromRequestParts<S> for SecurityCtxExtractor where S: Send + Sync {
         let roles = roles_from_headers(headers);
     let trace_id = trace_id_from_headers(headers).or_else(|| Some(Uuid::new_v4()));
 
-    Span::current().record("tenant_id", &tracing::field::display(tenant_id));
-    if let Some(tid) = trace_id { Span::current().record("trace_id", &tracing::field::display(tid)); }
+    Span::current().record("tenant_id", tracing::field::display(tenant_id));
+    if let Some(tid) = trace_id {
+        Span::current().record("trace_id", tracing::field::display(tid));
+    }
 
         Ok(SecurityCtxExtractor(SecurityContext { tenant_id, actor, roles, trace_id }))
     }

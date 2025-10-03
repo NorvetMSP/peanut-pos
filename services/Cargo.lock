@@ -2394,6 +2394,7 @@ dependencies = [
  "futures",
  "hex",
  "hmac",
+ "httpmock",
  "hyper 1.7.0",
  "once_cell",
  "prometheus",

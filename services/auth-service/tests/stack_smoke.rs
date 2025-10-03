@@ -296,7 +296,7 @@ impl StackFixture {
             Err(err) => log_step(format!("database teardown error: {err}")),
         }
 
-        shutdown_result.and_then(|_| teardown_result)
+    shutdown_result.and(teardown_result)
     }
 
     async fn perform_login(&self) -> Result<LoginArtifacts> {

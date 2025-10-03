@@ -140,7 +140,7 @@ fn bool_from_env(key: &str) -> Option<bool> {
 
 fn parse_roles(value: &str) -> HashSet<String> {
     value
-        .split(|c| c == ',' || c == ';' || c == ' ')
+        .split([',', ';', ' '])
         .filter_map(|item| {
             let role = item.trim();
             if role.is_empty() {
@@ -162,7 +162,7 @@ fn default_roles() -> HashSet<String> {
 
 fn parse_tenant_list(value: &str) -> Result<HashSet<Uuid>> {
     let mut tenants = HashSet::new();
-    for item in value.split(|c| c == ',' || c == ';' || c == ' ') {
+    for item in value.split([',', ';', ' ']) {
         let trimmed = item.trim();
         if trimmed.is_empty() {
             continue;

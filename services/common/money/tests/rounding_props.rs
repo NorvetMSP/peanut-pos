@@ -13,7 +13,7 @@ proptest! {
         let mut bd = BigDecimal::from_str(&val_str).unwrap();
         // add offset thousandths (offset / 1000)
         let offset_bd = BigDecimal::from(offset) / BigDecimal::from(1000);
-        bd = bd + offset_bd;
+    bd += offset_bd;
 
         // Capture numeric forms for expectation reasoning (approx via f64 acceptable for classification only)
         let f = bd.to_string().parse::<f64>().unwrap();

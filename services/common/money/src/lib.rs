@@ -113,7 +113,7 @@ pub fn registry() -> Option<&'static prometheus::Registry> { PROM_REGISTRY.get()
 fn half_up(value: &BigDecimal, scale: i32) -> BigDecimal {
     // Build factor = 10^scale manually (BigDecimal lacks stable pow for u64 in this crate version)
     let mut factor = BigDecimal::from(1);
-    for _ in 0..scale { factor = factor * BigDecimal::from(10u32); }
+    for _ in 0..scale { factor *= BigDecimal::from(10u32); }
     let shifted = value * &factor; // value * 10^scale
 
     // Determine sign (>=0 treat as positive) using comparison to zero
@@ -137,7 +137,7 @@ fn half_up(value: &BigDecimal, scale: i32) -> BigDecimal {
 fn truncate(value: &BigDecimal, scale: i32) -> BigDecimal {
     // factor = 10^scale
     let mut factor = BigDecimal::from(1);
-    for _ in 0..scale { factor = factor * BigDecimal::from(10u32); }
+    for _ in 0..scale { factor *= BigDecimal::from(10u32); }
     let shifted = value * &factor;
     let s = shifted.to_string();
     let int_portion = if let Some(dot) = s.find('.') { &s[..dot] } else { &s };
@@ -150,7 +150,7 @@ fn truncate(value: &BigDecimal, scale: i32) -> BigDecimal {
 fn bankers(value: &BigDecimal, scale: i32) -> BigDecimal {
     // factor = 10^scale
     let mut factor = BigDecimal::from(1);
-    for _ in 0..scale { factor = factor * BigDecimal::from(10u32); }
+    for _ in 0..scale { factor *= BigDecimal::from(10u32); }
     let shifted = value * &factor; // exact scaled number
     let s = shifted.to_string();
     let negative = s.starts_with('-');
@@ -166,7 +166,7 @@ fn bankers(value: &BigDecimal, scale: i32) -> BigDecimal {
             match first {
                 '0' => if frac_str.len() == 1 { -1 } else { // e.g. 0xxxxx < 0.5
                     // any non-zero after still < 0.5
-                    if frac_str.chars().any(|c| c != '0') { -1 } else { -1 }
+                    -1
                 },
                 '1'..='4' => -1,
                 '5' => {
@@ -195,7 +195,7 @@ fn bankers(value: &BigDecimal, scale: i32) -> BigDecimal {
         _ => {}
     }
     // Reapply sign
-    if negative { int_bd = int_bd * BigDecimal::from(-1); }
+    if negative { int_bd *= BigDecimal::from(-1); }
     (int_bd / factor).with_scale(scale as i64)
 }
 
@@ -274,11 +274,11 @@ impl<'a> Add<&'a Money> for Money {
     type Output = Money;
     fn add(self, rhs: &'a Money) -> Money { Money::new(self.0 + rhs.0.clone()) }
 }
-impl<'a> Add<Money> for &'a Money {
+impl Add<Money> for &Money {
     type Output = Money;
     fn add(self, rhs: Money) -> Money { Money::new(self.0.clone() + rhs.0) }
 }
-impl<'a, 'b> Add<&'b Money> for &'a Money {
+impl<'b> Add<&'b Money> for &Money {
     type Output = Money;
     fn add(self, rhs: &'b Money) -> Money { Money::new(self.0.clone() + rhs.0.clone()) }
 }
@@ -291,11 +291,11 @@ impl<'a> Sub<&'a Money> for Money {
     type Output = Money;
     fn sub(self, rhs: &'a Money) -> Money { Money::new(self.0 - rhs.0.clone()) }
 }
-impl<'a> Sub<Money> for &'a Money {
+impl Sub<Money> for &Money {
     type Output = Money;
     fn sub(self, rhs: Money) -> Money { Money::new(self.0.clone() - rhs.0) }
 }
-impl<'a, 'b> Sub<&'b Money> for &'a Money {
+impl<'b> Sub<&'b Money> for &Money {
     type Output = Money;
     fn sub(self, rhs: &'b Money) -> Money { Money::new(self.0.clone() - rhs.0.clone()) }
 }
@@ -317,7 +317,7 @@ impl Mul<i32> for Money {
     type Output = Money;
     fn mul(self, rhs: i32) -> Money { Money::new(self.0 * BigDecimal::from(rhs)) }
 }
-impl<'a> Mul<i32> for &'a Money {
+impl Mul<i32> for &Money {
     type Output = Money;
     fn mul(self, rhs: i32) -> Money { Money::new(self.0.clone() * BigDecimal::from(rhs)) }
 }
@@ -430,12 +430,12 @@ mod tests {
 
     #[test]
     fn test_arithmetic_sum_iterator() {
-        let values = vec![
+        let values = [
             Money::from(BigDecimal::from_str("1.005").unwrap()), // 1.01
             Money::from(BigDecimal::from_str("2.004").unwrap()), // 2.00
             Money::from(BigDecimal::from_str("3.001").unwrap()), // 3.00
         ];
-        let total: Money = values.iter().sum();
+        let total: Money = values.iter().cloned().sum();
         assert_eq!(total.inner().to_string(), "6.01");
     }
 

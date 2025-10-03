@@ -12,11 +12,9 @@ pub struct AuditActor {
 
 pub const AUDIT_EVENT_VERSION: i32 = 1;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
-pub enum AuditSeverity { Info, Warning, Security, Compliance }
-
-impl Default for AuditSeverity { fn default() -> Self { AuditSeverity::Info } }
+pub enum AuditSeverity { #[default] Info, Warning, Security, Compliance }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditEvent {

@@ -119,7 +119,8 @@ const OVERFLOW_CODE: &str = "_overflow"; // label used when limit exceeded
 
 /// Returns an Axum middleware function that records HTTP error counts.
 /// Usage: .layer(axum::middleware::from_fn(http_error_metrics_layer("service-name")))
-pub fn http_error_metrics_layer(service_name: &'static str) -> impl Fn(Request<Body>, Next) -> std::pin::Pin<Box<dyn std::future::Future<Output=Result<axum::response::Response, ApiError>> + Send>> + Clone + Send + Sync + 'static {
+type HttpErrFuture = std::pin::Pin<Box<dyn std::future::Future<Output = Result<axum::response::Response, ApiError>> + Send>>;
+pub fn http_error_metrics_layer(service_name: &'static str) -> impl Fn(Request<Body>, Next) -> HttpErrFuture + Clone + Send + Sync + 'static {
     move |req: Request<Body>, next: Next| {
         let svc = service_name;
         Box::pin(async move {
@@ -132,17 +133,15 @@ pub fn http_error_metrics_layer(service_name: &'static str) -> impl Fn(Request<B
                     let mut set = OBSERVED_CODES.lock().expect("lock observed codes");
                     if set.contains(raw_code) {
                         raw_code
+                    } else if ERROR_CODE_COUNT.load(Ordering::Relaxed) < MAX_ERROR_CODES {
+                        set.insert(raw_code.to_string());
+                        let new = ERROR_CODE_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+                        HTTP_ERROR_CODES_DISTINCT.set(new as i64);
+                        HTTP_ERROR_CODE_SATURATION.set(((new as f64 / MAX_ERROR_CODES as f64) * 100.0).round() as i64);
+                        raw_code
                     } else {
-                        if ERROR_CODE_COUNT.load(Ordering::Relaxed) < MAX_ERROR_CODES {
-                            set.insert(raw_code.to_string());
-                            let new = ERROR_CODE_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-                            HTTP_ERROR_CODES_DISTINCT.set(new as i64);
-                            HTTP_ERROR_CODE_SATURATION.set(((new as f64 / MAX_ERROR_CODES as f64) * 100.0).round() as i64);
-                            raw_code
-                        } else {
-                            HTTP_ERROR_CODE_OVERFLOW_TOTAL.inc();
-                            OVERFLOW_CODE
-                        }
+                        HTTP_ERROR_CODE_OVERFLOW_TOTAL.inc();
+                        OVERFLOW_CODE
                     }
                 };
                 HTTP_ERRORS_TOTAL.with_label_values(&[svc, code, status.as_str()]).inc();
@@ -189,7 +188,7 @@ pub mod test_helpers {
     }
 
     pub fn distinct_gauge() -> i64 { HTTP_ERROR_CODES_DISTINCT.get() }
-    pub fn overflow_count() -> u64 { HTTP_ERROR_CODE_OVERFLOW_TOTAL.get() as u64 }
+    pub fn overflow_count() -> u64 { HTTP_ERROR_CODE_OVERFLOW_TOTAL.get() }
     pub fn saturation_percent() -> i64 { HTTP_ERROR_CODE_SATURATION.get() }
 }
 

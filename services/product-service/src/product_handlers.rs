@@ -355,11 +355,7 @@ pub async fn list_product_audit(
     let tenant_id = sec.tenant_id;
 
     let mut limit = params.limit.unwrap_or(10);
-    if limit < 1 {
-        limit = 1;
-    } else if limit > 50 {
-        limit = 50;
-    }
+    limit = limit.clamp(1, 50);
 
     let entries = sqlx::query_as::<_, ProductAuditEntry>(
         "SELECT id, action, changes, actor_id, actor_name, actor_email, created_at
