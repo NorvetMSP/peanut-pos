@@ -31,6 +31,7 @@ use common_http_errors::ApiError;
 // Bring selected handlers & structs from main module via direct path (they are private there, so we mirror minimal logic here).
 // For thorough verification we could refactor handlers to a separate module re-used by main & tests; for now keep local focused checks.
 
+#[allow(dead_code)]
 #[derive(serde::Serialize, serde::Deserialize)]
 struct NewCustomer { name: String, email: Option<String>, phone: Option<String> }
 
