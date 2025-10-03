@@ -187,8 +187,14 @@ pub async fn process_payment(
             .header("Content-Type", "application/json")
             .header("X-Tenant-ID", tenant_id.to_string())
             .json(&req);
+        // Prefer forwarding caller's Authorization header when present; otherwise, if
+        // the gateway was invoked via API key flow (no Authorization header) fall back
+        // to a configured credential so payment-service accepts the request and can
+        // emit its own Kafka events.
         if let Some(Extension(auth)) = forwarded_auth.as_ref() {
             pay_request = pay_request.header("Authorization", auth.0.as_str());
+        } else if let Some(fallback) = state.config.payment_service_fallback_auth.as_ref() {
+            pay_request = pay_request.header("Authorization", fallback.as_str());
         }
         let pay_resp = match pay_request.send().await {
             Ok(r) => r,
