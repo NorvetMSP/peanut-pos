@@ -181,12 +181,7 @@ If schema changes:
 
 ## 6. Adding / Modifying a Query
 
-1. Edit Rust source using `query!` or `query_as!` macro.
-2. Run: `./regenerate-sqlx-data.ps1 -Prune` (or omit -Prune if just additive).
-3. Commit changed `.sqlx/query-*.json` files.
-4. Build with `env:SQLX_OFFLINE=1 cargo build --workspace` as a validation (CI replicates this).
 
-## 7. Full Rebuild From Absolute Scratch (Nuclear Option)
 
 Use if metadata drift, compiled artifacts corruption, or major tool upgrades.
 
@@ -200,9 +195,6 @@ pushd services; cargo clean; popd
 # Drop DB & start infra again
 ./Makefile.ps1 Start-Infra
 # Migrations & offline metadata fresh
-./migrate-all.ps1
-./regenerate-sqlx-data.ps1 -Prune -ResetDatabase
-# Rebuild
 ./Makefile.ps1 Build-Services
 ```
 
@@ -237,8 +229,7 @@ If you encounter unresolved zlib symbols during `cargo build` for a Kafka-enable
 - See `docs/development/windows-kafka-build.md` for full explanation.
 - Ensure Visual C++ Build Tools installed.
 - Confirm build script emits lines containing `cargo:rustc-link-lib=zlib`.
-- Retry verbose build:
-
+ 
 ```powershell
 cargo clean -p auth-service
 cargo build -p auth-service -vv
@@ -254,8 +245,6 @@ If still failing, delete `target\\build\\rdkafka-sys-*` directories and rebuild.
 | Migrations checksum mismatch error | Edited applied migration | Use `-ResetDatabase` (dev) OR create new follow-on migration |
 | Service cannot connect to DB | Infra not started or wrong `DATABASE_URL` | `./Makefile.ps1 Start-Infra` then retry |
 | Kafka topics missing | Startup race before Kafka ready | Restart dependent services or use root compose (has healthchecks) |
-| JWT validation failing in services | Auth not healthy or keys not mounted | Check `curl http://localhost:8085/.well-known/jwks.json` |
-| 808x port already in use | Stale previous process | `Get-Process -Id (netstat -ano findstr :8085)` and stop offending PID |
 | Frontend CORS issues | Wrong API base URL or missing headers | Confirm service health endpoints reachable from browser |
 | Vault errors during compose | Vault container not yet initialized | Wait a few seconds; dev token is static (`root`) |
 
@@ -286,6 +275,73 @@ docker compose down
 # Full reset DB + metadata
 ./regenerate-sqlx-data.ps1 -Prune -ResetDatabase
 ```
+
+## 14. Payment Void Endpoint & Event (Integration Gateway)
+
+The Integration Gateway exposes a `POST /payments/void` endpoint used by internal tooling or support roles to void an in-flight or recently authorized payment before settlement.
+
+Request (JSON):
+
+```json
+{
+  "orderId": "<uuid>",
+  "method": "card|cash|other",
+  "amount": 42.15,
+  "reason": "duplicate" // optional
+}
+```
+
+Required Headers:
+
+- `X-Tenant-ID: <uuid>`
+- `X-User-ID: <uuid>` (actor performing the void)
+- `X-Roles: support` (must include a role with void capability)
+
+Success Response:
+
+```json
+{ "status": "voided" }
+```
+
+### Event Emission
+
+When compiled with the `kafka` or `kafka-producer` feature, a `payment.voided` event is produced after the operation succeeds.
+
+Topic: (configured) e.g. `payment.events.v1` (actual topic name may vary; audit topic configured via `GATEWAY_AUDIT_TOPIC`)
+
+Example Payload (conceptual – align with downstream schema registry if present):
+
+```json
+{
+  "type": "payment.voided",
+  "order_id": "<uuid>",
+  "tenant_id": "<uuid>",
+  "method": "card",
+  "amount": 42.15,
+  "reason": "duplicate",
+  "occurred_at": "2024-07-04T12:34:56.789Z"
+}
+```
+
+If the service is built without Kafka features, the endpoint still returns success but no event is emitted (important for local lightweight dev loops without a broker).
+
+### Test Capture Hook
+
+For future automated tests, setting the environment variable `TEST_CAPTURE_KAFKA=1` enables an internal capture path inside the `void_payment` handler (Kafka feature builds only). This stores emitted records in a test-only static for assertion. The current test suite keeps only a build smoke test; the full event assertion harness is deferred.
+
+### Failure Modes
+
+- 400: Validation / malformed body
+- 403: Missing required role/capability
+- 404: Order not found (future enhancement; presently may still return success if logic is mocked)
+- 500: Unexpected internal error (should be rare; check logs)
+
+### Operational Notes
+
+- Ensure Kafka broker reachable at `KAFKA_BOOTSTRAP` when features enabled; otherwise startup will fail early.
+- For local dev without Kafka, omit the feature flags to speed build & avoid broker dependency.
+- Metrics and audit usage trackers run background tasks; watch logs for flush intervals to confirm healthy timers.
+
 
 ## 13. Future Improvements (TODO)
 

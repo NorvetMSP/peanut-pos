@@ -1,0 +1,1 @@
+// Legacy role acceptance tests removed after migration to capability-only authorization.

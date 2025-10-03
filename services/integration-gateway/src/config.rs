@@ -15,6 +15,11 @@ pub struct GatewayConfig {
     pub rate_limit_alert_cooldown_secs: u64,
     pub security_alert_webhook_url: Option<String>,
     pub security_alert_webhook_bearer: Option<String>,
+    /// Optional fallback Authorization header value to use when forwarding
+    /// payment/void requests to the payment-service and the original caller
+    /// authenticated via API key (no bearer token/JWT present).
+    /// Example expected format: "Bearer <token>".
+    pub payment_service_fallback_auth: Option<String>,
 }
 
 impl GatewayConfig {
@@ -51,6 +56,7 @@ impl GatewayConfig {
             .unwrap_or(300);
         let security_alert_webhook_url = env::var("SECURITY_ALERT_WEBHOOK_URL").ok();
         let security_alert_webhook_bearer = env::var("SECURITY_ALERT_WEBHOOK_BEARER").ok();
+    let payment_service_fallback_auth = env::var("PAYMENT_SERVICE_FALLBACK_AUTH").ok();
 
         Ok(Self {
             rate_limit_rpm,
@@ -65,6 +71,7 @@ impl GatewayConfig {
             rate_limit_alert_cooldown_secs: rate_limit_alert_cooldown_secs.max(60),
             security_alert_webhook_url,
             security_alert_webhook_bearer,
+            payment_service_fallback_auth,
         })
     }
 }

@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 tower-http = { version = "0.5", features = ["cors"] }
 common-auth = { path = "../common/auth" }
+common-security = { path = "../common/security" }
 common-money = { path = "../common/money" }
 common-http-errors = { path = "../common/http-errors" }
 anyhow = "1"
@@ -21,10 +22,14 @@ tokio = { version = "1", features = ["full"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 once_cell = "1.19"
 prometheus = "0.13"
+tower = "0.5"
+common-audit = { path = "../common/audit" }
 
 [features]
 default = []
-kafka = ["rdkafka", "futures"]
+kafka-producer = ["rdkafka", "futures"]
+kafka = ["kafka-producer"]
+kafka-core = []
 # Enables running integration tests that require external services (e.g., Postgres, Kafka)
-integration = ["kafka"]
+integration = ["kafka-producer"]
 

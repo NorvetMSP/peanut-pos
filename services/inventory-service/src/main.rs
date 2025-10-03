@@ -12,14 +12,15 @@ use axum::{
 };
 use common_auth::{JwtConfig, JwtVerifier};
 use common_money::log_rounding_mode_once;
-#[cfg(feature = "kafka")] use futures::StreamExt; // only needed when kafka feature enabled
-#[cfg(feature = "kafka")] use rdkafka::consumer::{Consumer, StreamConsumer};
-#[cfg(feature = "kafka")] use rdkafka::producer::FutureProducer;
-#[cfg(feature = "kafka")] use rdkafka::Message;
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))] use futures::StreamExt; // only needed when kafka/kafka-producer feature enabled
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))] use rdkafka::consumer::{Consumer, StreamConsumer};
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))] use rdkafka::producer::FutureProducer;
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))] use rdkafka::Message;
 use sqlx::{PgPool, Row};
 use prometheus::{Encoder, TextEncoder};
 use common_observability::InventoryMetrics;
 use std::{env, net::SocketAddr, sync::Arc, time::Duration};
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))] use serde::Deserialize; // needed for event struct derives when kafka/kafka-producer feature enabled
 use tokio::net::TcpListener;
 use tokio::time::{interval, MissedTickBehavior};
 use tower_http::cors::{AllowOrigin, CorsLayer};
@@ -39,26 +40,26 @@ use location_handlers::list_locations;
 pub(crate) const DEFAULT_RESERVATION_TTL_SECS: i64 = 900; // 15 minutes
 
 #[derive(Deserialize)]
-#[cfg(feature = "kafka")] struct OrderCompletedEvent {
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))] struct OrderCompletedEvent {
     order_id: Uuid,
     tenant_id: Uuid,
     items: Vec<OrderItem>,
 }
 
 #[derive(Deserialize)]
-#[cfg(feature = "kafka")] struct OrderVoidedEvent {
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))] struct OrderVoidedEvent {
     order_id: Uuid,
     tenant_id: Uuid,
 }
 
 #[derive(Deserialize)]
-#[cfg(feature = "kafka")] struct OrderItem {
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))] struct OrderItem {
     product_id: Uuid,
     quantity: i32,
 }
 
 #[derive(Deserialize, Debug)]
-#[cfg(feature = "kafka")] struct ProductCreatedEvent {
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))] struct ProductCreatedEvent {
     product_id: Uuid,
     tenant_id: Uuid,
     initial_quantity: Option<i32>,
@@ -66,7 +67,7 @@ pub(crate) const DEFAULT_RESERVATION_TTL_SECS: i64 = 900; // 15 minutes
 }
 
 #[derive(Deserialize, Debug)]
-#[cfg(feature = "kafka")] struct PaymentCompletedEvent {
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))] struct PaymentCompletedEvent {
     order_id: Uuid,
     tenant_id: Uuid,
     amount: f64,
@@ -83,7 +84,7 @@ pub struct AppState {
     #[allow(dead_code)]
     pub reservation_expiry_sweep: Duration,
     pub dual_write_enabled: bool,
-    #[cfg(feature = "kafka")] pub kafka_producer: FutureProducer,
+    #[cfg(any(feature = "kafka", feature = "kafka-producer"))] pub kafka_producer: FutureProducer,
     pub metrics: Arc<InventoryMetrics>,
 }
 
@@ -126,7 +127,7 @@ async fn main() -> anyhow::Result<()> {
     let jwt_verifier = build_jwt_verifier_from_env().await?;
     spawn_jwks_refresh(jwt_verifier.clone());
 
-    #[cfg(feature = "kafka")]
+    #[cfg(any(feature = "kafka", feature = "kafka-producer"))]
     let consumer: StreamConsumer = rdkafka::ClientConfig::new()
         .set(
             "bootstrap.servers",
@@ -136,7 +137,7 @@ async fn main() -> anyhow::Result<()> {
         .set("enable.auto.commit", "true")
         .create()
         .expect("failed to create kafka consumer");
-    #[cfg(feature = "kafka")]
+    #[cfg(any(feature = "kafka", feature = "kafka-producer"))]
     consumer.subscribe(&[
         "order.completed",
         "order.voided",
@@ -144,7 +145,7 @@ async fn main() -> anyhow::Result<()> {
         "product.created",
     ])?;
 
-    #[cfg(feature = "kafka")]
+    #[cfg(any(feature = "kafka", feature = "kafka-producer"))]
     let producer: FutureProducer = rdkafka::ClientConfig::new()
         .set(
             "bootstrap.servers",
@@ -181,7 +182,7 @@ async fn main() -> anyhow::Result<()> {
         reservation_default_ttl: reservation_default_ttl,
         reservation_expiry_sweep: reservation_expiry_sweep,
         dual_write_enabled,
-        #[cfg(feature = "kafka")] kafka_producer: producer.clone(),
+    #[cfg(any(feature = "kafka", feature = "kafka-producer"))] kafka_producer: producer.clone(),
         metrics: metrics.clone(),
     };
 
@@ -242,7 +243,7 @@ async fn main() -> anyhow::Result<()> {
     .layer(middleware::from_fn_with_state(metrics.clone(), error_metrics_mw))
         .layer(cors);
 
-    #[cfg(feature = "kafka")]
+    #[cfg(any(feature = "kafka", feature = "kafka-producer"))]
     {
         let db_for_consumer = db_pool.clone();
         let multi_loc_for_consumer = state.multi_location_enabled;
@@ -257,7 +258,7 @@ async fn main() -> anyhow::Result<()> {
                             if topic == "order.completed" {
                                 handle_order_completed(text, &db_for_consumer, &producer, multi_loc_for_consumer).await;
                             } else if topic == "order.voided" {
-                                #[cfg(feature = "kafka")] {
+                                #[cfg(any(feature = "kafka", feature = "kafka-producer"))] {
                                     handle_order_voided(text, &db_for_consumer).await;
                                 }
                             } else if topic == "product.created" {
@@ -291,7 +292,7 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[cfg(feature = "kafka")]
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))]
 async fn handle_order_completed(text: &str, db: &PgPool, producer: &FutureProducer, multi_location_enabled: bool) {
     match serde_json::from_str::<OrderCompletedEvent>(text) {
         Ok(event) => {
@@ -444,7 +445,7 @@ async fn handle_order_completed(text: &str, db: &PgPool, producer: &FutureProduc
                 return;
             }
 
-            #[cfg(feature = "kafka")]
+            #[cfg(any(feature = "kafka", feature = "kafka-producer"))]
             for (product_id, quantity, threshold) in alerts {
                 let alert = serde_json::json!({
                     "product_id": product_id,
@@ -507,7 +508,7 @@ async fn handle_order_completed(text: &str, db: &PgPool, producer: &FutureProduc
     }
 }
 
-#[cfg(feature = "kafka")]
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))]
 async fn handle_order_voided(text: &str, db: &PgPool) {
     match serde_json::from_str::<OrderVoidedEvent>(text) {
         Ok(event) => {
@@ -611,7 +612,7 @@ async fn handle_order_voided(text: &str, db: &PgPool) {
     }
 }
 
-#[cfg(feature = "kafka")]
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))]
 async fn handle_product_created(text: &str, db: &PgPool) {
     match serde_json::from_str::<ProductCreatedEvent>(text) {
         Ok(event) => {
@@ -766,7 +767,7 @@ async fn expire_reservations(state: &AppState) -> anyhow::Result<()> {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs();
-            let _evt = serde_json::json!({
+            let evt = serde_json::json!({
                 "type": "reservation.expired",
                 "tenant_id": tenant_id,
                 "product_id": product_id,
@@ -784,7 +785,7 @@ async fn expire_reservations(state: &AppState) -> anyhow::Result<()> {
                 tracing::error!(?err, tenant_id = %tenant_id, order_id = %order_id, "Failed to emit inventory.reservation.expired");
             }
             // Audit event
-            let _audit_evt = serde_json::json!({
+            let audit_evt = serde_json::json!({
                 "action": "inventory.reservation.expired",
                 "schema_version": 1,
                 "tenant_id": tenant_id,

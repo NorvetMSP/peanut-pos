@@ -8,7 +8,7 @@ use common_auth::{JwtConfig, JwtVerifier};
 use jsonwebtoken::DecodingKey;
 use reqwest::Client;
 use rsa::{RsaPrivateKey, pkcs1::EncodeRsaPublicKey, pkcs8::EncodePrivateKey};
-use rand_core::OsRng;
+use rand::rngs::OsRng;
 use serde_json::json;
 use std::sync::Arc;
 use tower::util::ServiceExt;

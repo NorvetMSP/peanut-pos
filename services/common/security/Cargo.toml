@@ -4,6 +4,12 @@ version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
 
+[features]
+default = []
+kafka-core = ["common-audit/kafka-core"]
+kafka-producer = ["common-audit/kafka-producer"]
+kafka = ["kafka-producer"]
+
 [dependencies]
 axum = { version = "0.7", features = ["macros"] }
 http = "0.2"
@@ -12,7 +18,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"
 smallvec = "1"
-thiserror = "1"
+thiserror = "2"
 headers = "0.4"
 common-audit = { path = "../audit" }
 common-auth = { path = "../auth" }
+common-http-errors = { path = "../http-errors" }
+prometheus = "0.13"
+once_cell = "1"

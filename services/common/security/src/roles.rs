@@ -11,6 +11,8 @@ pub enum Role {
     Manager,
     Support,
     Inventory,
+    SuperAdmin,
+    Cashier,
     Unknown(String),
 }
 
@@ -21,6 +23,8 @@ impl Role {
             "manager" | "Manager" => Role::Manager,
             "support" | "Support" => Role::Support,
             "inventory" | "Inventory" => Role::Inventory,
+            "superadmin" | "super_admin" | "SuperAdmin" | "SUPERADMIN" => Role::SuperAdmin,
+            "cashier" | "Cashier" => Role::Cashier,
             other => Role::Unknown(other.to_string()),
         }
     }

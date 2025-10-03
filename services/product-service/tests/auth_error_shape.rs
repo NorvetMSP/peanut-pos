@@ -11,7 +11,7 @@ use hyper::Request;
 use axum::body::Body;
 use http_body_util::BodyExt;
 #[cfg(feature = "kafka")] use rdkafka::producer::FutureProducer;
-#[cfg(not(feature = "kafka"))]
+#[cfg(not(any(feature = "kafka", feature = "kafka-producer")))]
 #[test]
 fn skipped_auth_error_shape_without_kafka() { eprintln!("skipped auth_error_shape without kafka feature"); }
 
@@ -26,7 +26,7 @@ async fn unified_auth_error_shape() {
     let pool = PgPool::connect(&db_url).await.unwrap();
     #[cfg(feature = "kafka")]
     let kafka: FutureProducer = rdkafka::ClientConfig::new().set("bootstrap.servers","localhost:9092").create().unwrap();
-    #[cfg(not(feature = "kafka"))]
+    #[cfg(not(any(feature = "kafka", feature = "kafka-producer")))]
     let kafka = (); // placeholder
     let verifier = dummy_verifier().await;
     let state = AppState::new(pool, kafka, verifier, None);

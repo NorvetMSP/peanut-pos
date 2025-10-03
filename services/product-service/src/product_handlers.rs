@@ -17,6 +17,7 @@ use common_money::{normalize_scale, Money};
 use serde_json::{json, Value};
 use sqlx::{query, query_as, PgPool};
 use std::env;
+#[cfg(feature = "kafka")] use std::time::Duration;
 use uuid::Uuid;
 
 const INVENTORY_DEFAULT_THRESHOLD: i32 = 5;

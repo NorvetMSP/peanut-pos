@@ -5,6 +5,8 @@ edition = "2021"
 
 [dependencies]
 common-auth = { path = "../common/auth" }
+common-security = { path = "../common/security" }
+common-audit = { path = "../common/audit" }
 common-money = { path = "../common/money" }
 common-observability = { path = "../common/observability" }
 tower-http = { version = "0.5", features = ["cors"] }
@@ -16,7 +18,7 @@ serde_json = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt","env-filter"] }
 anyhow = "1"
-thiserror = "1"
+thiserror = "2"
 hyper = "1"
 uuid = { version = "1", features = ["v4", "serde"] }
 sqlx = { version = "0.7", features = ["runtime-tokio-native-tls", "postgres", "macros", "migrate", "uuid", "bigdecimal"] }
@@ -26,7 +28,9 @@ common-http-errors = { path = "../common/http-errors" }
 tower = "0.5"
 
 [features]
-kafka = ["rdkafka"]
+kafka-producer = ["rdkafka"] # full producer
+kafka = ["kafka-producer"]
+kafka-core = []
 
 
 #! Removed duplicate features block
@@ -34,7 +38,7 @@ kafka = ["rdkafka"]
 [dev-dependencies]
 chrono = "0.4"
 testcontainers = { version = "0.16" }
-reqwest = { version = "0.11", features=["json","rustls-tls"] }
+reqwest = { version = "0.12", features=["json","rustls-tls"] }
 tokio = { version = "1", features=["full"] }
 jsonwebtoken = { version = "9", default-features = false, features = ["use_pem"] }
 http-body-util = "0.1"

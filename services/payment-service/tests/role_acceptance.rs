@@ -1,0 +1,1 @@
+// Capability-focused tests retained elsewhere; legacy role acceptance tests removed.

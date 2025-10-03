@@ -4,8 +4,12 @@ fn main() {
     if cfg!(target_os = "windows") {
         if let Some(dir) = find_rdkafka_vcpkg_zlib_dir() {
             println!("cargo:rustc-link-search=native={}", dir.display());
-            println!("cargo:rustc-link-lib=zlib");
-            println!("cargo:warning=integration-gateway linking zlib from {}", dir.display());
+            if dir.join("zlibstatic.lib").is_file() { println!("cargo:rustc-link-lib=dylib=zlibstatic"); }
+            println!("cargo:rustc-link-lib=dylib=zlib");
+            let explicit = dir.join("zlib.lib");
+            if explicit.is_file() { println!("cargo:rustc-link-arg={}", explicit.display()); }
+            if dir.join("zstd.lib").is_file() { println!("cargo:rustc-link-lib=dylib=zstd"); }
+            println!("cargo:warning=integration-gateway linking zlib/zstd from {}", dir.display());
         } else {
             println!("cargo:warning=integration-gateway could not locate zlib import library; falling back to static=z");
             println!("cargo:rustc-link-lib=static=z");

@@ -1,12 +1,13 @@
 use std::sync::Arc;
-use common_auth::{JwtVerifier, ROLE_ADMIN, ROLE_CASHIER, ROLE_SUPER_ADMIN};
+use common_auth::JwtVerifier;
 use axum::extract::FromRef;
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))] use common_audit::{BufferedAuditProducer, KafkaAuditSink};
 
-pub const PAYMENT_ROLES: &[&str] = &[ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_CASHIER];
 
 #[derive(Clone)]
 pub struct AppState {
     pub jwt_verifier: Arc<JwtVerifier>,
+    #[cfg(any(feature = "kafka", feature = "kafka-producer"))] pub audit_producer: Option<Arc<BufferedAuditProducer<KafkaAuditSink>>>,
 }
 
 pub mod payment_handlers;

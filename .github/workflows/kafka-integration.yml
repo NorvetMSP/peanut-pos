@@ -1,0 +1,62 @@
+name: Kafka Integration Tests (Real Broker)
+
+on:
+  push:
+    branches: [ Tenancy-Audit-Backlog-Work ]
+  pull_request:
+    branches: [ Tenancy-Audit-Backlog-Work ]
+  workflow_dispatch:
+
+jobs:
+  gateway-kafka:
+    name: integration-gateway kafka producer path
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      redpanda:
+        image: docker.redpanda.com/redpandadata/redpanda:latest
+        ports:
+          - 9092:9092
+        options: >-
+          --health-cmd="/usr/bin/rpk cluster info || exit 1" --health-interval=5s --health-timeout=5s --health-retries=12
+        env:
+          REDPANDA_AUTO_CREATE_TOPICS: "true"
+        # Using image default command for Redpanda; options above configure health check.
+
+    env:
+      CARGO_TERM_COLOR: always
+      KAFKA_BROKERS: localhost:9092
+      # Ensure bypass is OFF so real broker path exercised
+      TEST_KAFKA_NO_BROKER: "0"
+      # Do not enable capture unless per-test sets TEST_CAPTURE_KAFKA
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          save-if: true
+
+      - name: Build workspace (kafka producer feature)
+        run: |
+          cargo build -p integration-gateway --features kafka-producer
+
+      - name: Run kafka producer path tests (no bypass)
+        run: |
+          # Run only the kafka test(s); ensure they succeed with real broker
+          cargo test -p integration-gateway --features kafka-producer --test void_payment_kafka -- --nocapture
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gateway-kafka-logs
+          path: |
+            services/integration-gateway/target/debug/deps/*.log
+            **/build.log

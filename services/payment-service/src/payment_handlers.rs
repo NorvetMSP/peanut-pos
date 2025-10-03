@@ -1,10 +1,11 @@
-use crate::{AppState, PAYMENT_ROLES};
+use crate::AppState;
 use axum::{
     extract::State,
     http::HeaderMap,
     Json,
 };
-use common_auth::{ensure_role, tenant_id_from_request, AuthContext};
+use common_security::{SecurityCtxExtractor, Capability, ensure_capability};
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))] use common_security::emit_capability_denial_audit;
 use common_http_errors::ApiError;
 use serde::{Deserialize, Serialize};
 use bigdecimal::BigDecimal;
@@ -20,7 +21,7 @@ pub struct PaymentRequest {
     pub method: String,
     pub amount: BigDecimal,
 }
-
+// Legacy PAYMENT_ROLES removed: rely solely on PaymentProcess capability (Cashier + Admin-like roles allowed by mapping).
 #[derive(Serialize)]
 pub struct PaymentResponse {
     pub status: String,
@@ -43,14 +44,18 @@ pub struct VoidPaymentResponse {
     pub approval_code: String,
 }
 
+#[allow(unused_variables)]
 pub async fn process_card_payment(
-    State(_state): State<AppState>,
-    auth: AuthContext,
-    headers: HeaderMap,
+    State(state): State<AppState>,
+    SecurityCtxExtractor(sec): SecurityCtxExtractor,
+    _headers: HeaderMap,
     Json(req): Json<PaymentRequest>,
 ) -> Result<Json<PaymentResponse>, ApiError> {
-    ensure_role(&auth, PAYMENT_ROLES).map_err(|_| ApiError::ForbiddenMissingRole { role: "payment_access", trace_id: None })?;
-    let _tenant_id = tenant_id_from_request(&headers, &auth).map_err(|_| ApiError::BadRequest { code: "missing_tenant", trace_id: None, message: Some("Missing tenant id".into()) })?;
+    if let Err(_) = ensure_capability(&sec, Capability::PaymentProcess) {
+    #[cfg(any(feature = "kafka", feature = "kafka-producer"))] emit_capability_denial_audit(state.audit_producer.as_ref().map(|a| &**a), &sec, Capability::PaymentProcess, "payment-service").await;
+        return Err(ApiError::ForbiddenMissingRole { role: "payment_access", trace_id: sec.trace_id });
+    }
+    let _tenant_id = sec.tenant_id;
 
     let amount_money = Money::new(req.amount.clone());
     println!("Valor stub: processing card payment for Order {} amount={} (normalized={})", req.order_id, req.amount, amount_money);
@@ -67,14 +72,18 @@ pub async fn process_card_payment(
     Ok(Json(response))
 }
 
+#[allow(unused_variables)]
 pub async fn void_card_payment(
-    State(_state): State<AppState>,
-    auth: AuthContext,
-    headers: HeaderMap,
+    State(state): State<AppState>,
+    SecurityCtxExtractor(sec): SecurityCtxExtractor,
+    _headers: HeaderMap,
     Json(req): Json<VoidPaymentRequest>,
 ) -> Result<Json<VoidPaymentResponse>, ApiError> {
-    ensure_role(&auth, PAYMENT_ROLES).map_err(|_| ApiError::ForbiddenMissingRole { role: "payment_access", trace_id: None })?;
-    let _tenant_id = tenant_id_from_request(&headers, &auth).map_err(|_| ApiError::BadRequest { code: "missing_tenant", trace_id: None, message: Some("Missing tenant id".into()) })?;
+    if let Err(_) = ensure_capability(&sec, Capability::PaymentProcess) {
+    #[cfg(any(feature = "kafka", feature = "kafka-producer"))] emit_capability_denial_audit(state.audit_producer.as_ref().map(|a| &**a), &sec, Capability::PaymentProcess, "payment-service").await;
+        return Err(ApiError::ForbiddenMissingRole { role: "payment_access", trace_id: sec.trace_id });
+    }
+    let _tenant_id = sec.tenant_id;
 
     let amount_money = Money::new(req.amount.clone());
     println!("Valor stub: voiding payment for Order {} amount={} (normalized={}) reason={:?}", req.order_id, req.amount, amount_money, req.reason);

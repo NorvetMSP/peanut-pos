@@ -2,10 +2,10 @@ use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use bytes::Bytes;
 use hmac::{Hmac, Mac};
-use rdkafka::producer::FutureRecord;
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))] use rdkafka::producer::FutureRecord;
 use serde::Deserialize;
 use sha2::Sha256;
-use std::time::Duration;
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))] use std::time::Duration;
 use uuid::Uuid;
 
 use crate::{events::PaymentCompletedEvent, AppState};
@@ -53,7 +53,7 @@ struct PriceInfo {
 }
 
 pub async fn handle_coinbase_webhook(
-    State(state): State<AppState>,
+    #[allow(unused_variables)] State(state): State<AppState>,
     headers: HeaderMap,
     body: Bytes,
 ) -> StatusCode {
@@ -87,29 +87,31 @@ pub async fn handle_coinbase_webhook(
                     Uuid::parse_str(&tenant_id_str),
                     amount_str.parse::<f64>(),
                 ) {
+                    #[allow(unused_variables)]
                     let pay_event = PaymentCompletedEvent {
                         order_id,
                         tenant_id,
                         method: "crypto".to_string(),
                         amount,
                     };
-                    let payload = serde_json::to_string(&pay_event).unwrap();
-                    if let Err(err) = state
-                        .kafka_producer
-                        .send(
-                            FutureRecord::to("payment.completed")
-                                .payload(&payload)
-                                .key(&tenant_id_str),
-                            Duration::from_secs(0),
-                        )
-                        .await
-                    {
-                        tracing::error!("Failed to emit payment.completed: {:?}", err);
-                    } else {
-                        tracing::info!(
-                            "Emitted payment.completed for order {} (crypto confirmed)",
-                            order_id
-                        );
+                    #[cfg(any(feature = "kafka", feature = "kafka-producer"))] {
+                        let payload = serde_json::to_string(&pay_event).unwrap();
+                        if let Err(err) = state.kafka_producer
+                            .send(
+                                FutureRecord::to("payment.completed")
+                                    .payload(&payload)
+                                    .key(&tenant_id_str),
+                                Duration::from_secs(0),
+                            )
+                            .await
+                        {
+                            tracing::error!("Failed to emit payment.completed: {:?}", err);
+                        } else {
+                            tracing::info!(
+                                "Emitted payment.completed for order {} (crypto confirmed)",
+                                order_id
+                            );
+                        }
                     }
                 }
             }

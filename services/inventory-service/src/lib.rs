@@ -10,7 +10,7 @@ pub const DEFAULT_THRESHOLD: i32 = 5;
 use std::sync::Arc;
 use sqlx::PgPool;
 use common_auth::JwtVerifier;
-#[cfg(feature = "kafka")] use rdkafka::producer::FutureProducer;
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))] use rdkafka::producer::FutureProducer;
 use common_observability::InventoryMetrics;
 use std::time::Duration;
 #[derive(Clone)]
@@ -21,11 +21,11 @@ pub struct AppState {
 	pub reservation_default_ttl: Duration,
 	pub reservation_expiry_sweep: Duration,
 	pub dual_write_enabled: bool,
-	#[cfg(feature = "kafka")] pub kafka_producer: FutureProducer,
+	#[cfg(any(feature = "kafka", feature = "kafka-producer"))] pub kafka_producer: FutureProducer,
 	pub metrics: Arc<InventoryMetrics>,
 }
 
-#[cfg(not(feature = "kafka"))]
+#[cfg(not(any(feature = "kafka", feature = "kafka-producer")))]
 impl AppState {
 	pub fn dummy_kafka_producer() {}
 }

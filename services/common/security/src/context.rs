@@ -4,7 +4,7 @@ use axum::http::{request::Parts, HeaderMap};
 use tracing::Span;
 use uuid::Uuid;
 use serde::{Serialize, Deserialize};
-use crate::SecurityError;
+use common_http_errors::ApiError;
 use crate::roles::Role;
 use common_audit::{AuditActor, extract_actor_from_headers};
 
@@ -39,11 +39,12 @@ fn trace_id_from_headers(headers: &HeaderMap) -> Option<Uuid> {
 
 #[async_trait]
 impl<S> FromRequestParts<S> for SecurityCtxExtractor where S: Send + Sync {
-    type Rejection = (axum::http::StatusCode, String);
+    type Rejection = ApiError;
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
         let headers = &parts.headers;
-        let tenant_id = tenant_from_headers(headers).ok_or(SecurityError::MissingTenant)?;
+        let tenant_id = tenant_from_headers(headers)
+            .ok_or_else(|| ApiError::BadRequest { code: "missing_tenant_id", trace_id: None, message: Some("Missing X-Tenant-ID header".into()) })?;
 
         // Placeholder claims extraction - replace with verified JWT claims
         let claims = serde_json::json!({

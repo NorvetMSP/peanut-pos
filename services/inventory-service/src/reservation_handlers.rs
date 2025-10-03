@@ -1,14 +1,14 @@
 use crate::{AppState, DEFAULT_THRESHOLD}; // DEFAULT_THRESHOLD now defined in lib
 use axum::extract::{Path, State};
-use axum::{ http::HeaderMap, Json };
-use common_auth::{ ensure_role, tenant_id_from_request, AuthContext, ROLE_ADMIN, ROLE_CASHIER, ROLE_MANAGER, ROLE_SUPER_ADMIN, GuardError };
+use axum::{ Json };
+use common_security::{SecurityCtxExtractor, Capability, ensure_capability};
 use common_http_errors::ApiError;
 use serde::{Deserialize, Serialize};
 use sqlx::{query, query_as, Row}; // dynamic + typed queries
 use std::collections::HashMap;
 use uuid::Uuid;
 
-const RESERVATION_ROLES: &[&str] = &[ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_MANAGER, ROLE_CASHIER];
+// Legacy RESERVATION_ROLES removed; capability Payment/Inventory reservations mapped to InventoryView + (future) InventoryWrite if introduced.
 
 #[derive(Debug, Deserialize)]
 pub struct ReservationItemPayload {
@@ -44,20 +44,12 @@ pub struct ReleaseResponse {
 
 pub async fn create_reservation(
     State(state): State<AppState>,
-    auth: AuthContext,
-    headers: HeaderMap,
+    SecurityCtxExtractor(sec): SecurityCtxExtractor,
     Json(payload): Json<CreateReservationRequest>,
 ) -> Result<Json<ReservationResponse>, ApiError> {
-    if let Err(_) = ensure_role(&auth, RESERVATION_ROLES) {
-        return Err(ApiError::ForbiddenMissingRole { role: "manager", trace_id: None });
-    }
-    let tenant_id = match tenant_id_from_request(&headers, &auth) {
-        Ok(t) => t,
-        Err(GuardError::MissingTenantHeader) => return Err(ApiError::BadRequest { code: "missing_tenant_header", trace_id: None, message: None }),
-        Err(GuardError::InvalidTenantHeader) => return Err(ApiError::BadRequest { code: "invalid_tenant_header", trace_id: None, message: None }),
-        Err(GuardError::TenantMismatch { .. }) => return Err(ApiError::Forbidden { trace_id: None }),
-        Err(GuardError::Forbidden { .. }) => return Err(ApiError::Forbidden { trace_id: None }),
-    };
+    ensure_capability(&sec, Capability::InventoryView)
+        .map_err(|_| ApiError::ForbiddenMissingRole { role: "inventory_view", trace_id: sec.trace_id })?;
+    let tenant_id = sec.tenant_id;
 
     if payload.items.is_empty() {
         return Err(ApiError::BadRequest { code: "empty_reservation", trace_id: None, message: Some("Reservation must include at least one item".into()) });
@@ -192,7 +184,7 @@ pub async fn create_reservation(
     tx.commit().await.map_err(|err| ApiError::internal(err, None))?;
 
     // Emit audit event (best-effort)
-    let _event = serde_json::json!({
+    let event = serde_json::json!({
         "action": "inventory.reservation.created",
         "schema_version": 1,
         "tenant_id": tenant_id,
@@ -221,14 +213,12 @@ pub async fn create_reservation(
 
 pub async fn release_reservation(
     State(state): State<AppState>,
-    auth: AuthContext,
-    headers: HeaderMap,
+    SecurityCtxExtractor(sec): SecurityCtxExtractor,
     Path(order_id): Path<Uuid>,
 ) -> Result<Json<ReleaseResponse>, ApiError> {
-    if let Err(_) = ensure_role(&auth, RESERVATION_ROLES) {
-        return Err(ApiError::ForbiddenMissingRole { role: "manager", trace_id: None });
-    }
-    let tenant_id = tenant_id_from_request(&headers, &auth).map_err(|_| ApiError::BadRequest { code: "missing_tenant_header", trace_id: None, message: None })?;
+    ensure_capability(&sec, Capability::InventoryView)
+        .map_err(|_| ApiError::ForbiddenMissingRole { role: "inventory_view", trace_id: sec.trace_id })?;
+    let tenant_id = sec.tenant_id;
 
     let mut tx = state
         .db

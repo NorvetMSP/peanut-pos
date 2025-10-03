@@ -17,7 +17,7 @@ fn non_privileged_removal() {
 fn non_privileged_masking() {
     let payload = serde_json::json!({"sensitive":{"secret":"abc"}});
     let meta = serde_json::json!({"audit":{"email":"u@example.com"}});
-    let (p,m,fields,count) = redact_event_fields(payload, meta, &paths(&["sensitive.secret","audit.email"]), true);
+    let (p,m,_fields,count) = redact_event_fields(payload, meta, &paths(&["sensitive.secret","audit.email"]), true);
     assert_eq!(count, 2);
     assert_eq!(p["sensitive"]["secret"], serde_json::json!("****"));
     assert_eq!(m["audit"]["email"], serde_json::json!("****"));

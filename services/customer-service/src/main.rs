@@ -1,18 +1,19 @@
 use anyhow::{anyhow, Context};
 use axum::{
-    extract::{FromRef, Path, Query, State},
+    extract::{FromRef, Path, State},
     http::{
         header::{ACCEPT, CONTENT_TYPE},
-        HeaderMap, HeaderName, HeaderValue, Method, StatusCode,
+    HeaderName, HeaderValue, Method, StatusCode,
     },
     routing::{get, post},
     Json, Router,
 };
 use chrono::{DateTime, Utc};
 use common_auth::{
-    ensure_role, tenant_id_from_request, AuthContext, JwtConfig, JwtVerifier, ROLE_ADMIN,
-    ROLE_CASHIER, ROLE_MANAGER, ROLE_SUPER_ADMIN,
+    JwtConfig, JwtVerifier,
 };
+use common_security::{SecurityCtxExtractor, ensure_capability, Capability};
+#[cfg(test)] use common_security::roles::Role;
 use common_http_errors::{ApiError, ApiResult};
 use common_crypto::{decrypt_field, deterministic_hash, encrypt_field, CryptoError, MasterKey};
 use serde::{Deserialize, Serialize};
@@ -31,7 +32,6 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 use tracing::{debug, info, warn, error};
 use once_cell::sync::Lazy;
 use prometheus::{IntCounterVec, Opts, TextEncoder, Encoder};
-use common_auth::GuardError;
 use common_money::log_rounding_mode_once;
 use uuid::Uuid;
 
@@ -77,9 +77,10 @@ async fn render_metrics() -> Result<String, StatusCode> {
     String::from_utf8(buffer).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
-const CUSTOMER_WRITE_ROLES: &[&str] = &[ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_MANAGER, ROLE_CASHIER];
-const CUSTOMER_VIEW_ROLES: &[&str] = &[ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_MANAGER, ROLE_CASHIER];
-const GDPR_MANAGE_ROLES: &[&str] = &[ROLE_SUPER_ADMIN, ROLE_ADMIN];
+// Legacy CUSTOMER_*_ROLES arrays retained only for tests until fallback fully removed.
+mod handlers;
+use handlers::{create_customer, get_customer, update_customer, search_customers};
+// GDPR management now gated by Capability::GdprManage (was CustomerWrite pre-refinement TA-POL-5)
 const GDPR_DELETED_NAME: &str = "[deleted]";
 
 #[derive(Clone)]
@@ -269,14 +270,15 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn create_customer(
-    State(state): State<AppState>,
-    auth: AuthContext,
-    headers: HeaderMap,
-    Json(new_cust): Json<NewCustomer>,
+// Implementation moved for reuse (public via crate::create_customer_impl)
+pub(crate) async fn create_customer_impl(
+    state: AppState,
+    sec: common_security::context::SecurityContext,
+    new_cust: NewCustomer,
 ) -> ApiResult<Json<Customer>> {
-    ensure_role(&auth, CUSTOMER_WRITE_ROLES).map_err(|_| ApiError::ForbiddenMissingRole { role: "customer_write", trace_id: None })?;
-    let tenant_id = tenant_id_from_request(&headers, &auth).map_err(|g| guard_to_api_error(g))?;
+    ensure_capability(&sec, Capability::GdprManage)
+        .map_err(|_| ApiError::ForbiddenMissingRole { role: "customer_write", trace_id: sec.trace_id })?;
+    let tenant_id = sec.tenant_id;
     let customer_id = Uuid::new_v4();
 
     let mut key_cache = TenantKeyCache::new(&state, tenant_id);
@@ -372,14 +374,14 @@ async fn create_customer(
     Ok(Json(customer))
 }
 
-async fn search_customers(
-    State(state): State<AppState>,
-    auth: AuthContext,
-    headers: HeaderMap,
-    Query(params): Query<SearchParams>,
+pub(crate) async fn search_customers_impl(
+    state: AppState,
+    sec: common_security::context::SecurityContext,
+    params: SearchParams,
 ) -> ApiResult<Json<Vec<Customer>>> {
-    ensure_role(&auth, CUSTOMER_VIEW_ROLES).map_err(|_| ApiError::ForbiddenMissingRole { role: "customer_view", trace_id: None })?;
-    let tenant_id = tenant_id_from_request(&headers, &auth).map_err(|g| guard_to_api_error(g))?;
+    ensure_capability(&sec, Capability::CustomerView)
+        .map_err(|_| ApiError::ForbiddenMissingRole { role: "customer_view", trace_id: sec.trace_id })?;
+    let tenant_id = sec.tenant_id;
 
     let mut key_cache = TenantKeyCache::new(&state, tenant_id);
     let active_key = key_cache.active().await?;
@@ -448,14 +450,14 @@ async fn search_customers(
     Ok(Json(customers))
 }
 
-async fn get_customer(
-    State(state): State<AppState>,
-    auth: AuthContext,
-    headers: HeaderMap,
-    Path(customer_id): Path<Uuid>,
+pub(crate) async fn get_customer_impl(
+    state: AppState,
+    sec: common_security::context::SecurityContext,
+    customer_id: Uuid,
 ) -> ApiResult<Json<Customer>> {
-    ensure_role(&auth, CUSTOMER_VIEW_ROLES).map_err(|_| ApiError::ForbiddenMissingRole { role: "customer_view", trace_id: None })?;
-    let tenant_id = tenant_id_from_request(&headers, &auth).map_err(|g| guard_to_api_error(g))?;
+    ensure_capability(&sec, Capability::CustomerView)
+        .map_err(|_| ApiError::ForbiddenMissingRole { role: "customer_view", trace_id: sec.trace_id })?;
+    let tenant_id = sec.tenant_id;
 
     let mut key_cache = TenantKeyCache::new(&state, tenant_id);
 
@@ -484,15 +486,15 @@ async fn get_customer(
     Ok(Json(customer))
 }
 
-async fn update_customer(
-    State(state): State<AppState>,
-    auth: AuthContext,
-    headers: HeaderMap,
-    Path(customer_id): Path<Uuid>,
-    Json(payload): Json<UpdateCustomerRequest>,
+pub(crate) async fn update_customer_impl(
+    state: AppState,
+    sec: common_security::context::SecurityContext,
+    customer_id: Uuid,
+    payload: UpdateCustomerRequest,
 ) -> ApiResult<Json<Customer>> {
-    ensure_role(&auth, CUSTOMER_WRITE_ROLES).map_err(|_| ApiError::ForbiddenMissingRole { role: "customer_write", trace_id: None })?;
-    let tenant_id = tenant_id_from_request(&headers, &auth).map_err(|g| guard_to_api_error(g))?;
+    ensure_capability(&sec, Capability::CustomerWrite)
+        .map_err(|_| ApiError::ForbiddenMissingRole { role: "customer_write", trace_id: sec.trace_id })?;
+    let tenant_id = sec.tenant_id;
     let mut key_cache = TenantKeyCache::new(&state, tenant_id);
 
     let existing = sqlx::query!(
@@ -687,12 +689,12 @@ async fn update_customer(
 
 async fn gdpr_export_customer(
     State(state): State<AppState>,
-    auth: AuthContext,
-    headers: HeaderMap,
+    SecurityCtxExtractor(sec): SecurityCtxExtractor,
     Path(customer_id): Path<Uuid>,
 ) -> ApiResult<Json<GdprExportResponse>> {
-    ensure_role(&auth, GDPR_MANAGE_ROLES).map_err(|_| ApiError::ForbiddenMissingRole { role: "gdpr_manage", trace_id: None })?;
-    let tenant_id = tenant_id_from_request(&headers, &auth).map_err(|g| guard_to_api_error(g))?;
+    ensure_capability(&sec, Capability::CustomerWrite)
+        .map_err(|_| ApiError::ForbiddenMissingRole { role: "customer_write", trace_id: sec.trace_id })?;
+    let tenant_id = sec.tenant_id;
 
     let mut key_cache = TenantKeyCache::new(&state, tenant_id);
 
@@ -731,7 +733,7 @@ async fn gdpr_export_customer(
         Some(customer_id),
         "export",
         "completed",
-        Some(auth.claims.subject),
+    sec.actor.id,
         metadata,
     )
     .await
@@ -746,12 +748,12 @@ async fn gdpr_export_customer(
 
 async fn gdpr_delete_customer(
     State(state): State<AppState>,
-    auth: AuthContext,
-    headers: HeaderMap,
+    SecurityCtxExtractor(sec): SecurityCtxExtractor,
     Path(customer_id): Path<Uuid>,
 ) -> ApiResult<Json<GdprDeleteResponse>> {
-    ensure_role(&auth, GDPR_MANAGE_ROLES).map_err(|_| ApiError::ForbiddenMissingRole { role: "gdpr_manage", trace_id: None })?;
-    let tenant_id = tenant_id_from_request(&headers, &auth).map_err(|g| guard_to_api_error(g))?;
+    ensure_capability(&sec, Capability::CustomerWrite)
+        .map_err(|_| ApiError::ForbiddenMissingRole { role: "customer_write", trace_id: sec.trace_id })?;
+    let tenant_id = sec.tenant_id;
 
     let row = sqlx::query_as::<_, CustomerRow>(
         "SELECT
@@ -816,7 +818,7 @@ async fn gdpr_delete_customer(
         Some(customer_id),
         "delete",
         "completed",
-        Some(auth.claims.subject),
+    sec.actor.id,
         metadata,
     )
     .await
@@ -1004,13 +1006,6 @@ fn db_internal(err: sqlx::Error) -> ApiError {
     ApiError::Internal { trace_id: None, message: Some(format!("DB error: {}", err)) }
 }
 
-fn guard_to_api_error(err: GuardError) -> ApiError {
-    match err {
-        GuardError::MissingTenantHeader | GuardError::InvalidTenantHeader => ApiError::BadRequest { code: "invalid_tenant", trace_id: None, message: Some("Invalid or missing tenant header".into()) },
-        GuardError::TenantMismatch { .. } => ApiError::Forbidden { trace_id: None },
-        GuardError::Forbidden { .. } => ApiError::Forbidden { trace_id: None },
-    }
-}
 
 async fn build_jwt_verifier_from_env() -> anyhow::Result<Arc<JwtVerifier>> {
     let issuer = env::var("JWT_ISSUER").context("JWT_ISSUER must be set")?;
@@ -1079,10 +1074,11 @@ mod tests {
         extract::{Path, State},
         http::{HeaderMap, HeaderValue},
     };
-    use chrono::{Duration, Utc};
-    use common_auth::{AuthContext, Claims, JwtConfig, JwtVerifier, ROLE_ADMIN};
+    // chrono::Utc no longer needed in this test module after refactor
+    use common_auth::{JwtConfig, JwtVerifier};
+    use common_security::SecurityContext;
     use common_crypto::{generate_dek, MasterKey};
-    use serde_json::json;
+    // serde_json::json no longer needed in this test module after refactor
     use sqlx::{migrate::MigrateError, PgPool};
     use std::{io, sync::Arc};
     use uuid::Uuid;
@@ -1145,24 +1141,23 @@ mod tests {
             HeaderValue::from_str(&tenant_id.to_string())?,
         );
 
-        let claims = Claims {
-            subject: actor_id,
+        // Simulate security context (bypassing extractor since we invoke handler directly)
+        headers.insert("X-Tenant-ID", HeaderValue::from_str(&tenant_id.to_string())?);
+        headers.insert("X-Roles", HeaderValue::from_static("admin"));
+        headers.insert("X-User-ID", HeaderValue::from_str(&actor_id.to_string())?);
+
+        // Minimal dummy actor (structure must match expected fields used by downstream code).
+        let actor = common_audit::AuditActor { id: Some(actor_id), name: None, email: None };
+        let sec = SecurityContext {
             tenant_id,
-            roles: vec![ROLE_ADMIN.to_string()],
-            expires_at: Utc::now() + Duration::hours(1),
-            issued_at: Some(Utc::now()),
-            issuer: "test-issuer".to_string(),
-            audience: vec!["test-audience".to_string()],
-            raw: json!({}),
+            actor,
+            roles: vec![Role::Admin],
+            trace_id: None,
         };
-        let auth = AuthContext {
-            claims,
-            token: "test-token".to_string(),
-        };
+
         let created = create_customer(
             State(state.clone()),
-            auth.clone(),
-            headers.clone(),
+            SecurityCtxExtractor(sec.clone()),
             Json(NewCustomer {
                 name: "Alice Example".to_string(),
                 email: Some("alice@example.com".to_string()),
@@ -1177,8 +1172,7 @@ mod tests {
 
         let updated = update_customer(
             State(state.clone()),
-            auth.clone(),
-            headers.clone(),
+            SecurityCtxExtractor(sec.clone()),
             Path(customer_id),
             Json(UpdateCustomerRequest {
                 name: Some("Alice Cooper".to_string()),

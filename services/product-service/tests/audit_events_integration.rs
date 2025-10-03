@@ -1,16 +1,16 @@
 //! Integration test for /audit/events redaction behavior.
 //! Requires TEST_AUDIT_DB_URL env var pointing to a Postgres database.
-#[cfg(feature = "kafka")] use axum::{Router, routing::get};
-#[cfg(feature = "kafka")] use product_service::audit_handlers::audit_search;
-#[cfg(feature = "kafka")] use product_service::app_state::AppState;
-#[cfg(feature = "kafka")] use common_auth::{JwtConfig, JwtVerifier};
-#[cfg(feature = "kafka")] use sqlx::PgPool;
-#[cfg(feature = "kafka")] use std::{env, sync::Arc};
-#[cfg(feature = "kafka")] use tower::util::ServiceExt; // for oneshot
-#[cfg(feature = "kafka")] use uuid::Uuid;
-#[cfg(feature = "kafka")] use hyper::Request;
-#[cfg(feature = "kafka")] use axum::body::Body;
-#[cfg(feature = "kafka")] use http_body_util::BodyExt; // for collect
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))] use axum::{Router, routing::get};
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))] use product_service::audit_handlers::audit_search;
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))] use product_service::app_state::AppState;
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))] use common_auth::{JwtConfig, JwtVerifier};
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))] use sqlx::PgPool;
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))] use std::{env, sync::Arc};
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))] use tower::util::ServiceExt; // for oneshot
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))] use uuid::Uuid;
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))] use hyper::Request;
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))] use axum::body::Body;
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))] use http_body_util::BodyExt; // for collect
 
 // Minimal stub to build a JwtVerifier (unused by SecurityCtxExtractor but required in AppState)
 #[cfg(feature = "kafka")]

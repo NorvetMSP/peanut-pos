@@ -9,6 +9,7 @@ mod test_utils;
 use test_utils::{seed_inventory_basics, create_reservation_http};
 use testcontainers::{runners::AsyncRunner, ContainerAsync, GenericImage};
 use testcontainers::core::WaitFor;
+use uuid::Uuid; // needed for dynamic kafka consumer group id
 
 #[tokio::test]
 async fn reservation_expires_and_restocks() {

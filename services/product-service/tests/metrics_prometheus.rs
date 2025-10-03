@@ -1,29 +1,29 @@
-#[cfg(feature = "kafka")] use axum::{routing::get, Router};
-#[cfg(feature = "kafka")] use product_service::audit_handlers::audit_search;
-#[cfg(feature = "kafka")] use product_service::app_state::AppState;
-#[cfg(feature = "kafka")] use common_auth::{JwtConfig, JwtVerifier};
-#[cfg(feature = "kafka")] use sqlx::PgPool;
-#[cfg(feature = "kafka")] use std::{env, sync::Arc};
-#[cfg(feature = "kafka")] use tower::util::ServiceExt;
-#[cfg(feature = "kafka")] use uuid::Uuid;
-#[cfg(feature = "kafka")] use hyper::Request;
-#[cfg(feature = "kafka")] use axum::body::Body;
-#[cfg(feature = "kafka")] use http_body_util::BodyExt; // for collect
-#[cfg(feature = "kafka")]
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))] use axum::{routing::get, Router};
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))] use product_service::audit_handlers::audit_search;
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))] use product_service::app_state::AppState;
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))] use common_auth::{JwtConfig, JwtVerifier};
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))] use sqlx::PgPool;
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))] use std::{env, sync::Arc};
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))] use tower::util::ServiceExt;
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))] use uuid::Uuid;
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))] use hyper::Request;
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))] use axum::body::Body;
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))] use http_body_util::BodyExt; // for collect
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))]
 use rdkafka::producer::FutureProducer;
-#[cfg(not(feature = "kafka"))]
+#[cfg(not(any(feature = "kafka", feature = "kafka-producer")))]
 #[test]
 fn skipped_without_kafka_feature() {
     eprintln!("skipped metrics_prometheus tests without kafka feature");
 }
 
-#[cfg(feature = "kafka")]
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))]
 async fn dummy_verifier() -> Arc<JwtVerifier> {
     let cfg = JwtConfig::new(String::from("http://issuer"), String::from("aud"));
     Arc::new(JwtVerifier::new(cfg))
 }
 
-#[cfg(feature = "kafka")]
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))]
 #[tokio::test]
 async fn prometheus_metrics_exposed() {
     let db_url = match env::var("TEST_AUDIT_DB_URL") { Ok(v) => v, Err(_) => { eprintln!("skipping metrics test: TEST_AUDIT_DB_URL not set"); return; } };

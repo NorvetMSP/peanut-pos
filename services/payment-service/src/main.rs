@@ -19,6 +19,8 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 use tracing::{debug, info, warn};
 
 use payment_service::{payment_handlers::{process_card_payment, void_card_payment}, AppState};
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))] use common_audit::{KafkaAuditSink, AuditProducer, AuditProducerConfig, BufferedAuditProducer};
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))] use rdkafka::producer::FutureProducer;
 
 
 #[tokio::main]
@@ -29,7 +31,18 @@ async fn main() -> anyhow::Result<()> {
     let jwt_verifier = build_jwt_verifier_from_env().await?;
     spawn_jwks_refresh(jwt_verifier.clone());
 
-    let state = AppState { jwt_verifier };
+    #[cfg(any(feature = "kafka", feature = "kafka-producer"))] let audit_producer = {
+        // Simplified: if KAFKA_BROKERS unset we fallback to None
+        if let Ok(brokers) = env::var("KAFKA_BROKERS") {
+            let producer: FutureProducer = rdkafka::ClientConfig::new()
+                .set("bootstrap.servers", &brokers)
+                .create()
+                .expect("failed kafka producer");
+            let sink = KafkaAuditSink::new(producer, AuditProducerConfig { topic: env::var("AUDIT_TOPIC").unwrap_or_else(|_| "audit.events".into()) });
+            Some(Arc::new(BufferedAuditProducer::new(AuditProducer::new(sink), 256)))
+        } else { None }
+    };
+    let state = AppState { jwt_verifier, #[cfg(any(feature = "kafka", feature = "kafka-producer"))] audit_producer };
 
     let allowed_origins = [
         "http://localhost:3000",
