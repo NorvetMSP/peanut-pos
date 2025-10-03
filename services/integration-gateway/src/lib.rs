@@ -2,6 +2,8 @@ pub mod alerts;
 pub mod config;
 pub mod events;
 pub mod integration_handlers;
+#[cfg(feature = "future-order-validation")]
+pub mod validation;
 pub mod metrics;
 pub mod rate_limiter;
 pub mod usage;

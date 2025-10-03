@@ -121,6 +121,10 @@ async fn main() -> anyhow::Result<()> {
     .await
     .expect("Failed to create rate limiter");
     let metrics = Arc::new(GatewayMetrics::new()?);
+    // Export configured rate limit target (rpm) for alert comparisons
+    metrics.set_rate_limit_rpm_target(config.rate_limit_rpm as i64);
+    // Set build info (version / commit) for traceability in metrics
+    metrics.set_build_info();
     // Create a small bounded channel representing an internal work queue (placeholder for real queue) and instrument it.
     let (tx, mut rx) = mpsc::channel::<()>(100);
     metrics.set_channel_capacity(100);
@@ -234,13 +238,14 @@ async fn main() -> anyhow::Result<()> {
         .layer(cors);
 
     // Best-effort: push a few items to the queue periodically to exercise depth metric (dev visibility only)
-    {
+    // Guarded so production builds do not emit synthetic backpressure noise (see backlog addendum 2025-10-02 Stabilization Half Items Clarified)
+    // Enable only in debug OR when explicitly opted-in via env (non-production troubleshooting / demos)
+    if cfg!(debug_assertions) || std::env::var("GATEWAY_DEV_METRICS_DEMO").ok().as_deref() == Some("1") {
         let tx_clone = tx.clone();
         let metrics_clone = metrics.clone();
         tokio::spawn(async move {
             use tokio::time::{sleep, Duration};
             loop {
-                // simulate burst of 3 items
                 for _ in 0..3 { let _ = tx_clone.send(()).await; }
                 metrics_clone.update_channel_depth(3);
                 sleep(Duration::from_secs(10)).await;

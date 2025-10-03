@@ -7,7 +7,7 @@ edition = "2021"
 aes-gcm = { version = "0.10", features = ["aes"] }
 rand = "0.8"
 base64 = "0.21"
-thiserror = "1"
+thiserror = "2"
 hmac = "0.12"
 sha2 = "0.10"
 zeroize = "1.7"

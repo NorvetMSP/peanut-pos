@@ -18,7 +18,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"
 smallvec = "1"
-thiserror = "1"
+thiserror = "2"
 headers = "0.4"
 common-audit = { path = "../audit" }
 common-auth = { path = "../auth" }

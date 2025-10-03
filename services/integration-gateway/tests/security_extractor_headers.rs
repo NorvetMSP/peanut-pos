@@ -59,3 +59,28 @@ mod payment_capability_tests {
         assert!(resp.status().is_success(), "expected success, got {}", resp.status());
     }
 }
+
+// New deny-path test for a different capability to ensure gateway parity (Support denied InventoryView style capability)
+mod deny_path_extension_tests {
+    use super::*;
+    use common_http_errors::ApiError;
+
+    async fn inventory_stub(SecurityCtxExtractor(sec): SecurityCtxExtractor) -> Result<&'static str, ApiError> {
+        ensure_capability(&sec, Capability::InventoryView)
+            .map_err(|_| ApiError::ForbiddenMissingRole { role: "inventory_view", trace_id: sec.trace_id })?;
+        Ok("inv")
+    }
+
+    #[tokio::test]
+    async fn support_role_denied_inventory_view() {
+        let app = Router::new().route("/inventory/view", post(inventory_stub));
+        let mut req = Request::builder().uri("/inventory/view").method("POST").body(axum::body::Body::empty()).unwrap();
+        let h = req.headers_mut();
+        h.insert("X-Tenant-ID", Uuid::new_v4().to_string().parse().unwrap());
+        h.insert("X-Roles", "support".parse().unwrap());
+        h.insert("X-User-ID", Uuid::new_v4().to_string().parse().unwrap());
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::FORBIDDEN);
+        assert_eq!(resp.headers().get("X-Error-Code").unwrap(), "missing_role");
+    }
+}

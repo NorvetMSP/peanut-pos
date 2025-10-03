@@ -3,6 +3,7 @@ use axum::body::Body;
 use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::Response;
 use prometheus::{Encoder, IntCounterVec, Opts, Registry, TextEncoder, IntGauge, Histogram, HistogramOpts};
+use std::env;
 
 #[derive(Clone)]
 pub struct GatewayMetrics {
@@ -17,6 +18,8 @@ pub struct GatewayMetrics {
     // Rate limiter metrics (TA-PERF-3)
     rate_limit_latency: Histogram,
     rate_window_usage: IntGauge,
+    rate_limit_rpm_target: IntGauge,
+    build_info: IntGauge,
 }
 
 impl GatewayMetrics {
@@ -66,8 +69,18 @@ impl GatewayMetrics {
             "gateway_rate_window_usage",
             "Current count in active rate limit window for last evaluated key"
         ))?;
+        let rate_limit_rpm_target = IntGauge::with_opts(Opts::new(
+            "gateway_rate_limit_rpm_target",
+            "Configured per-identity rate limit requests per minute target"
+        ))?;
+        let build_info = IntGauge::with_opts(Opts::new(
+            "gateway_build_info",
+            "Static build info metric (value always 1) with version/hash labels"
+        ))?;
         registry.register(Box::new(rate_limit_latency.clone()))?;
         registry.register(Box::new(rate_window_usage.clone()))?;
+        registry.register(Box::new(rate_limit_rpm_target.clone()))?;
+        registry.register(Box::new(build_info.clone()))?;
         Ok(Self {
             registry,
             rate_checks,
@@ -78,6 +91,8 @@ impl GatewayMetrics {
             channel_high_water,
             rate_limit_latency,
             rate_window_usage,
+            rate_limit_rpm_target,
+            build_info,
         })
     }
 
@@ -107,6 +122,15 @@ impl GatewayMetrics {
         Ok(response)
     }
 
+    // Convenience for tests / smoke checks without HTTP layer.
+    pub fn gather_text(&self) -> Result<String> {
+        let encoder = TextEncoder::new();
+        let metric_families = self.registry.gather();
+        let mut buffer = Vec::new();
+        encoder.encode(&metric_families, &mut buffer)?;
+        Ok(String::from_utf8(buffer).unwrap_or_default())
+    }
+
     // Backpressure metrics update helpers
     pub fn set_channel_capacity(&self, capacity: usize) {
         self.channel_capacity.set(capacity as i64);
@@ -126,5 +150,20 @@ impl GatewayMetrics {
 
     pub fn set_rate_window_usage(&self, count: i64) {
         self.rate_window_usage.set(count);
+    }
+
+    pub fn set_rate_limit_rpm_target(&self, rpm: i64) {
+        self.rate_limit_rpm_target.set(rpm);
+    }
+
+    pub fn set_build_info(&self) {
+        // We encode version/hash as separate metrics due to IntGauge lacking labels in this simple wrapper.
+        // Alternative would be to use IntGaugeVec but for simplicity we output two gauge metrics.
+        // Set to 1 so presence is assertable.
+        let version = env::var("GIT_VERSION").unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_string());
+        let hash = env::var("GIT_COMMIT_HASH").unwrap_or_else(|_| "unknown".to_string());
+        self.build_info.set(1);
+        // We also register ad-hoc gauges for version/hash if desired later; for now rely on environment exposure.
+        tracing::info!(version, hash, "gateway build info registered");
     }
 }

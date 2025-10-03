@@ -402,6 +402,7 @@ pub mod test_support {
     use std::sync::{Mutex, OnceLock};
 
     static CAPTURED_PAYMENT_VOIDED: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
+    static CAPTURED_RATE_LIMIT_ALERTS: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
 
     pub fn capture_payment_voided(payload: &str) {
         let store = CAPTURED_PAYMENT_VOIDED.get_or_init(|| Mutex::new(Vec::new()));
@@ -413,5 +414,16 @@ pub mod test_support {
         let mut guard = store.lock().unwrap();
         let drained = guard.drain(..).collect();
         drained
+    }
+
+    pub fn capture_rate_limit_alert(payload: &str) {
+        let store = CAPTURED_RATE_LIMIT_ALERTS.get_or_init(|| Mutex::new(Vec::new()));
+        store.lock().unwrap().push(payload.to_string());
+    }
+
+    pub fn take_captured_rate_limit_alerts() -> Vec<String> {
+        let store = CAPTURED_RATE_LIMIT_ALERTS.get_or_init(|| Mutex::new(Vec::new()));
+        let mut guard = store.lock().unwrap();
+        guard.drain(..).collect()
     }
 }

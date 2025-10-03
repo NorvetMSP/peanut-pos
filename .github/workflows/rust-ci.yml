@@ -38,3 +38,11 @@ jobs:
         run: cargo test --workspace ${{ matrix.features }} --all-features --no-fail-fast
       - name: Clippy
         run: cargo clippy --workspace ${{ matrix.features }} -- -D warnings
+      - name: Metrics smoke (gateway core metrics)
+        run: |
+          OUT=$(cargo run -p integration-gateway --bin metrics_smoke ${{ matrix.features }})
+          echo "$OUT" | head -n 200
+          echo "$OUT" | grep gateway_rate_limit_rpm_target
+          echo "$OUT" | grep capability_checks_total
+          echo "$OUT" | grep gateway_build_info
+        shell: bash

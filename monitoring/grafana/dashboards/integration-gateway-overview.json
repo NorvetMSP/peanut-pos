@@ -1,0 +1,76 @@
+{
+  "title": "Integration Gateway Overview (Stub)",
+  "editable": true,
+  "schemaVersion": 38,
+  "version": 1,
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "Rate Limiter Decision Latency p50/p95/p99",
+      "targets": [
+        {"expr": "histogram_quantile(0.5, sum by (le) (rate(gateway_rate_limiter_decision_seconds_bucket[5m])))"},
+        {"expr": "histogram_quantile(0.95, sum by (le) (rate(gateway_rate_limiter_decision_seconds_bucket[5m])))"},
+        {"expr": "histogram_quantile(0.99, sum by (le) (rate(gateway_rate_limiter_decision_seconds_bucket[5m])))"}
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Channel Depth vs Capacity",
+      "targets": [
+        {"expr": "gateway_channel_depth"},
+        {"expr": "gateway_channel_capacity"},
+        {"expr": "gateway_channel_high_water"}
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Rate Window Usage",
+      "targets": [
+        {"expr": "gateway_rate_window_usage"}
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Capability Denials Rate",
+      "targets": [
+        {"expr": "sum by (capability) (rate(capability_denials_total[15m]))"}
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Capability Denial Rate % (Derived)",
+      "targets": [
+        {"expr": "100 * (sum by (capability) (rate(capability_checks_total{outcome=\"deny\"}[15m])) / sum by (capability) (rate(capability_checks_total[15m])))"}
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "HTTP Error Code Saturation %",
+      "targets": [
+        {"expr": "http_error_code_saturation"}
+      ]
+    }
+    ,
+    {
+      "type": "timeseries",
+      "title": "Backpressure Depth % (Derived)",
+      "targets": [
+        {"expr": "100 * (gateway_channel_depth / gateway_channel_capacity)"}
+      ]
+    }
+    ,
+    {
+      "type": "timeseries",
+      "title": "Capability Denial Rate >25% Threshold",
+      "description": "Highlights when any capability denial rate exceeds 25% (warn) or 40% (crit)",
+      "fieldConfig": {
+        "defaults": {"thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null},{"color": "orange", "value": 25},{"color": "red", "value": 40}]}}
+      },
+      "targets": [
+        {"expr": "100 * (sum by (capability) (rate(capability_checks_total{outcome=\"deny\"}[15m])) / sum by (capability) (rate(capability_checks_total[15m])))"}
+      ]
+    }
+  ],
+  "time": {"from": "now-6h", "to": "now"},
+  "templating": {"list": []}
+}

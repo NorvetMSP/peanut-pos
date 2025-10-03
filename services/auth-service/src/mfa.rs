@@ -1,6 +1,6 @@
 use data_encoding::BASE32_NOPAD;
 use hmac::{Hmac, Mac};
-use rand_core::{OsRng, RngCore};
+use rand::{rngs::OsRng, RngCore};
 use sha1::Sha1;
 use std::time::{SystemTime, UNIX_EPOCH};
 use urlencoding::encode;

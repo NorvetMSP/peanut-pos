@@ -1,0 +1,76 @@
+groups:
+  - name: integration-gateway.latency-and-backpressure
+    interval: 30s
+    rules:
+      - alert: GatewayRateLimiterLatencyHigh
+        expr: histogram_quantile(0.95, sum by (le) (rate(gateway_rate_limiter_decision_seconds_bucket[5m]))) > 0.04
+        for: 15m
+        labels:
+          severity: warning
+          service: integration-gateway
+        annotations:
+          summary: "Gateway rate limiter p95 latency elevated"
+          description: "p95 > 40ms for 15m. Investigate Redis latency or hot keys."
+      - alert: GatewayRateLimiterLatencyCritical
+        expr: histogram_quantile(0.95, sum by (le) (rate(gateway_rate_limiter_decision_seconds_bucket[5m]))) > 0.08
+        for: 10m
+        labels:
+          severity: critical
+          service: integration-gateway
+        annotations:
+          summary: "Gateway rate limiter p95 latency critical"
+          description: "p95 > 80ms for 10m. Possible Redis saturation or network issues."
+      - alert: GatewayBackpressureSustained
+        expr: (gateway_channel_depth / ignoring() gateway_channel_capacity) > 0.7
+        for: 10m
+        labels:
+          severity: warning
+          service: integration-gateway
+        annotations:
+          summary: "Gateway channel depth sustained >70%"
+          description: "Internal work queue depth above 70% for 10m; risk of saturation."
+      - alert: GatewayRateWindowUsageHigh
+        expr: gateway_rate_window_usage > 0.85 * gateway_rate_limit_rpm_target
+        for: 10m
+        labels:
+          severity: warning
+          service: integration-gateway
+        annotations:
+          summary: "Gateway rate window usage high"
+          description: "Window usage >85% of configured rpm target. Consider raising limit or investigating burst traffic."
+      - alert: ErrorCodeSaturationHigh
+        expr: http_error_code_saturation > 70
+        for: 15m
+        labels:
+          severity: warning
+          service: integration-gateway
+        annotations:
+          summary: "HTTP error code saturation >70%"
+          description: "Distinct error codes exceeding 70% of guard threshold; begin consolidation review."
+      - alert: ErrorCodeSaturationCritical
+        expr: http_error_code_saturation > 85
+        for: 10m
+        labels:
+          severity: critical
+          service: integration-gateway
+        annotations:
+          summary: "HTTP error code saturation >85%"
+          description: "Approaching overflow; consolidate or retire unused error codes."
+      - alert: ErrorCodeOverflowOccurred
+        expr: increase(http_error_code_overflow_total[10m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+          service: integration-gateway
+        annotations:
+          summary: "HTTP error code overflow triggered"
+          description: "Overflow bucket incremented; label set exceeded max distinct codes."
+      - alert: GatewayRateLimitRpmTargetZero
+        expr: gateway_rate_limit_rpm_target == 0
+        for: 5m
+        labels:
+          severity: warning
+          service: integration-gateway
+        annotations:
+          summary: "Gateway rate limit RPM target is zero"
+          description: "Configured rpm target is 0 for >5m; likely misconfiguration (would disable rate limiting effectiveness)."

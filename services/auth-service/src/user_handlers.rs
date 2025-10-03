@@ -14,7 +14,7 @@ use axum::{
 };
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use common_auth::AuthContext;
-use rand_core::OsRng;
+use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sqlx::{FromRow, Postgres, QueryBuilder};

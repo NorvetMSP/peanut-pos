@@ -27,6 +27,13 @@ pub async fn publish_rate_limit_alert(producer: &FutureProducer, topic: &str, ev
     if topic.trim().is_empty() { return Ok(()); }
     let payload = serde_json::to_string(event)?;
     let key = event.tenant_id.map(|id| id.to_string()).unwrap_or_else(|| "gateway".to_string());
+    // Test capture hook (mirrors payment void capture) for deterministic assertions without broker
+    if std::env::var("TEST_CAPTURE_KAFKA").ok().as_deref() == Some("1") {
+        crate::integration_handlers::test_support::capture_rate_limit_alert(&payload);
+        if std::env::var("TEST_KAFKA_NO_BROKER").ok().as_deref() == Some("1") {
+            return Ok(());
+        }
+    }
     producer.send(FutureRecord::to(topic).payload(&payload).key(&key), Duration::from_secs(0)).await.map_err(|(err, _)| anyhow!("Failed to publish rate limit alert: {err}"))?;
     Ok(())
 }
