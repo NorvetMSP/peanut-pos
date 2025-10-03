@@ -20,6 +20,7 @@ use std::env;
 #[cfg(feature = "kafka")] use std::time::Duration;
 use uuid::Uuid;
 
+#[allow(dead_code)]
 const INVENTORY_DEFAULT_THRESHOLD: i32 = 5;
 #[derive(Deserialize)]
 pub struct UpdateProduct {

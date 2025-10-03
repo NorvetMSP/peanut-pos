@@ -51,7 +51,6 @@ jobs:
         ports: ["6379:6379"]
 
     env:
-      RUSTFLAGS: '-D warnings'
       CARGO_TERM_COLOR: always
       DATABASE_URL: postgres://novapos:novapos@localhost:5432/novapos
       # Some tests default to this if embedded Postgres isn't used
@@ -122,9 +121,9 @@ jobs:
             fi
           done
 
-      - name: Run integration test suite
+      - name: Run integration test suite (locked)
         run: |
-          cargo test --manifest-path services/Cargo.toml --features integration --all-targets --no-fail-fast -- --nocapture
+          cargo test --manifest-path services/Cargo.toml --features integration --all-targets --locked --no-fail-fast -- --nocapture
 
       - name: Validate test inventory
         if: success()

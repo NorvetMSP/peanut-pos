@@ -1,4 +1,4 @@
 [toolchain]
-channel = "stable" # Pin to current verified compiler version
+channel = "stable"
 components = ["clippy", "rustfmt"]
 profile = "minimal"

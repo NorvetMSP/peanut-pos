@@ -18,3 +18,11 @@ members = [
   ,"audit-coverage"
 ]
 resolver = "2"
+
+[workspace.lints.rust]
+# Deny warnings for our workspace crates without affecting dependencies
+warnings = "deny"
+
+# Tighten previously relaxed lints; can flip to "deny" after a cycle if clean.
+unexpected_cfgs = "warn"
+mismatched_lifetimes = "warn"

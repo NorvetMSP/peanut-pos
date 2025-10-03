@@ -767,7 +767,7 @@ async fn expire_reservations(state: &AppState) -> anyhow::Result<()> {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs();
-            let evt = serde_json::json!({
+            let _evt = serde_json::json!({
                 "type": "reservation.expired",
                 "tenant_id": tenant_id,
                 "product_id": product_id,
@@ -778,14 +778,14 @@ async fn expire_reservations(state: &AppState) -> anyhow::Result<()> {
             #[cfg(feature = "kafka")]
             if let Err(err) = state.kafka_producer.send(
                 rdkafka::producer::FutureRecord::to("inventory.reservation.expired")
-                    .payload(&evt.to_string())
+                    .payload(&_evt.to_string())
                     .key(&tenant_id.to_string()),
                 Duration::from_secs(0)
             ).await {
                 tracing::error!(?err, tenant_id = %tenant_id, order_id = %order_id, "Failed to emit inventory.reservation.expired");
             }
             // Audit event
-            let audit_evt = serde_json::json!({
+            let _audit_evt = serde_json::json!({
                 "action": "inventory.reservation.expired",
                 "schema_version": 1,
                 "tenant_id": tenant_id,
@@ -796,7 +796,7 @@ async fn expire_reservations(state: &AppState) -> anyhow::Result<()> {
             });
             #[cfg(feature = "kafka")] let _ = state.kafka_producer.send(
                 rdkafka::producer::FutureRecord::to("audit.events")
-                    .payload(&audit_evt.to_string())
+                    .payload(&_audit_evt.to_string())
                     .key(&tenant_id.to_string()),
                 Duration::from_secs(0)
             ).await;
