@@ -10,11 +10,11 @@ use axum::{
 };
 use common_auth::{ JwtConfig, JwtVerifier };
 use common_money::log_rounding_mode_once;
-#[cfg(feature = "kafka")] use futures::StreamExt;
-#[cfg(feature = "kafka")] use rdkafka::consumer::{Consumer, StreamConsumer};
-#[cfg(feature = "kafka")] use rdkafka::producer::{FutureProducer, FutureRecord};
-#[cfg(feature = "kafka")] use rdkafka::Message;
-#[cfg(feature = "kafka")] use serde::Deserialize;
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))] use futures::StreamExt;
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))] use rdkafka::consumer::{Consumer, StreamConsumer};
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))] use rdkafka::producer::{FutureProducer, FutureRecord};
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))] use rdkafka::Message;
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))] use serde::Deserialize;
 use sqlx::PgPool;
 use std::{
     env,
@@ -26,12 +26,12 @@ use tokio::net::TcpListener;
 use tokio::time::{interval, MissedTickBehavior};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tracing::{debug, info, warn};
-#[cfg(feature = "kafka")] use uuid::Uuid;
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))] use uuid::Uuid;
 
 mod api; // expose library module for tests & reuse
 pub use crate::api::{AppState, get_points};
 
-#[cfg(feature = "kafka")]
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))]
 #[derive(Debug, Deserialize)]
 struct CompletedEvent {
     order_id: Uuid,
@@ -44,7 +44,7 @@ impl FromRef<AppState> for Arc<JwtVerifier> {
     fn from_ref(state: &AppState) -> Self { state.jwt_verifier.clone() }
 }
 
-#[cfg(feature = "kafka")]
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))]
 async fn handle_completed_event(evt: &CompletedEvent, customer_id: Uuid, pool: &PgPool, producer: &FutureProducer) {
     // Minimal upsert logic: grant points proportional to total (1 point per whole currency unit)
     let points = evt.total.floor() as i32;
@@ -88,24 +88,24 @@ async fn main() -> anyhow::Result<()> {
     let jwt_verifier = build_jwt_verifier_from_env().await?;
     spawn_jwks_refresh(jwt_verifier.clone());
 
-    #[cfg(feature = "kafka")] let bootstrap = env::var("KAFKA_BOOTSTRAP").unwrap_or_else(|_| "localhost:9092".into());
-    #[cfg(feature = "kafka")] let consumer: StreamConsumer = rdkafka::ClientConfig::new()
+    #[cfg(any(feature = "kafka", feature = "kafka-producer"))] let bootstrap = env::var("KAFKA_BOOTSTRAP").unwrap_or_else(|_| "localhost:9092".into());
+    #[cfg(any(feature = "kafka", feature = "kafka-producer"))] let consumer: StreamConsumer = rdkafka::ClientConfig::new()
         .set("bootstrap.servers", &bootstrap)
         .set("group.id", "loyalty-service")
         .create()?;
-    #[cfg(feature = "kafka")] consumer.subscribe(&["order.completed"])?;
+    #[cfg(any(feature = "kafka", feature = "kafka-producer"))] consumer.subscribe(&["order.completed"])?;
 
-    #[cfg(feature = "kafka")] let producer: FutureProducer = rdkafka::ClientConfig::new()
+    #[cfg(any(feature = "kafka", feature = "kafka-producer"))] let producer: FutureProducer = rdkafka::ClientConfig::new()
         .set("bootstrap.servers", &bootstrap)
         .create()?;
 
     let state = AppState {
         db: db_pool.clone(),
         jwt_verifier,
-        #[cfg(feature = "kafka")] producer: producer.clone(),
+        #[cfg(any(feature = "kafka", feature = "kafka-producer"))] producer: producer.clone(),
     };
 
-    #[cfg(feature = "kafka")] tokio::spawn({
+    #[cfg(any(feature = "kafka", feature = "kafka-producer"))] tokio::spawn({
         let db = db_pool.clone();
         let producer = producer.clone();
         async move {
@@ -183,7 +183,7 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[cfg(all(test, feature = "kafka"))]
+#[cfg(all(test, any(feature = "kafka", feature = "kafka-producer")))]
 mod tests {
     use super::*;
     use sqlx::{Executor, PgPool};

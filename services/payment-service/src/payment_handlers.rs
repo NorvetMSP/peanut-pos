@@ -5,7 +5,7 @@ use axum::{
     Json,
 };
 use common_security::{SecurityCtxExtractor, Capability, ensure_capability};
-#[cfg(feature = "kafka")] use common_security::emit_capability_denial_audit;
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))] use common_security::emit_capability_denial_audit;
 use common_http_errors::ApiError;
 use serde::{Deserialize, Serialize};
 use bigdecimal::BigDecimal;
@@ -52,7 +52,7 @@ pub async fn process_card_payment(
     Json(req): Json<PaymentRequest>,
 ) -> Result<Json<PaymentResponse>, ApiError> {
     if let Err(_) = ensure_capability(&sec, Capability::PaymentProcess) {
-        #[cfg(feature = "kafka")] emit_capability_denial_audit(state.audit_producer.as_ref().map(|a| &**a), &sec, Capability::PaymentProcess, "payment-service").await;
+    #[cfg(any(feature = "kafka", feature = "kafka-producer"))] emit_capability_denial_audit(state.audit_producer.as_ref().map(|a| &**a), &sec, Capability::PaymentProcess, "payment-service").await;
         return Err(ApiError::ForbiddenMissingRole { role: "payment_access", trace_id: sec.trace_id });
     }
     let _tenant_id = sec.tenant_id;
@@ -80,7 +80,7 @@ pub async fn void_card_payment(
     Json(req): Json<VoidPaymentRequest>,
 ) -> Result<Json<VoidPaymentResponse>, ApiError> {
     if let Err(_) = ensure_capability(&sec, Capability::PaymentProcess) {
-        #[cfg(feature = "kafka")] emit_capability_denial_audit(state.audit_producer.as_ref().map(|a| &**a), &sec, Capability::PaymentProcess, "payment-service").await;
+    #[cfg(any(feature = "kafka", feature = "kafka-producer"))] emit_capability_denial_audit(state.audit_producer.as_ref().map(|a| &**a), &sec, Capability::PaymentProcess, "payment-service").await;
         return Err(ApiError::ForbiddenMissingRole { role: "payment_access", trace_id: sec.trace_id });
     }
     let _tenant_id = sec.tenant_id;

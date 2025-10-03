@@ -7,10 +7,10 @@ use axum::{
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use common_auth::AuthContext; // retained only for access to bearer token for downstream service calls
 use common_security::{SecurityCtxExtractor, Role};
-#[cfg(feature = "kafka")] use common_audit; // for AuditSeverity
-#[cfg(feature = "kafka")] use serde_json::json;
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))] use common_audit; // for AuditSeverity
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))] use serde_json::json;
 use common_http_errors::ApiError;
-#[cfg(feature = "kafka")] use rdkafka::producer::FutureRecord;
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))] use rdkafka::producer::FutureRecord;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use bigdecimal::BigDecimal;
@@ -19,7 +19,7 @@ use common_money::{nearly_equal, Money};
 use sqlx::{Postgres, QueryBuilder, Row, Transaction};
 use sqlx::Acquire; // acquire a connection handle within a transaction for sqlx 0.7 executor compatibility
 use std::collections::HashMap;
-#[cfg(feature = "kafka")] use std::time::Duration;
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))] use std::time::Duration;
 use uuid::Uuid;
 
 use crate::AppState;
@@ -573,7 +573,7 @@ pub async fn create_order(
     }
 
     if order.status == "COMPLETED" {
-    #[cfg(feature = "kafka")] let event_items: Vec<serde_json::Value> = new_order
+    #[cfg(any(feature = "kafka", feature = "kafka-producer"))] let event_items: Vec<serde_json::Value> = new_order
             .items
             .iter()
             .map(|item| {
@@ -586,7 +586,7 @@ pub async fn create_order(
             })
             .collect();
 
-    #[cfg(feature = "kafka")] let event = serde_json::json!({
+    #[cfg(any(feature = "kafka", feature = "kafka-producer"))] let event = serde_json::json!({
             "order_id": order.id,
             "tenant_id": tenant_id,
             "items": event_items,
@@ -596,7 +596,7 @@ pub async fn create_order(
             "payment_method": order.payment_method,
         });
 
-        #[cfg(feature = "kafka")]
+    #[cfg(any(feature = "kafka", feature = "kafka-producer"))]
         {
             if let Err(err) = state
                 .kafka_producer
@@ -613,7 +613,7 @@ pub async fn create_order(
         }
     }
 
-    #[cfg(feature = "kafka")]
+    #[cfg(any(feature = "kafka", feature = "kafka-producer"))]
     if let Some(audit) = &state.audit_producer {
         let changes = json!({"after": {"order_id": order.id, "status": order.status, "total": order.total.inner()}});
         let _ = audit
@@ -695,7 +695,7 @@ pub async fn void_order(
     .map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to void order: {}", e)) })?
     .ok_or(ApiError::BadRequest { code: "status_changed", trace_id: None, message: Some("Order status changed before void could be applied".into()) })?;
 
-    #[cfg(feature = "kafka")]
+    #[cfg(any(feature = "kafka", feature = "kafka-producer"))]
     let item_rows = sqlx::query_as::<_, OrderItemFinancialRow>(
         "SELECT product_id, quantity, unit_price, line_total FROM order_items WHERE order_id = $1",
     )
@@ -704,7 +704,7 @@ pub async fn void_order(
     .await
     .map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to load order items: {}", e)) })?;
 
-    #[cfg(feature = "kafka")] let event_items: Vec<serde_json::Value> = item_rows
+    #[cfg(any(feature = "kafka", feature = "kafka-producer"))] let event_items: Vec<serde_json::Value> = item_rows
         .into_iter()
         .map(|row| {
             serde_json::json!({
@@ -716,7 +716,7 @@ pub async fn void_order(
         })
         .collect();
 
-    #[cfg(feature = "kafka")] let order_void_event = serde_json::json!({
+    #[cfg(any(feature = "kafka", feature = "kafka-producer"))] let order_void_event = serde_json::json!({
         "order_id": updated_order.id,
         "tenant_id": tenant_id,
         "items": event_items,
@@ -727,7 +727,7 @@ pub async fn void_order(
         "reason": void_reason,
     });
 
-    #[cfg(feature = "kafka")]
+    #[cfg(any(feature = "kafka", feature = "kafka-producer"))]
     if let Err(err) = state
         .kafka_producer
         .send(
@@ -741,7 +741,7 @@ pub async fn void_order(
         tracing::error!("Failed to send order.voided: {:?}", err);
     }
 
-    #[cfg(feature = "kafka")]
+    #[cfg(any(feature = "kafka", feature = "kafka-producer"))]
     if let Some(audit) = &state.audit_producer {
         let changes = json!({
             "order_id": updated_order.id,
@@ -994,7 +994,7 @@ pub async fn refund_order(
 
     tx.commit().await.map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to commit refund transaction: {}", e)) })?;
 
-    #[cfg(feature = "kafka")] let event_items: Vec<serde_json::Value> = updates
+    #[cfg(any(feature = "kafka", feature = "kafka-producer"))] let event_items: Vec<serde_json::Value> = updates
         .iter()
         .map(|update| {
             serde_json::json!({
@@ -1006,7 +1006,7 @@ pub async fn refund_order(
         })
         .collect();
 
-    #[cfg(feature = "kafka")] let refund_event = serde_json::json!({
+    #[cfg(any(feature = "kafka", feature = "kafka-producer"))] let refund_event = serde_json::json!({
         "order_id": updated_order.id,
         "tenant_id": tenant_id,
         "items": event_items,
@@ -1017,7 +1017,7 @@ pub async fn refund_order(
         "return_id": return_id,
     });
 
-    #[cfg(feature = "kafka")]
+    #[cfg(any(feature = "kafka", feature = "kafka-producer"))]
     if let Err(err) = state
         .kafka_producer
         .send(
@@ -1031,7 +1031,7 @@ pub async fn refund_order(
         tracing::error!("Failed to send order.completed (refund): {:?}", err);
     }
 
-    #[cfg(feature = "kafka")]
+    #[cfg(any(feature = "kafka", feature = "kafka-producer"))]
     if let Some(audit) = &state.audit_producer {
         let changes = json!({
             "order_id": updated_order.id,

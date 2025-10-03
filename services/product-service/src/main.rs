@@ -10,7 +10,7 @@ use axum::{
 };
 use common_auth::{JwtConfig, JwtVerifier};
 use common_money::log_rounding_mode_once;
-#[cfg(feature = "kafka")] use rdkafka::producer::FutureProducer;
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))] use rdkafka::producer::FutureProducer;
 use sqlx::PgPool;
 use std::{env, net::SocketAddr, sync::Arc};
 use tokio::{
@@ -26,11 +26,11 @@ use product_service::product_handlers::{
 use product_service::audit_handlers::{audit_search, view_redactions_count, VIEW_REDACTIONS_LABELS};
 mod metrics;
 use metrics::{
-    update_buffer_metrics,
     update_redaction_counters,
     gather as gather_metrics,
     HTTP_ERRORS_TOTAL,
 };
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))] use metrics::update_buffer_metrics;
 use axum::middleware;
 use axum::body::Body;
 
@@ -56,22 +56,22 @@ use product_service::app_state::AppState;
 
 // Legacy JSON metrics (will be deprecated once dashboards switch to Prometheus scrape)
 async fn audit_metrics(State(state): State<AppState>) -> axum::Json<serde_json::Value> {
-    #[cfg(feature = "kafka")]
-    {
-        if let Some(buf) = state.audit_buffer() {
-            let snap = buf.snapshot();
-            return axum::Json(serde_json::json!({
-                "queued": snap.queued,
-                "emitted": snap.emitted,
-                "dropped": snap.dropped
-            }));
-        }
+    #[cfg(not(any(feature = "kafka", feature = "kafka-producer")))] let _ = &state; // silence unused when features off
+    #[cfg(any(feature = "kafka", feature = "kafka-producer"))]
+    if let Some(buf) = state.audit_buffer() {
+        let snap = buf.snapshot();
+        return axum::Json(serde_json::json!({
+            "queued": snap.queued,
+            "emitted": snap.emitted,
+            "dropped": snap.dropped
+        }));
     }
     axum::Json(serde_json::json!({"queued":0,"emitted":0,"dropped":0}))
 }
 
 async fn metrics(State(state): State<AppState>) -> (StatusCode, String) {
-    #[cfg(feature = "kafka")]
+    #[cfg(not(any(feature = "kafka", feature = "kafka-producer")))] let _ = &state;
+    #[cfg(any(feature = "kafka", feature = "kafka-producer"))]
     if let Some(buf) = state.audit_buffer() {
         let snap = buf.snapshot();
         update_buffer_metrics(snap.queued as u64, snap.emitted as u64, snap.dropped as u64);
@@ -106,7 +106,7 @@ async fn main() -> anyhow::Result<()> {
     migrator.set_ignore_missing(true);
     migrator.run(&db).await?;
     // Initialize Kafka producer for downstream events
-    #[cfg(feature = "kafka")]
+    #[cfg(any(feature = "kafka", feature = "kafka-producer"))]
     let kafka_producer: FutureProducer = rdkafka::ClientConfig::new()
         .set(
             "bootstrap.servers",
@@ -119,16 +119,16 @@ async fn main() -> anyhow::Result<()> {
     spawn_jwks_refresh(jwt_verifier.clone());
 
     // Build application state
-    #[cfg(feature = "kafka")]
+    #[cfg(any(feature = "kafka", feature = "kafka-producer"))]
     let audit_topic = env::var("AUDIT_TOPIC").unwrap_or_else(|_| "audit.events".to_string());
-    #[cfg(feature = "kafka")]
+    #[cfg(any(feature = "kafka", feature = "kafka-producer"))]
     let base = common_audit::AuditProducer::new(common_audit::KafkaAuditSink::new(kafka_producer.clone(), common_audit::AuditProducerConfig { topic: audit_topic.clone() }));
-    #[cfg(feature = "kafka")]
+    #[cfg(any(feature = "kafka", feature = "kafka-producer"))]
     let audit_producer = Some(Arc::new(common_audit::BufferedAuditProducer::new(base, 1024)));
-    #[cfg(feature = "kafka")] tracing::info!(topic = %audit_topic, "Audit producer initialized");
-    #[cfg(not(feature = "kafka"))]
+    #[cfg(any(feature = "kafka", feature = "kafka-producer"))] tracing::info!(topic = %audit_topic, "Audit producer initialized");
+    #[cfg(not(any(feature = "kafka", feature = "kafka-producer")))]
     let audit_producer: Option<Arc<()>> = None;
-    #[cfg(not(feature = "kafka"))]
+    #[cfg(not(any(feature = "kafka", feature = "kafka-producer")))]
     let kafka_producer = (); // placeholder when kafka disabled
     let state = AppState::new(db, kafka_producer, jwt_verifier, audit_producer);
 

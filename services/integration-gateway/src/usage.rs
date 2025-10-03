@@ -21,7 +21,7 @@ pub struct UsageTracker {
 struct UsageTrackerInner {
     pool: PgPool,
     #[cfg(any(feature = "kafka", feature = "kafka-producer"))] producer: FutureProducer,
-    topic: String,
+    _topic: String,
     flush_secs: u64,
     summary_secs: u64,
     data: Mutex<HashMap<String, UsageRecord>>,
@@ -64,6 +64,7 @@ struct UsageSummary {
 }
 
 #[derive(Serialize)]
+#[allow(dead_code)]
 struct ApiKeyUsageSummary {
     action: &'static str,
     tenant_id: Uuid,
@@ -81,7 +82,7 @@ impl UsageTracker {
     ) -> Self {
         Self { inner: Arc::new(UsageTrackerInner { pool,
             #[cfg(any(feature = "kafka", feature = "kafka-producer"))] producer: producer.expect("producer required when kafka feature enabled"),
-            topic: config.audit_topic.clone(),
+            _topic: config.audit_topic.clone(),
             flush_secs: config.api_usage_flush_secs,
             summary_secs: config.api_usage_summary_secs,
             data: Mutex::new(HashMap::new()), }) }
@@ -235,7 +236,7 @@ impl UsageTracker {
                 let event = ApiKeyUsageSummary { action: "api_key.usage.summary", tenant_id: summary.tenant_id, key_hash: summary.key_hash.clone(), key_suffix: summary.key_suffix.clone(), window_start: summary.window_start, window_end: summary.window_end, request_count: summary.request_count, rejected_count: summary.rejected_count };
                 match serde_json::to_string(&event) {
                     Ok(payload) => {
-                        if let Err(err) = self.inner.producer.send(FutureRecord::to(&self.inner.topic).payload(&payload).key(&summary.tenant_id.to_string()), StdDuration::from_secs(0)).await {
+                        if let Err(err) = self.inner.producer.send(FutureRecord::to(&self.inner._topic).payload(&payload).key(&summary.tenant_id.to_string()), StdDuration::from_secs(0)).await {
                             error!(?err, tenant_id = %summary.tenant_id, key = %summary.key_hash, "Failed to publish API key usage summary");
                         }
                     }
@@ -243,7 +244,7 @@ impl UsageTracker {
                 }
             }
         }
-        #[cfg(not(feature = "kafka"))]
+        #[cfg(not(any(feature = "kafka", feature = "kafka-producer")))]
         {
             // No-op when kafka disabled.
         }

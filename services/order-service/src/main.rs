@@ -10,10 +10,10 @@ use axum::{
     Router,
 };
 use common_auth::{JwtConfig, JwtVerifier};
-#[cfg(feature = "kafka")] use futures_util::StreamExt;
-#[cfg(feature = "kafka")] use rdkafka::consumer::{Consumer, StreamConsumer};
-#[cfg(feature = "kafka")] use rdkafka::producer::{FutureProducer, FutureRecord};
-#[cfg(feature = "kafka")] use rdkafka::Message;
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))] use futures_util::StreamExt;
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))] use rdkafka::consumer::{Consumer, StreamConsumer};
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))] use rdkafka::producer::{FutureProducer, FutureRecord};
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))] use rdkafka::Message;
 use reqwest::Client;
 use sqlx::PgPool;
 use std::env;
@@ -40,11 +40,11 @@ async fn audit_search() -> (StatusCode, &'static str) { (StatusCode::NOT_IMPLEME
 #[derive(Clone)]
 pub struct AppState {
     pub db: PgPool,
-    #[cfg(feature = "kafka")] pub kafka_producer: FutureProducer,
+    #[cfg(any(feature = "kafka", feature = "kafka-producer"))] pub kafka_producer: FutureProducer,
     pub jwt_verifier: Arc<JwtVerifier>,
     pub http_client: Client,
     pub inventory_base_url: String,
-    #[cfg(feature = "kafka")] pub audit_producer: Option<Arc<common_audit::BufferedAuditProducer<common_audit::KafkaAuditSink>>>,
+    #[cfg(any(feature = "kafka", feature = "kafka-producer"))] pub audit_producer: Option<Arc<common_audit::BufferedAuditProducer<common_audit::KafkaAuditSink>>>,
 }
 
 impl FromRef<AppState> for Arc<JwtVerifier> {
@@ -118,7 +118,7 @@ async fn main() -> anyhow::Result<()> {
     let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
     let db = PgPool::connect(&database_url).await?;
 
-    #[cfg(feature = "kafka")]
+    #[cfg(any(feature = "kafka", feature = "kafka-producer"))]
     let kafka_producer: FutureProducer = rdkafka::ClientConfig::new()
         .set(
             "bootstrap.servers",
@@ -134,7 +134,7 @@ async fn main() -> anyhow::Result<()> {
     let inventory_base_url =
         env::var("INVENTORY_SERVICE_URL").unwrap_or_else(|_| "http://localhost:8087".to_string());
 
-    #[cfg(feature = "kafka")]
+    #[cfg(any(feature = "kafka", feature = "kafka-producer"))]
     let state = AppState {
         db: db.clone(),
         kafka_producer: kafka_producer.clone(),
@@ -149,8 +149,8 @@ async fn main() -> anyhow::Result<()> {
             1024,
         ))),
     };
-    #[cfg(feature = "kafka")] tracing::info!(topic = %env::var("AUDIT_TOPIC").unwrap_or_else(|_| "audit.events".to_string()), "Audit producer initialized");
-    #[cfg(not(feature = "kafka"))]
+    #[cfg(any(feature = "kafka", feature = "kafka-producer"))] tracing::info!(topic = %env::var("AUDIT_TOPIC").unwrap_or_else(|_| "audit.events".to_string()), "Audit producer initialized");
+    #[cfg(not(any(feature = "kafka", feature = "kafka-producer")))]
     let state = AppState {
         db: db.clone(),
         jwt_verifier,
@@ -194,9 +194,9 @@ async fn main() -> anyhow::Result<()> {
         );
 
     async fn audit_metrics(State(state): State<AppState>) -> axum::Json<serde_json::Value> {
-        #[cfg(not(feature = "kafka"))]
+        #[cfg(not(any(feature = "kafka", feature = "kafka-producer")))]
         let _ = &state; // suppress unused warning when kafka disabled
-        #[cfg(feature = "kafka")] {
+        #[cfg(any(feature = "kafka", feature = "kafka-producer"))] {
             if let Some(buf) = &state.audit_producer {
                 let snap = buf.snapshot();
                 return axum::Json(serde_json::json!({
@@ -210,10 +210,10 @@ async fn main() -> anyhow::Result<()> {
     }
 
     async fn metrics(State(state): State<AppState>) -> (StatusCode, String) {
-        #[cfg(not(feature = "kafka"))]
+        #[cfg(not(any(feature = "kafka", feature = "kafka-producer")))]
         let _ = &state; // suppress unused warning when kafka disabled
         let mut out = String::with_capacity(512);
-        #[cfg(feature = "kafka")] {
+        #[cfg(any(feature = "kafka", feature = "kafka-producer"))] {
             if let Some(buf) = &state.audit_producer {
                 let snap = buf.snapshot();
                 out.push_str("# HELP audit_buffer_queued Current in-memory buffered audit events\n");
@@ -231,7 +231,7 @@ async fn main() -> anyhow::Result<()> {
                 out.push_str("# HELP audit_buffer_dropped_total Total audit events dropped due to full buffer\n# TYPE audit_buffer_dropped_total counter\naudit_buffer_dropped_total 0\n");
             }
         }
-        #[cfg(not(feature = "kafka"))] {
+        #[cfg(not(any(feature = "kafka", feature = "kafka-producer")))] {
             out.push_str("# HELP audit_buffer_queued Current in-memory buffered audit events\n# TYPE audit_buffer_queued gauge\naudit_buffer_queued 0\n");
             out.push_str("# HELP audit_buffer_emitted_total Total audit events emitted from buffer\n# TYPE audit_buffer_emitted_total counter\naudit_buffer_emitted_total 0\n");
             out.push_str("# HELP audit_buffer_dropped_total Total audit events dropped due to full buffer\n# TYPE audit_buffer_dropped_total counter\naudit_buffer_dropped_total 0\n");
@@ -259,7 +259,7 @@ async fn main() -> anyhow::Result<()> {
     .layer(cors)
     .layer(middleware::from_fn(http_error_metrics));
 
-    #[cfg(feature = "kafka")]
+    #[cfg(any(feature = "kafka", feature = "kafka-producer"))]
     {
         let db_pool = db.clone();
         let producer = kafka_producer.clone();

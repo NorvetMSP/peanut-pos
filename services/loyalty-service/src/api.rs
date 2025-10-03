@@ -11,7 +11,7 @@ use common_auth::JwtVerifier;
 pub struct AppState {
     pub db: PgPool,
     pub jwt_verifier: Arc<JwtVerifier>,
-    #[cfg(feature = "kafka")] pub producer: rdkafka::producer::FutureProducer,
+    #[cfg(any(feature = "kafka", feature = "kafka-producer"))] pub producer: rdkafka::producer::FutureProducer,
 }
 
 // Legacy LOYALTY_VIEW_ROLES removed; authorization via LoyaltyView capability only.

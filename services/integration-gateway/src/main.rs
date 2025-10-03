@@ -165,8 +165,8 @@ async fn main() -> anyhow::Result<()> {
         )
         .create()
         .expect("failed to create kafka producer");
-    #[cfg(not(feature = "kafka"))]
-    tracing::warn!("kafka feature DISABLED: events & alerts will not be published (TA-FND-5)");
+    #[cfg(not(any(feature = "kafka", feature = "kafka-producer")))]
+    tracing::warn!("kafka features DISABLED (no kafka / kafka-producer): events & alerts will not be published (TA-FND-5)");
 
     let usage = UsageTracker::new(
         config.clone(),
