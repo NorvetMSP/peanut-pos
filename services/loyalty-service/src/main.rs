@@ -43,6 +43,39 @@ impl FromRef<AppState> for Arc<JwtVerifier> {
     fn from_ref(state: &AppState) -> Self { state.jwt_verifier.clone() }
 }
 
+#[cfg(feature = "kafka")]
+async fn handle_completed_event(evt: &CompletedEvent, customer_id: Uuid, pool: &PgPool, producer: &FutureProducer) {
+    // Minimal upsert logic: grant points proportional to total (1 point per whole currency unit)
+    let points = evt.total.floor() as i32;
+    if points <= 0 { return; }
+    if let Err(err) = sqlx::query!(
+        r#"INSERT INTO loyalty_points (customer_id, tenant_id, points)
+            VALUES ($1,$2,$3)
+            ON CONFLICT (customer_id, tenant_id)
+            DO UPDATE SET points = loyalty_points.points + EXCLUDED.points"#,
+        customer_id,
+        evt.tenant_id,
+        points
+    ).execute(pool).await {
+        tracing::warn!(error=%err, "Failed to upsert loyalty points");
+        return;
+    }
+    // Emit a lightweight audit/event (best-effort)
+    let event = serde_json::json!({
+        "event": "loyalty.points.incremented",
+        "tenant_id": evt.tenant_id,
+        "customer_id": customer_id,
+        "points_added": points,
+        "order_id": evt.order_id,
+    });
+    if let Err(err) = producer.send(
+        FutureRecord::to("loyalty.events").payload(&event.to_string()).key(&evt.tenant_id.to_string()),
+        Duration::from_secs(0)
+    ).await {
+        tracing::debug!(error=?err, "Failed to emit loyalty event");
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().with_env_filter("info").init();

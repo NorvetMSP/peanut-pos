@@ -10,16 +10,15 @@ fn main() {
     if cfg!(target_os = "windows") {
         if let Some(lib_dir) = find_rdkafka_vcpkg_zlib_dir() {
             println!("cargo:rustc-link-search=native={}", lib_dir.display());
-            // Link the import library (no `static=` prefix) so MSVC resolves __imp_* symbols.
-            println!("cargo:rustc-link-lib=zlib");
+            if lib_dir.join("zlibstatic.lib").is_file() { println!("cargo:rustc-link-lib=dylib=zlibstatic"); }
+            println!("cargo:rustc-link-lib=dylib=zlib");
+            let explicit = lib_dir.join("zlib.lib");
+            if explicit.is_file() { println!("cargo:rustc-link-arg={}", explicit.display()); }
+            if lib_dir.join("zstd.lib").is_file() { println!("cargo:rustc-link-lib=dylib=zstd"); }
         } else {
-            // Fallback: still attempt static z (may not satisfy __imp_ symbols but keeps prior behavior).
             println!("cargo:warning=Could not locate rdkafka-sys vcpkg zlib directory; falling back to static=z");
             println!("cargo:rustc-link-lib=static=z");
         }
-    } else {
-        // On non-Windows platforms, rely on dependent crates (e.g., libz-sys or rdkafka-sys)
-        // to declare any zlib linkage as needed. Do not force static z here.
     }
 }
 

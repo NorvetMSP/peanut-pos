@@ -17,7 +17,8 @@ fn allowed_roles(cap: Capability) -> &'static [Role] {
     use Capability::*;
     use Role::*;
     match cap {
-        InventoryView => &[SuperAdmin, Admin, Manager, Inventory],
+    // Added Cashier to InventoryView so POS/frontline roles can view stock levels (align tests & business need)
+    InventoryView => &[SuperAdmin, Admin, Manager, Inventory, Cashier],
         CustomerView => &[SuperAdmin, Admin, Manager, Inventory, Cashier, Support],
         // Refined: CustomerWrite now excludes Inventory & Cashier to tighten scope (TA-POL-5)
         CustomerWrite => &[SuperAdmin, Admin, Manager],

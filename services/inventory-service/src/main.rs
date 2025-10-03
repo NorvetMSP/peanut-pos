@@ -20,6 +20,7 @@ use sqlx::{PgPool, Row};
 use prometheus::{Encoder, TextEncoder};
 use common_observability::InventoryMetrics;
 use std::{env, net::SocketAddr, sync::Arc, time::Duration};
+#[cfg(feature = "kafka")] use serde::Deserialize; // needed for event struct derives when kafka feature enabled
 use tokio::net::TcpListener;
 use tokio::time::{interval, MissedTickBehavior};
 use tower_http::cors::{AllowOrigin, CorsLayer};
@@ -766,7 +767,7 @@ async fn expire_reservations(state: &AppState) -> anyhow::Result<()> {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs();
-            let _evt = serde_json::json!({
+            let evt = serde_json::json!({
                 "type": "reservation.expired",
                 "tenant_id": tenant_id,
                 "product_id": product_id,
@@ -784,7 +785,7 @@ async fn expire_reservations(state: &AppState) -> anyhow::Result<()> {
                 tracing::error!(?err, tenant_id = %tenant_id, order_id = %order_id, "Failed to emit inventory.reservation.expired");
             }
             // Audit event
-            let _audit_evt = serde_json::json!({
+            let audit_evt = serde_json::json!({
                 "action": "inventory.reservation.expired",
                 "schema_version": 1,
                 "tenant_id": tenant_id,

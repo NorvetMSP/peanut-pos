@@ -9,14 +9,11 @@ fn main() {
             let explicit = dir.join("zlib.lib");
             if explicit.is_file() { println!("cargo:rustc-link-arg={}", explicit.display()); }
             if dir.join("zstd.lib").is_file() { println!("cargo:rustc-link-lib=dylib=zstd"); }
-            println!("cargo:warning=integration-gateway linking zlib/zstd from {}", dir.display());
+            println!("cargo:warning=customer-service linking zlib/zstd from {}", dir.display());
         } else {
-            println!("cargo:warning=integration-gateway could not locate zlib import library; falling back to static=z");
+            println!("cargo:warning=customer-service could not locate zlib import library; falling back to static=z");
             println!("cargo:rustc-link-lib=static=z");
         }
-    } else {
-        // On non-Windows platforms, rely on dependent crates (e.g., libz-sys or rdkafka-sys)
-        // to declare any zlib linkage as needed. Do not force static z here.
     }
 }
 
@@ -24,7 +21,8 @@ fn find_rdkafka_vcpkg_zlib_dir() -> Option<PathBuf> {
     let target_root = env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
         .or_else(|| env::var_os("CARGO_MANIFEST_DIR").map(PathBuf::from).map(|m| m.join("..").join("..").join("target")))?;
-    let build_dir = target_root.join("debug").join("build");
+    let profile = env::var("PROFILE").unwrap_or_else(|_| "debug".into());
+    let build_dir = target_root.join(profile).join("build");
     if !build_dir.is_dir() { return None; }
     let mut candidates: Vec<_> = fs::read_dir(&build_dir).ok()?
         .filter_map(|e| e.ok())

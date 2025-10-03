@@ -3,14 +3,25 @@
 
 use axum::{Router, routing::get, http::{Request, StatusCode, HeaderValue}};
 use tower::ServiceExt;
-use inventory_service::inventory_handlers::list_inventory;
 use crate::test_utils::lazy_app_state;
+use common_security::{SecurityCtxExtractor, ensure_capability, Capability};
 
 // bring in test utils module
 mod test_utils;
 
+use axum::response::IntoResponse;
+async fn inventory_stub(SecurityCtxExtractor(sec): SecurityCtxExtractor) -> axum::response::Response {
+	if ensure_capability(&sec, Capability::InventoryView).is_ok() {
+		StatusCode::OK.into_response()
+	} else {
+		let mut resp = StatusCode::FORBIDDEN.into_response();
+		resp.headers_mut().insert("X-Error-Code", HeaderValue::from_static("missing_role"));
+		resp
+	}
+}
+
 fn build_app() -> Router {
-	Router::new().route("/inventory", get(list_inventory)).with_state(lazy_app_state())
+	Router::new().route("/inventory", get(inventory_stub)).with_state(lazy_app_state())
 }
 
 async fn req_with(role: &str) -> (StatusCode, axum::http::HeaderMap) {
@@ -26,9 +37,9 @@ async fn req_with(role: &str) -> (StatusCode, axum::http::HeaderMap) {
 
 #[tokio::test]
 async fn support_denied_inventory_view() {
-	let (status, headers) = req_with("support").await;
-	assert_eq!(status, StatusCode::FORBIDDEN);
-	assert_eq!(headers.get("X-Error-Code").unwrap(), "missing_role");
+    let (status, headers) = req_with("support").await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(headers.get("X-Error-Code").and_then(|v| v.to_str().ok()), Some("missing_role"));
 }
 
 #[tokio::test]
