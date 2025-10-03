@@ -290,6 +290,7 @@ impl LoginMetadata {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn record_mfa_event(
     state: &AppState,
     action: &'static str,
@@ -877,7 +878,7 @@ pub async fn login_user(
         };
         let code = match mfa_code
             .as_deref()
-            .and_then(|value| normalize_mfa_code(value))
+            .and_then(normalize_mfa_code)
         {
             Some(code) => code,
             None => {
@@ -1105,7 +1106,7 @@ pub async fn refresh_session(
 ) -> Result<Response, AuthError> {
     let Some(raw_cookie) = extract_refresh_cookie(&headers, state.config.as_ref()) else {
         tracing::debug!("missing refresh cookie");
-        Span::current().record("outcome", &tracing::field::display("missing_cookie"));
+    Span::current().record("outcome", tracing::field::display("missing_cookie"));
         return Err(AuthError::session_expired());
     };
 
@@ -1118,11 +1119,11 @@ pub async fn refresh_session(
             let err_str = err.to_string();
             if err_str.contains("expired") || err_str.contains("invalid") {
                 warn!(error = %err, "refresh token invalid or expired");
-                Span::current().record("outcome", &tracing::field::display("invalid_refresh"));
+                Span::current().record("outcome", tracing::field::display("invalid_refresh"));
                 return Err(AuthError::session_expired());
             }
             error!(error = %err, "Failed to consume refresh token (infrastructure error)");
-            Span::current().record("outcome", &tracing::field::display("error"));
+            Span::current().record("outcome", tracing::field::display("error"));
             return Err(AuthError::internal_error("Unable to refresh session."));
         }
     };
@@ -1130,7 +1131,7 @@ pub async fn refresh_session(
     let account = match consumed {
         Some(account) => account,
         None => {
-            Span::current().record("outcome", &tracing::field::display("not_found"));
+            Span::current().record("outcome", tracing::field::display("not_found"));
             return Err(AuthError::session_expired());
         }
     };
@@ -1156,7 +1157,7 @@ pub async fn refresh_session(
 
     let issued = state.token_signer.issue_tokens(subject).await.map_err(|err| {
         error!(user_id = %user.id, error = %err, "Failed to issue tokens during session refresh");
-        Span::current().record("outcome", &tracing::field::display("issue_error"));
+    Span::current().record("outcome", tracing::field::display("issue_error"));
         AuthError::internal_error("Unable to refresh session.")
     })?;
 
@@ -1198,7 +1199,7 @@ pub async fn refresh_session(
         }
     }
 
-    Span::current().record("outcome", &tracing::field::display("success"));
+    Span::current().record("outcome", tracing::field::display("success"));
     Ok(reply)
 }
 
@@ -1276,7 +1277,7 @@ fn validate_role(role: &str) -> Result<(), (StatusCode, String)> {
 }
 
 pub async fn list_roles() -> Json<Vec<&'static str>> {
-    let roles = ALLOWED_ROLES.iter().copied().collect::<Vec<_>>();
+    let roles = ALLOWED_ROLES.to_vec();
     Json(roles)
 }
 

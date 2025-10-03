@@ -54,7 +54,7 @@ pub fn verify_totp_code(secret: &str, code: &str) -> bool {
 
     MFA_TOTP_VARIANCE.iter().any(|offset| {
         let counter = if *offset < 0 {
-            current_counter.saturating_sub(offset.abs() as u64)
+            current_counter.saturating_sub(offset.unsigned_abs() as u64)
         } else {
             current_counter.saturating_add(*offset as u64)
         };

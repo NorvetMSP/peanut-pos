@@ -63,6 +63,60 @@ Useful docs:
 - tests/README.md — suite overview and commands
 - tests/integration.md — feature flag, infra expectations, examples
 
+### Frontend tests (Vitest & Playwright)
+
+- POS App unit tests (frontends/pos-app):
+
+  ```powershell
+  pushd frontends/pos-app
+  npm ci
+  npm test
+  popd
+  ```
+
+- Admin Portal unit tests (frontends/admin-portal):
+  - Default (watch/dev UI):
+
+    ```powershell
+    pushd frontends/admin-portal
+    npm ci
+    npm run test
+    popd
+    ```
+
+  - One-off run (no watch):
+
+    ```powershell
+    pushd frontends/admin-portal
+    npx vitest run
+    popd
+    ```
+
+- Admin Portal end-to-end (Playwright):
+  - First-time only (install browsers):
+
+    ```powershell
+    pushd frontends/admin-portal
+    npx playwright install
+    popd
+    ```
+
+  - Headless run:
+
+    ```powershell
+    pushd frontends/admin-portal
+    npm run test:e2e
+    popd
+    ```
+
+  - Headed run (opens browser):
+
+    ```powershell
+    pushd frontends/admin-portal
+    npm run test:e2e:headed
+    popd
+    ```
+
 ## Observability & Monitoring
 
 - Bring up Prometheus + Grafana locally: `docker compose up -d prometheus grafana`

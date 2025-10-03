@@ -571,18 +571,10 @@ async fn axum_smoke_tests_core_routes() -> Result<()> {
         .chain(dlq_actions.iter())
         .map(|s| s.as_str())
         .collect();
-    assert!(all_actions
-        .iter()
-        .any(|action| *action == "mfa.challenge.failed"));
-    assert!(all_actions
-        .iter()
-        .any(|action| *action == "mfa.challenge.missing_code"));
-    assert!(all_actions
-        .iter()
-        .any(|action| *action == "mfa.enrollment.start"));
-    assert!(all_actions
-        .iter()
-        .any(|action| *action == "mfa.enrollment.completed"));
+    assert!(all_actions.contains(&"mfa.challenge.failed"));
+    assert!(all_actions.contains(&"mfa.challenge.missing_code"));
+    assert!(all_actions.contains(&"mfa.enrollment.start"));
+    assert!(all_actions.contains(&"mfa.enrollment.completed"));
     assert!(primary_actions
         .iter()
         .any(|action| action == "mfa.challenge.pending_secret"));

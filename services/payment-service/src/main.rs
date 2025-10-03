@@ -65,7 +65,7 @@ async fn main() -> anyhow::Result<()> {
             HeaderName::from_static("x-tenant-id"),
         ]);
 
-    static PAYMENT_REGISTRY: Lazy<Registry> = Lazy::new(|| Registry::new());
+    static PAYMENT_REGISTRY: Lazy<Registry> = Lazy::new(Registry::new);
     static HTTP_ERRORS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
         let v = IntCounterVec::new(
             Opts::new("http_errors_total", "Count of HTTP error responses emitted (status >= 400)"),

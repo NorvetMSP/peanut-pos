@@ -2,7 +2,7 @@ use crate::*; // bring in main module symbols when included from lib/main contex
 use axum::{extract::{State, Path, Query}, Json};
 use uuid::Uuid;
 use common_security::SecurityCtxExtractor;
-use common_http_errors::{ApiError, ApiResult};
+use common_http_errors::ApiResult;
 
 pub async fn create_customer(
     State(state): State<AppState>,

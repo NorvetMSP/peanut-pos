@@ -54,6 +54,7 @@ impl FromRef<AppState> for Arc<JwtVerifier> {
 }
 
 #[derive(serde::Deserialize, Debug)]
+#[allow(dead_code)]
 struct PaymentCompletedEvent {
     pub order_id: Uuid,
     pub tenant_id: Uuid,
@@ -62,6 +63,7 @@ struct PaymentCompletedEvent {
 }
 
 #[derive(serde::Deserialize, Debug)]
+#[allow(dead_code)]
 struct PaymentFailedEvent {
     pub order_id: Uuid,
     pub tenant_id: Uuid,
@@ -70,6 +72,7 @@ struct PaymentFailedEvent {
 }
 
 #[derive(sqlx::FromRow)]
+#[allow(dead_code)]
 struct OrderFinancialSummary {
     total: Option<BigDecimal>,
     customer_id: Option<Uuid>,
@@ -78,6 +81,7 @@ struct OrderFinancialSummary {
 }
 
 #[derive(sqlx::FromRow)]
+#[allow(dead_code)]
 struct OrderItemFinancialRow {
     product_id: Uuid,
     quantity: i32,
@@ -86,7 +90,7 @@ struct OrderItemFinancialRow {
 }
 
 // --- Error metrics (mirrors product/inventory services) ---
-static ORDER_REGISTRY: Lazy<Registry> = Lazy::new(|| Registry::new());
+static ORDER_REGISTRY: Lazy<Registry> = Lazy::new(Registry::new);
 static HTTP_ERRORS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
     let v = IntCounterVec::new(
         Opts::new("http_errors_total", "Count of HTTP error responses emitted (status >= 400)"),

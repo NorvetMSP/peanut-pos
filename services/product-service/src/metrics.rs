@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-pub static REGISTRY: Lazy<Registry> = Lazy::new(|| Registry::new());
+pub static REGISTRY: Lazy<Registry> = Lazy::new(Registry::new);
 
 #[allow(dead_code)]
 pub static AUDIT_BUFFER_QUEUED: Lazy<IntGauge> = Lazy::new(|| {
@@ -56,7 +56,8 @@ pub static HTTP_ERRORS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
 static LAST_BUFFER_EMITTED: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 static LAST_BUFFER_DROPPED: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 static LAST_VIEW_REDACTIONS: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
-static LAST_VIEW_LABELLED: Lazy<Mutex<HashMap<(String,String,String), u64>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+type LabelKey = (String, String, String);
+static LAST_VIEW_LABELLED: Lazy<Mutex<HashMap<LabelKey, u64>>> = Lazy::new(|| Mutex::new(HashMap::new()));
 
 // Whitelist of allowed redaction field labels (cardinality guard)
 static REDACTION_FIELD_WHITELIST: Lazy<Option<HashSet<String>>> = Lazy::new(|| {
@@ -69,11 +70,8 @@ static REDACTION_FIELD_WHITELIST: Lazy<Option<HashSet<String>>> = Lazy::new(|| {
 });
 
 // Cached coverage metrics content (sanitized) loaded once
-static COVERAGE_METRICS: Lazy<Option<String>> = Lazy::new(|| {
-    if let Ok(content) = std::fs::read_to_string("../audit_coverage_metrics.prom") {
-        Some(content)
-    } else { None }
-});
+static COVERAGE_METRICS: Lazy<Option<String>> =
+    Lazy::new(|| std::fs::read_to_string("../audit_coverage_metrics.prom").ok());
 
 #[allow(dead_code)]
 pub fn update_buffer_metrics(queued: u64, emitted_total: u64, dropped_total: u64) {

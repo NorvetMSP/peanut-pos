@@ -20,10 +20,16 @@ fn state() -> AppState { AppState { jwt_verifier: Arc::new(JwtVerifier::new(JwtC
 
 // Simulated request payloads
 #[derive(serde::Deserialize)]
-struct CreateCustomerStub { name: String, email: Option<String> }
+struct CreateCustomerStub {
+    // Match incoming JSON keys while keeping fields unused in test logic
+    #[serde(rename = "name")]
+    _name: String,
+    #[serde(rename = "email")]
+    _email: Option<String>,
+}
 
 async fn create_customer_stub(State(_state): State<AppState>, SecurityCtxExtractor(sec): SecurityCtxExtractor, Json(_body): Json<CreateCustomerStub>) -> Result<String, ApiError> {
-    if let Err(_) = ensure_capability(&sec, Capability::CustomerWrite) {
+    if ensure_capability(&sec, Capability::CustomerWrite).is_err() {
         return Err(ApiError::ForbiddenMissingRole { role: "customer_write", trace_id: sec.trace_id });
     }
     // Always return not found to simulate a downstream condition after auth passes
@@ -31,7 +37,7 @@ async fn create_customer_stub(State(_state): State<AppState>, SecurityCtxExtract
 }
 
 async fn get_customer_stub(State(_state): State<AppState>, SecurityCtxExtractor(sec): SecurityCtxExtractor, axum::extract::Path(_id): axum::extract::Path<Uuid>) -> Result<String, ApiError> {
-    if let Err(_) = ensure_capability(&sec, Capability::CustomerView) {
+    if ensure_capability(&sec, Capability::CustomerView).is_err() {
         return Err(ApiError::ForbiddenMissingRole { role: "customer_view", trace_id: sec.trace_id });
     }
     Err(ApiError::NotFound { code: "customer_not_found", trace_id: None })

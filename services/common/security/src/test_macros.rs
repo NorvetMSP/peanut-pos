@@ -17,7 +17,7 @@ macro_rules! test_request_headers {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    // No direct imports needed; this test just ensures the macro compiles and writes headers
     #[test]
     fn macro_compiles() {
         let mut req = ::axum::http::Request::builder().uri("/").body(::axum::body::Body::empty()).unwrap();

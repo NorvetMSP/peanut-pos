@@ -55,8 +55,7 @@ impl TestDatabase {
             let (pg, temp_dir, uri) = loop {
                 let temp = tempdir()?;
 
-                let mut fetch_settings = PgFetchSettings::default();
-                fetch_settings.version = PG_V13;
+                let fetch_settings = PgFetchSettings { version: PG_V13, ..Default::default() };
 
                 let mut pg = PgEmbed::new(
                     PgSettings {

@@ -11,6 +11,7 @@ use std::sync::Arc;
 /// Build an AppState with a lazily-connected pool suitable for negative-path tests
 /// that short-circuit before any DB interaction (e.g. extractor rejections, early
 /// validation failures). This avoids requiring a running Postgres for those tests.
+#[allow(dead_code)]
 pub fn lazy_app_state() -> AppState {
     let db_url = std::env::var("TEST_DATABASE_URL")
         .unwrap_or_else(|_| "postgres://postgres:postgres@localhost:5432/inventory_tests".to_string());
@@ -38,6 +39,7 @@ pub fn lazy_app_state() -> AppState {
 
 /// Seed tenant + product + default location + legacy inventory & inventory_items row.
 /// Returns (tenant_id, product_id, location_id).
+#[allow(dead_code)]
 pub async fn seed_inventory_basics(pool: &PgPool) -> (Uuid, Uuid, Uuid) {
     let tenant_id = Uuid::new_v4();
     let product_id = Uuid::new_v4();
@@ -78,6 +80,7 @@ pub async fn seed_inventory_basics(pool: &PgPool) -> (Uuid, Uuid, Uuid) {
 }
 
 /// Ensure minimal tables exist for inventory tests when migrations are not executed.
+#[allow(dead_code)]
 pub async fn ensure_inventory_schema(pool: &PgPool) -> Result<(), sqlx::Error> {
     sqlx::query("CREATE TABLE IF NOT EXISTS inventory (product_id uuid, tenant_id uuid, quantity int, threshold int)")
         .execute(pool).await?;
@@ -87,6 +90,7 @@ pub async fn ensure_inventory_schema(pool: &PgPool) -> Result<(), sqlx::Error> {
 }
 
 /// Issue a dev JWT using the repo's dev private key.
+#[allow(dead_code)]
 pub fn issue_dev_jwt(tenant_id: Uuid, roles: &[&str], issuer: &str, audience: &str) -> String {
     #[derive(serde::Serialize)]
     struct Claims<'a> {
@@ -117,6 +121,7 @@ pub fn issue_dev_jwt(tenant_id: Uuid, roles: &[&str], issuer: &str, audience: &s
 }
 
 /// Create a reservation over HTTP, returning the order_id used.
+#[allow(dead_code)]
 pub async fn create_reservation_http(
     client: &Client,
     base_url: &str,

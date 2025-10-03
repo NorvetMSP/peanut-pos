@@ -82,7 +82,7 @@ async fn metrics(State(state): State<AppState>) -> (StatusCode, String) {
         for ((tenant, role, field), count) in map.iter() {
             converted.insert((tenant.to_string(), role.clone(), field.clone()), *count);
         }
-        update_redaction_counters(view_redactions_count() as u64, &converted);
+    update_redaction_counters(view_redactions_count(), &converted);
     }
     let out = gather_metrics(true);
     (StatusCode::OK, out)

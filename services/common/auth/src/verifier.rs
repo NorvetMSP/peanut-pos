@@ -106,8 +106,8 @@ impl JwtVerifier {
             .ok_or_else(|| AuthError::UnknownKeyId(kid.clone()))?;
 
         let mut validation = Validation::new(Algorithm::RS256);
-        validation.set_issuer(&[self.config.issuer.clone()]);
-        validation.set_audience(&[self.config.audience.clone()]);
+    validation.set_issuer(std::slice::from_ref(&self.config.issuer));
+    validation.set_audience(std::slice::from_ref(&self.config.audience));
         validation.leeway = self.config.leeway_seconds.into();
 
         let token_data = decode::<Value>(token, &key, &validation)?;

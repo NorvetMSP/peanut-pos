@@ -54,3 +54,7 @@ impl InventoryMetrics {
         InventoryMetrics { registry, dual_write_divergence, reservation_expired, audit_emit_failures, sweeper_duration_seconds, heal_latency_seconds, http_errors_total }
     }
 }
+
+impl Default for InventoryMetrics {
+    fn default() -> Self { Self::new() }
+}

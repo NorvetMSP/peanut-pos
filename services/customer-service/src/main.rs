@@ -368,7 +368,7 @@ pub(crate) async fn create_customer_impl(
     .bind(Some(Utc::now()))
     .fetch_one(&state.db)
     .await
-    .map_err(|e| db_internal(e))?;
+    .map_err(db_internal)?;
 
     let customer = hydrate_customer_row(row, &mut key_cache).await?;
     Ok(Json(customer))
@@ -444,7 +444,7 @@ pub(crate) async fn search_customers_impl(
     .bind(phone_hash.as_deref())
     .fetch_all(&state.db)
     .await
-    .map_err(|e| db_internal(e))?;
+    .map_err(db_internal)?;
 
     let customers = hydrate_customer_rows(rows, &mut key_cache).await?;
     Ok(Json(customers))
@@ -479,7 +479,7 @@ pub(crate) async fn get_customer_impl(
     .bind(customer_id)
     .fetch_optional(&state.db)
     .await
-    .map_err(|e| db_internal(e))?
+    .map_err(db_internal)?
     .ok_or(ApiError::NotFound { code: "customer_not_found", trace_id: None })?;
 
     let customer = hydrate_customer_row(row, &mut key_cache).await?;
@@ -520,7 +520,7 @@ pub(crate) async fn update_customer_impl(
     )
     .fetch_optional(&state.db)
     .await
-    .map_err(|e| db_internal(e))?
+    .map_err(db_internal)?
     .ok_or(ApiError::NotFound { code: "customer_not_found", trace_id: None })?;
 
     let UpdateCustomerRequest { name, email, phone } = payload;
@@ -680,7 +680,7 @@ pub(crate) async fn update_customer_impl(
     )
     .fetch_optional(&state.db)
     .await
-    .map_err(|e| db_internal(e))?
+    .map_err(db_internal)?
     .ok_or(ApiError::NotFound { code: "customer_not_found", trace_id: None })?;
 
     let customer = hydrate_customer_row(row, &mut key_cache).await?;
@@ -716,7 +716,7 @@ async fn gdpr_export_customer(
     .bind(customer_id)
     .fetch_optional(&state.db)
     .await
-    .map_err(|e| db_internal(e))?
+    .map_err(db_internal)?
     .ok_or(ApiError::NotFound { code: "customer_not_found", trace_id: None })?;
 
     let customer = hydrate_customer_row(row, &mut key_cache).await?;
@@ -737,7 +737,7 @@ async fn gdpr_export_customer(
         metadata,
     )
     .await
-    .map_err(|e| db_internal(e))?;
+    .map_err(db_internal)?;
 
     info!(tenant_id = %tenant_id, customer_id = %customer_id, export_id = %export_id, "GDPR export completed");
     Ok(Json(GdprExportResponse {
@@ -773,13 +773,13 @@ async fn gdpr_delete_customer(
     .bind(customer_id)
     .fetch_optional(&state.db)
     .await
-    .map_err(|e| db_internal(e))?
+    .map_err(db_internal)?
     .ok_or(ApiError::NotFound { code: "customer_not_found", trace_id: None })?;
 
     let had_email = row.email.is_some() || row.email_encrypted.is_some();
     let had_phone = row.phone.is_some() || row.phone_encrypted.is_some();
 
-    let mut tx = state.db.begin().await.map_err(|e| db_internal(e))?;
+    let mut tx = state.db.begin().await.map_err(db_internal)?;
     let result = sqlx::query(
         "UPDATE customers
          SET name = $1,
@@ -798,10 +798,10 @@ async fn gdpr_delete_customer(
     .bind(customer_id)
     .execute(&mut *tx)
     .await
-    .map_err(|e| db_internal(e))?;
+    .map_err(db_internal)?;
 
     if result.rows_affected() == 0 {
-        tx.rollback().await.map_err(|e| db_internal(e))?;
+    tx.rollback().await.map_err(db_internal)?;
         return Err(ApiError::NotFound { code: "customer_not_found", trace_id: None });
     }
 
@@ -822,9 +822,9 @@ async fn gdpr_delete_customer(
         metadata,
     )
     .await
-    .map_err(|e| db_internal(e))?;
+    .map_err(db_internal)?;
 
-    tx.commit().await.map_err(|e| db_internal(e))?;
+    tx.commit().await.map_err(db_internal)?;
     info!(tenant_id = %tenant_id, customer_id = %customer_id, tombstone_id = %tombstone_id, "GDPR delete completed");
     Ok(Json(GdprDeleteResponse {
         tombstone_id,
@@ -908,7 +908,7 @@ async fn load_tenant_dek(
         .bind(version)
         .fetch_optional(db)
         .await
-        .map_err(|e| db_internal(e))?
+    .map_err(db_internal)?
     } else {
         sqlx::query_as::<_, TenantKeyRow>(
             "SELECT key_version, encrypted_key
@@ -920,7 +920,7 @@ async fn load_tenant_dek(
         .bind(tenant_id)
         .fetch_optional(db)
         .await
-        .map_err(|e| db_internal(e))?
+    .map_err(db_internal)?
     };
 
     let row = row.ok_or_else(|| {
@@ -1165,7 +1165,7 @@ mod tests {
             }),
         )
         .await
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("create_customer failed: {:?}", e)))?
+    .map_err(|e| io::Error::other(format!("create_customer failed: {:?}", e)))?
         .0;
 
         let customer_id = created.id;
@@ -1181,7 +1181,7 @@ mod tests {
             }),
         )
         .await
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("update_customer failed: {:?}", e)))?
+    .map_err(|e| io::Error::other(format!("update_customer failed: {:?}", e)))?
         .0;
 
         assert_eq!(updated.name, "Alice Cooper");

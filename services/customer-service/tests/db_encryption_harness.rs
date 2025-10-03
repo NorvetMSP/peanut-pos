@@ -17,8 +17,7 @@
 //! This keeps runtime fast while still asserting DB + crypto behavior.
 
 use std::sync::Arc;
-use axum::{extract::State, Json};
-use customer_service::{SecurityCtxExtractor};
+// no axum handler imports needed in this harness
 use common_security::context::SecurityContext;
 use common_security::roles::Role;
 use common_audit::AuditActor;
@@ -32,6 +31,7 @@ use common_http_errors::ApiError;
 // Bring selected handlers & structs from main module via direct path (they are private there, so we mirror minimal logic here).
 // For thorough verification we could refactor handlers to a separate module re-used by main & tests; for now keep local focused checks.
 
+#[allow(dead_code)]
 #[derive(serde::Serialize, serde::Deserialize)]
 struct NewCustomer { name: String, email: Option<String>, phone: Option<String> }
 
@@ -82,13 +82,13 @@ async fn customer_encryption_round_trip() -> Result<(), ApiError> {
 
     // Build minimal AppState analogue used by handlers (hand-rolled subset)
     #[derive(Clone)]
-    struct TestState { db: PgPool, jwt_verifier: Arc<JwtVerifier>, master_key: Arc<MasterKey> }
+    struct TestState { db: PgPool, jwt_verifier: Arc<JwtVerifier>, #[allow(dead_code)] master_key: Arc<MasterKey> }
     impl axum::extract::FromRef<TestState> for Arc<JwtVerifier> { fn from_ref(s:&TestState)->Self { s.jwt_verifier.clone() } }
 
     let state = TestState { db: pool.clone(), jwt_verifier: Arc::new(JwtVerifier::new(JwtConfig::new("issuer","aud"))), master_key: Arc::new(master_key) };
 
     // Construct SecurityContext (bypassing extractor to focus on encryption path)
-    let sec_ctx = SecurityContext { tenant_id, actor: AuditActor { id: Some(Uuid::new_v4()), name: None, email: None }, roles: vec![Role::Admin], trace_id: None };
+    let _sec_ctx = SecurityContext { tenant_id, actor: AuditActor { id: Some(Uuid::new_v4()), name: None, email: None }, roles: vec![Role::Admin], trace_id: None };
 
     // Create customer manually replicating encryption portions (simplified: insert plaintext email encrypted columns set) - For brevity we directly call similar SQL subset.
     let customer_id = Uuid::new_v4();

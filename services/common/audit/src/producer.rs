@@ -63,6 +63,7 @@ pub struct AuditProducer<S: AuditSink> { sink: S }
 impl<S: AuditSink> AuditProducer<S> {
     pub fn new(sink: S) -> Self { Self { sink } }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn emit(
         &self,
         tenant_id: Uuid,
@@ -135,6 +136,7 @@ impl<S: AuditSink> BufferedAuditProducer<S> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn emit(
         &self,
         tenant_id: Uuid,

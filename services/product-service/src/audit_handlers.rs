@@ -6,6 +6,7 @@ use crate::app_state::AppState;
 use common_security::{SecurityCtxExtractor, roles::{ensure_any_role, Role}};
 use std::sync::atomic::{AtomicU64, Ordering};
 use once_cell::sync::Lazy;
+use std::collections::HashMap;
 use std::env;
 use crate::view_redaction::apply_redaction;
 use crate::ApiError;
@@ -13,7 +14,10 @@ use crate::ApiError;
 // Global counter for view-layer redactions (TA-AUD-7)
 static VIEW_REDACTIONS_TOTAL: AtomicU64 = AtomicU64::new(0);
 // Simple in-memory tally map for label breakouts (not thread-safe high perf; acceptable interim) -> Vec<(tenant_id, role, field, count)>
-pub static VIEW_REDACTIONS_LABELS: Lazy<std::sync::Mutex<std::collections::HashMap<(uuid::Uuid, String, String), u64>>> = Lazy::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+type RedactionLabelKey = (uuid::Uuid, String, String);
+type RedactionLabelMap = HashMap<RedactionLabelKey, u64>;
+pub static VIEW_REDACTIONS_LABELS: Lazy<std::sync::Mutex<RedactionLabelMap>> =
+    Lazy::new(|| std::sync::Mutex::new(HashMap::new()));
 
 pub fn view_redactions_count() -> u64 { VIEW_REDACTIONS_TOTAL.load(Ordering::Relaxed) }
 
@@ -70,13 +74,12 @@ pub async fn audit_search(
     Query(q): Query<AuditQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     // Role enforcement (Admin or Support allowed)
-    if let Err(_)= ensure_any_role(&sec, &[Role::Admin, Role::Support]) {
+    if ensure_any_role(&sec, &[Role::Admin, Role::Support]).is_err() {
         return Err(ApiError::Forbidden { trace_id: sec.trace_id });
     }
 
     let mut limit = q.limit.unwrap_or(50);
-    if limit < 1 { limit = 1; }
-    if limit > 200 { limit = 200; }
+    limit = limit.clamp(1, 200);
 
     // Build dynamic WHERE clauses
     // We'll construct query using sqlx::query_builder for safety
@@ -109,7 +112,7 @@ pub async fn audit_search(
 
     let mut data = Vec::with_capacity(rows.len());
     let include_redacted = q.include_redacted.unwrap_or(false);
-    let privileged = sec.roles.iter().any(|r| *r == Role::Admin);
+    let privileged = sec.roles.contains(&Role::Admin);
 
     // Prepare redaction paths once
     let redaction_paths = redaction_paths_from_env();

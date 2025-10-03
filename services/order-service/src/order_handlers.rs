@@ -87,6 +87,7 @@ struct OrderStatusSnapshot {
 }
 
 #[derive(sqlx::FromRow)]
+#[allow(dead_code)]
 struct OrderItemFinancialRow {
     product_id: Uuid,
     quantity: i32,
@@ -501,8 +502,8 @@ pub async fn create_order(
         }
     };
 
-    let order = match {
-    let conn = tx
+    let insert_result = {
+        let conn = tx
             .acquire()
             .await
             .map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to acquire transaction connection: {e}")) })?;
@@ -524,7 +525,8 @@ pub async fn create_order(
         .bind(idempotency_key.as_deref())
         .fetch_one(&mut *conn)
         .await
-    } {
+    };
+    let order = match insert_result {
         Ok(order) => order,
         Err(e) => {
             if let Err(release_err) = release_inventory(
@@ -823,6 +825,7 @@ pub async fn refund_order(
         return Err(ApiError::BadRequest { code: "no_items", trace_id: None, message: Some("Order has no items to refund".into()) });
     }
 
+    #[allow(dead_code)]
     struct PendingUpdate {
         order_item_id: Uuid,
         product_id: Uuid,
