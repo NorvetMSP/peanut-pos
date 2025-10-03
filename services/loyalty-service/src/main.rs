@@ -14,11 +14,11 @@ use common_money::log_rounding_mode_once;
 #[cfg(feature = "kafka")] use rdkafka::consumer::{Consumer, StreamConsumer};
 #[cfg(feature = "kafka")] use rdkafka::producer::{FutureProducer, FutureRecord};
 #[cfg(feature = "kafka")] use rdkafka::Message;
-use serde::Deserialize;
+#[cfg(feature = "kafka")] use serde::Deserialize;
 use sqlx::PgPool;
 use std::{
     env,
-    net::{IpAddr, SocketAddr},
+    net::{SocketAddr},
     sync::Arc,
     time::Duration,
 };
@@ -26,11 +26,12 @@ use tokio::net::TcpListener;
 use tokio::time::{interval, MissedTickBehavior};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tracing::{debug, info, warn};
-use uuid::Uuid;
+#[cfg(feature = "kafka")] use uuid::Uuid;
 
 mod api; // expose library module for tests & reuse
 pub use crate::api::{AppState, get_points};
 
+#[cfg(feature = "kafka")]
 #[derive(Debug, Deserialize)]
 struct CompletedEvent {
     order_id: Uuid,

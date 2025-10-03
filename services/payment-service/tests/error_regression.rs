@@ -1,4 +1,4 @@
-use axum::{Router, routing::post, http::{Request, StatusCode, HeaderValue}};
+use axum::{Router, routing::post, http::{Request, StatusCode}};
 use common_security::test_request_headers; // macro
 use payment_service::{payment_handlers::process_card_payment, AppState};
 use common_auth::{JwtVerifier, JwtConfig};

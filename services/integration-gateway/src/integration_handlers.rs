@@ -8,6 +8,8 @@ use serde_json::json;
 use std::time::Duration;
 use tokio::time::sleep;
 use uuid::Uuid;
+use once_cell::sync::Lazy;
+use prometheus::IntCounter;
 
 #[allow(unused_imports)]
 use crate::{
@@ -195,6 +197,7 @@ pub async fn process_payment(
             pay_request = pay_request.header("Authorization", auth.0.as_str());
         } else if let Some(fallback) = state.config.payment_service_fallback_auth.as_ref() {
             pay_request = pay_request.header("Authorization", fallback.as_str());
+            FALLBACK_AUTH_INJECTIONS.inc();
         }
         let pay_resp = match pay_request.send().await {
             Ok(r) => r,
@@ -401,6 +404,16 @@ pub async fn void_payment(
     // Non-kafka build: validation hook could still be wired later if needed.
     Ok(Json(PaymentResult { status: "voided".into(), payment_url: None }))
 }
+
+// ---- Metrics ----
+static FALLBACK_AUTH_INJECTIONS: Lazy<IntCounter> = Lazy::new(|| {
+    let c = IntCounter::new(
+        "gateway_fallback_auth_injections_total",
+        "Count of times the integration-gateway injected the configured fallback Authorization header for payment-service calls"
+    ).expect("gateway_fallback_auth_injections_total");
+    let _ = prometheus::default_registry().register(Box::new(c.clone()));
+    c
+});
 
 // Test support submodule exposing capture drain helpers (available when tests compile the crate)
 #[cfg(any(test, feature = "kafka", feature = "kafka-producer"))]

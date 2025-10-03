@@ -24,6 +24,7 @@ async fn build_state() -> AppState {
         api_usage_summary_secs: 300,
         security_alert_webhook_url: None,
         security_alert_webhook_bearer: None,
+        payment_service_fallback_auth: None,
     }));
     let metrics = Arc::new(GatewayMetrics::new().unwrap());
     let pool = sqlx::postgres::PgPoolOptions::new().max_connections(1).connect_lazy("postgres://postgres:postgres@localhost:5432/postgres").unwrap();
