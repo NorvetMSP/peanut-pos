@@ -24,7 +24,7 @@ use axum::{Json, Router};
 use common_auth::{JwtConfig, JwtVerifier};
 use http_body_util::BodyExt;
 use jsonwebtoken::DecodingKey;
-use rand_core::OsRng;
+use rand::rngs::OsRng;
 use reqwest::Client;
 use rsa::pkcs1::EncodeRsaPublicKey;
 use rsa::pkcs8::EncodePrivateKey;

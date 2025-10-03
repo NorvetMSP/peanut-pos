@@ -34,7 +34,7 @@ use axum::{
 };
 use chrono::{Duration as ChronoDuration, Utc};
 use common_auth::{JwtConfig, JwtVerifier};
-use rand_core::OsRng;
+use rand::rngs::OsRng;
 // Removed real Kafka producer imports; using NoopProducer instead.
 use reqwest::Client;
 use rsa::pkcs1::EncodeRsaPublicKey;

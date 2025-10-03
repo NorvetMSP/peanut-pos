@@ -40,6 +40,7 @@ struct UsageRecord {
     summary_rejected: u64,
 }
 
+#[allow(dead_code)]
 struct UsageWindow {
     tenant_id: Uuid,
     key_hash: String,
@@ -51,6 +52,7 @@ struct UsageWindow {
     last_seen: DateTime<Utc>,
 }
 
+#[allow(dead_code)]
 struct UsageSummary {
     tenant_id: Uuid,
     key_hash: String,

@@ -4,7 +4,7 @@
 use integration_gateway::metrics::GatewayMetrics;
 use std::sync::Arc;
 use common_security::Capability;
-use uuid::Uuid;
+// Removed unused Uuid import
 use prometheus::Encoder; // trait for TextEncoder::encode
 
 fn main() {
@@ -12,7 +12,7 @@ fn main() {
     let metrics = Arc::new(GatewayMetrics::new().expect("init metrics"));
     // Set target to deterministic test value for visibility
     metrics.set_rate_limit_rpm_target(1234);
-    let resp = metrics.render().expect("render metrics");
+    let _resp = metrics.render().expect("render metrics");
 
     // Extract body bytes (axum Response into hyper Body, here already built in render)
     // render() returns Response<Body> so we need to block to collect (simpler: reconstruct via registry directly?)

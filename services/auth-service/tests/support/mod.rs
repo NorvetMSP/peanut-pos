@@ -17,7 +17,7 @@ use pg_embed::pg_errors::{PgEmbedError, PgEmbedErrorType};
 use pg_embed::pg_fetch::{PgFetchSettings, PG_V13};
 use pg_embed::postgres::{PgEmbed, PgSettings};
 use portpicker::pick_unused_port;
-use rand_core::OsRng;
+use rand::rngs::OsRng;
 use sha1::Sha1;
 use sqlx::{postgres::PgPoolOptions, PgPool};
 use tempfile::{tempdir, TempDir};

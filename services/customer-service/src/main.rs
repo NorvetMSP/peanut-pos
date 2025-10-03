@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Context};
 use axum::{
-    extract::{FromRef, Path, Query, State},
+    extract::{FromRef, Path, State},
     http::{
         header::{ACCEPT, CONTENT_TYPE},
     HeaderName, HeaderValue, Method, StatusCode,

@@ -6,18 +6,21 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 pub static REGISTRY: Lazy<Registry> = Lazy::new(|| Registry::new());
 
+#[allow(dead_code)]
 pub static AUDIT_BUFFER_QUEUED: Lazy<IntGauge> = Lazy::new(|| {
     let g = IntGauge::new("audit_buffer_queued", "Current in-memory buffered audit events").unwrap();
     REGISTRY.register(Box::new(g.clone())).ok();
     g
 });
 
+#[allow(dead_code)]
 pub static AUDIT_BUFFER_EMITTED: Lazy<IntCounter> = Lazy::new(|| {
     let c = IntCounter::new("audit_buffer_emitted_total", "Total audit events emitted from buffer").unwrap();
     REGISTRY.register(Box::new(c.clone())).ok();
     c
 });
 
+#[allow(dead_code)]
 pub static AUDIT_BUFFER_DROPPED: Lazy<IntCounter> = Lazy::new(|| {
     let c = IntCounter::new("audit_buffer_dropped_total", "Total audit events dropped due to full buffer").unwrap();
     REGISTRY.register(Box::new(c.clone())).ok();
@@ -72,6 +75,7 @@ static COVERAGE_METRICS: Lazy<Option<String>> = Lazy::new(|| {
     } else { None }
 });
 
+#[allow(dead_code)]
 pub fn update_buffer_metrics(queued: u64, emitted_total: u64, dropped_total: u64) {
     AUDIT_BUFFER_QUEUED.set(queued as i64);
     let prev_emitted = LAST_BUFFER_EMITTED.load(Ordering::Relaxed);

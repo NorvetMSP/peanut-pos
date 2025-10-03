@@ -2,7 +2,7 @@ mod support;
 
 use anyhow::{anyhow, Result};
 use auth_service::tokens::{TokenConfig, TokenSigner, TokenSubject};
-use rand_core::OsRng;
+use rand::rngs::OsRng;
 use rsa::pkcs8::EncodePrivateKey;
 use rsa::RsaPrivateKey;
 use sqlx::PgPool;
