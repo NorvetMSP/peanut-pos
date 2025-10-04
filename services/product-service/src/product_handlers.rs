@@ -30,6 +30,10 @@ pub struct UpdateProduct {
     pub active: bool,
     #[serde(default)]
     pub image: Option<String>,
+    #[serde(default)]
+    pub sku: Option<String>,
+    #[serde(default)]
+    pub tax_code: Option<String>,
 }
 
 fn default_product_image() -> String {
@@ -100,7 +104,7 @@ impl Serialize for Product {
     where
         S: Serializer,
     {
-        let mut state = serializer.serialize_struct("Product", 8)?;
+    let mut state = serializer.serialize_struct("Product", 10)?;
         state.serialize_field("id", &self.id)?;
         state.serialize_field("tenant_id", &self.tenant_id)?;
         state.serialize_field("name", &self.name)?;
@@ -109,6 +113,8 @@ impl Serialize for Product {
         state.serialize_field("image", &self.image)?;
         state.serialize_field("image_url", &self.image)?;
         state.serialize_field("active", &self.active)?;
+        state.serialize_field("sku", &self.sku)?;
+        state.serialize_field("tax_code", &self.tax_code)?;
         state.end()
     }
 }
@@ -125,7 +131,7 @@ pub async fn update_product(
     let tenant_id = sec.tenant_id;
     let actor = AuditActor { id: sec.actor.id, name: sec.actor.name.clone(), email: sec.actor.email.clone() };
     let existing = query_as::<_, Product>(
-    "SELECT id, tenant_id, name, price, description, image, active FROM products WHERE id = $1 AND tenant_id = $2",
+    "SELECT id, tenant_id, name, price, description, image, active, sku, tax_code FROM products WHERE id = $1 AND tenant_id = $2",
     )
     .bind(product_id)
     .bind(tenant_id)
@@ -138,15 +144,17 @@ pub async fn update_product(
     };
     let image = normalize_image_input(upd.image);
     let product = query_as::<_, Product>(
-        "UPDATE products SET name = $1, price = $2, description = $3, active = $4, image = COALESCE($5, image)\n         WHERE id = $6 AND tenant_id = $7\n         RETURNING id, tenant_id, name, price, description, image, active"
+        "UPDATE products SET name = $1, price = $2, description = $3, active = $4, image = COALESCE($5, image), sku = COALESCE($8, sku), tax_code = COALESCE($9, tax_code)\n         WHERE id = $6 AND tenant_id = $7\n         RETURNING id, tenant_id, name, price, description, image, active, sku, tax_code"
     )
         .bind(upd.name)
         .bind(normalize_scale(&upd.price))
         .bind(upd.description)
         .bind(upd.active)
         .bind(image)
-        .bind(product_id)
-        .bind(tenant_id)
+    .bind(product_id)
+    .bind(tenant_id)
+    .bind(upd.sku.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()))
+    .bind(upd.tax_code.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()))
         .fetch_one(&state.db)
     .await
     .map_err(|e| ApiError::internal(e, sec.trace_id))?;
@@ -167,6 +175,10 @@ pub struct NewProduct {
     pub description: Option<String>,
     #[serde(default)]
     pub image: Option<String>,
+    #[serde(default)]
+    pub sku: Option<String>,
+    #[serde(default)]
+    pub tax_code: Option<String>,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -178,6 +190,8 @@ pub struct Product {
     pub description: String,
     pub image: String,
     pub active: bool,
+    pub sku: Option<String>,
+    pub tax_code: Option<String>,
 }
 
 pub async fn create_product(
@@ -192,17 +206,12 @@ pub async fn create_product(
     let actor = AuditActor { id: sec.actor.id, name: sec.actor.name.clone(), email: sec.actor.email.clone() };
 
     let product_id = Uuid::new_v4();
-    let NewProduct {
-        name,
-        price,
-        description,
-        image,
-    } = new_product;
+    let NewProduct { name, price, description, image, sku, tax_code } = new_product;
     let desc = description.unwrap_or_default();
     let image = normalize_image_input(image).unwrap_or_else(default_product_image);
 
     let product = query_as::<_, Product>(
-        "INSERT INTO products (id, tenant_id, name, price, description, active, image) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id, tenant_id, name, price, description, image, active"
+        "INSERT INTO products (id, tenant_id, name, price, description, active, image, sku, tax_code) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id, tenant_id, name, price, description, image, active, sku, tax_code"
     )
         .bind(product_id)
         .bind(tenant_id)
@@ -210,7 +219,9 @@ pub async fn create_product(
         .bind(normalize_scale(&price))
         .bind(desc)
         .bind(true)
-        .bind(image)
+    .bind(image)
+    .bind(sku.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()))
+    .bind(tax_code.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()))
         .fetch_one(&state.db)
     .await
     .map_err(|e| ApiError::internal(e, sec.trace_id))?;
@@ -246,19 +257,36 @@ pub async fn create_product(
     Ok(Json(product))
 }
 
+#[derive(Deserialize, Default)]
+pub struct ListProductsQuery { pub sku: Option<String> }
+
 pub async fn list_products(
     State(state): State<AppState>,
     SecurityCtxExtractor(sec): SecurityCtxExtractor,
+    Query(q): Query<ListProductsQuery>,
 ) -> Result<Json<Vec<Product>>, ApiError> {
     let tenant_id = sec.tenant_id;
 
-    let products = query_as::<_, Product>(
-        "SELECT id, tenant_id, name, price, description, image, active FROM products WHERE tenant_id = $1",
-    )
-    .bind(tenant_id)
-    .fetch_all(&state.db)
-    .await
-    .map_err(|e| ApiError::internal(e, sec.trace_id))?;
+    let products = if let Some(s) = q.sku.as_ref().and_then(|v| {
+        let t = v.trim(); if t.is_empty() { None } else { Some(t) }
+    }) {
+        query_as::<_, Product>(
+            "SELECT id, tenant_id, name, price, description, image, active, sku, tax_code FROM products WHERE tenant_id = $1 AND sku = $2",
+        )
+        .bind(tenant_id)
+        .bind(s)
+        .fetch_all(&state.db)
+        .await
+        .map_err(|e| ApiError::internal(e, sec.trace_id))?
+    } else {
+        query_as::<_, Product>(
+            "SELECT id, tenant_id, name, price, description, image, active, sku, tax_code FROM products WHERE tenant_id = $1",
+        )
+        .bind(tenant_id)
+        .fetch_all(&state.db)
+        .await
+        .map_err(|e| ApiError::internal(e, sec.trace_id))?
+    };
 
     Ok(Json(products))
 }
@@ -275,7 +303,7 @@ pub async fn delete_product(
     let actor = AuditActor { id: sec.actor.id, name: sec.actor.name.clone(), email: sec.actor.email.clone() };
 
     let existing = query_as::<_, Product>(
-        "SELECT id, tenant_id, name, price, description, image, active FROM products WHERE id = $1 AND tenant_id = $2",
+        "SELECT id, tenant_id, name, price, description, image, active, sku, tax_code FROM products WHERE id = $1 AND tenant_id = $2",
     )
     .bind(product_id)
     .bind(tenant_id)
@@ -372,4 +400,29 @@ pub async fn list_product_audit(
     .map_err(|e| ApiError::internal(e, sec.trace_id))?;
 
     Ok(Json(entries))
+}
+
+#[derive(Deserialize)]
+pub struct LookupQuery { pub sku: String }
+
+pub async fn lookup_product_by_sku(
+    State(state): State<AppState>,
+    SecurityCtxExtractor(sec): SecurityCtxExtractor,
+    Query(params): Query<LookupQuery>,
+) -> Result<Json<Product>, ApiError> {
+    let tenant_id = sec.tenant_id;
+    let sku = params.sku.trim();
+    if sku.is_empty() {
+        return Err(ApiError::BadRequest { code: "missing_sku", trace_id: sec.trace_id, message: Some("Query param 'sku' is required".into()) });
+    }
+    let product = sqlx::query_as::<_, Product>(
+        "SELECT id, tenant_id, name, price, description, image, active, sku, tax_code FROM products WHERE tenant_id = $1 AND sku = $2 AND active = TRUE"
+    )
+    .bind(tenant_id)
+    .bind(sku)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| ApiError::internal(e, sec.trace_id))?
+    .ok_or(ApiError::NotFound { code: "product_not_found", trace_id: sec.trace_id })?;
+    Ok(Json(product))
 }

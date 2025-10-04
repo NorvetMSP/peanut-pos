@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 common-auth = { path = "../common/auth" }
-common-audit = { path = "../common/audit", features=["kafka"], optional = true }
+common-audit = { path = "../common/audit", optional = true }
 axum = "0.7"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
@@ -32,10 +32,10 @@ tower = "0.5"
 
 [features]
 default = []
-# Canonical producer feature
-kafka-producer = ["rdkafka", "common-audit/kafka-producer"]
+# Canonical producer feature (enable optional dep + rdkafka)
+kafka-producer = ["dep:rdkafka", "dep:common-audit", "common-audit/kafka-producer"]
 # Backward-compatible alias
 kafka = ["kafka-producer"]
-# Lightweight core (no rdkafka linkage)
-kafka-core = ["common-audit/kafka-core"]
+# Lightweight core (no rdkafka linkage) enables optional dep without rdkafka
+kafka-core = ["dep:common-audit", "common-audit/kafka-core"]
 

@@ -21,7 +21,7 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 use tracing::{debug, info, warn};
 
 use product_service::product_handlers::{
-    create_product, delete_product, list_product_audit, list_products, update_product,
+    create_product, delete_product, list_product_audit, list_products, update_product, lookup_product_by_sku,
 };
 use product_service::audit_handlers::{audit_search, view_redactions_count, VIEW_REDACTIONS_LABELS};
 mod metrics;
@@ -173,7 +173,8 @@ async fn main() -> anyhow::Result<()> {
     // Build application routes
     let app = Router::new()
         .route("/healthz", get(health))
-        .route("/products", post(create_product).get(list_products))
+    .route("/products", post(create_product).get(list_products))
+    .route("/products/lookup", get(lookup_product_by_sku))
         .route("/products/:id", put(update_product).delete(delete_product))
         .route("/products/:id/audit", get(list_product_audit))
         .route("/audit/events", get(audit_search))

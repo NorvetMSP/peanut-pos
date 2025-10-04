@@ -32,8 +32,8 @@ use uuid::Uuid;
 
 mod order_handlers;
 use order_handlers::{
-    clear_offline_orders, create_order, get_order, get_order_receipt, list_orders, list_returns,
-    refund_order, void_order,
+    clear_offline_orders, create_order, get_order, get_order_receipt, list_orders, list_returns, compute_order,
+    refund_order, void_order, create_order_from_skus,
 };
 async fn audit_search() -> (StatusCode, &'static str) { (StatusCode::NOT_IMPLEMENTED, "audit search not implemented") }
 
@@ -250,6 +250,8 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/healthz", get(health))
         .route("/orders", post(create_order).get(list_orders))
+    .route("/orders/sku", post(create_order_from_skus))
+        .route("/orders/compute", post(compute_order))
         .route("/orders/:order_id", get(get_order))
         .route("/orders/:order_id/receipt", get(get_order_receipt))
         .route("/orders/offline/clear", post(clear_offline_orders))
