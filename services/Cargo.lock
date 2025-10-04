@@ -562,6 +562,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "axum-extra"
+version = "0.9.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c794b30c904f0a1c2fb7740f7df7f7972dfaa14ef6f57cb6178dc63e5dca2f04"
+dependencies = [
+ "axum",
+ "axum-core",
+ "bytes",
+ "fastrand",
+ "futures-util",
+ "headers",
+ "http 1.3.1",
+ "http-body 1.0.1",
+ "http-body-util",
+ "mime",
+ "multer",
+ "pin-project-lite",
+ "serde",
+ "tower 0.5.2",
+ "tower-layer",
+ "tower-service",
+]
+
+[[package]]
 name = "axum-macros"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2786,6 +2810,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "multer"
+version = "3.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "83e87776546dc87511aa5ee218730c92b666d7264ab6ed41f9d215af9cd5224b"
+dependencies = [
+ "bytes",
+ "encoding_rs",
+ "futures-util",
+ "http 1.3.1",
+ "httparse",
+ "memchr",
+ "mime",
+ "spin",
+ "version_check",
+]
+
+[[package]]
 name = "native-tls"
 version = "0.2.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3001,6 +3042,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "axum-extra",
  "bigdecimal",
  "chrono",
  "common-audit",
@@ -3009,15 +3051,19 @@ dependencies = [
  "common-money",
  "common-security",
  "futures-util",
+ "http 1.3.1",
  "hyper 1.7.0",
+ "jsonwebtoken",
  "once_cell",
  "prometheus",
  "rdkafka",
  "reqwest 0.12.23",
+ "rsa",
  "serde",
  "serde_json",
  "sqlx",
  "thiserror 2.0.16",
+ "time 0.3.44",
  "tokio",
  "tower 0.5.2",
  "tower-http 0.5.2",
@@ -3951,7 +3997,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.4.15",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

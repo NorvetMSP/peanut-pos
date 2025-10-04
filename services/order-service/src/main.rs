@@ -1,119 +1,39 @@
-use anyhow::Context;
-use bigdecimal::BigDecimal;
-use axum::{
-    extract::{FromRef, State},
-    http::{
-        header::{ACCEPT, CONTENT_TYPE},
-        HeaderName, HeaderValue, Method, StatusCode,
-    },
-    routing::{get, post},
-    Router,
-};
-use common_auth::{JwtConfig, JwtVerifier};
-#[cfg(any(feature = "kafka", feature = "kafka-producer"))] use futures_util::StreamExt;
-#[cfg(any(feature = "kafka", feature = "kafka-producer"))] use rdkafka::consumer::{Consumer, StreamConsumer};
-#[cfg(any(feature = "kafka", feature = "kafka-producer"))] use rdkafka::producer::{FutureProducer, FutureRecord};
-#[cfg(any(feature = "kafka", feature = "kafka-producer"))] use rdkafka::Message;
+use axum::Router;
+use common_money::log_rounding_mode_once;
 use reqwest::Client;
 use sqlx::PgPool;
 use std::env;
 use std::net::SocketAddr;
-use std::sync::Arc;
-use std::time::Duration;
 use tokio::net::TcpListener;
-use tokio::time::{interval, MissedTickBehavior};
-use tower_http::cors::{AllowOrigin, CorsLayer};
-use tracing::{debug, info, warn};
-use prometheus::{IntCounterVec, Opts, Registry};
-use once_cell::sync::Lazy;
-use axum::middleware;
-use common_money::log_rounding_mode_once;
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))]
 use uuid::Uuid;
 
-mod order_handlers;
-use order_handlers::{
-    clear_offline_orders, create_order, get_order, get_order_receipt, list_orders, list_returns, compute_order,
-    refund_order, void_order, create_order_from_skus,
-    list_tax_rate_overrides, upsert_tax_rate_override,
-};
-async fn audit_search() -> (StatusCode, &'static str) { (StatusCode::NOT_IMPLEMENTED, "audit search not implemented") }
+// Reuse shared app builder and types from the library crate
+use order_service::{AppState, build_router, build_jwt_verifier_from_env, spawn_jwks_refresh};
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))] use futures_util::StreamExt;
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))] use rdkafka::consumer::{Consumer, StreamConsumer};
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))] use rdkafka::producer::{FutureProducer, FutureRecord};
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))] use rdkafka::Message;
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))] use std::time::Duration;
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))] use bigdecimal::BigDecimal;
 
-#[derive(Clone)]
-pub struct AppState {
-    pub db: PgPool,
-    #[cfg(any(feature = "kafka", feature = "kafka-producer"))] pub kafka_producer: FutureProducer,
-    pub jwt_verifier: Arc<JwtVerifier>,
-    pub http_client: Client,
-    pub inventory_base_url: String,
-    #[cfg(any(feature = "kafka", feature = "kafka-producer"))] pub audit_producer: Option<Arc<common_audit::BufferedAuditProducer<common_audit::KafkaAuditSink>>>,
-}
-
-impl FromRef<AppState> for Arc<JwtVerifier> {
-    fn from_ref(state: &AppState) -> Self {
-        state.jwt_verifier.clone()
-    }
-}
-
+// Kafka-only event and row types used by the background consumer
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))]
 #[derive(serde::Deserialize, Debug)]
 #[allow(dead_code)]
-struct PaymentCompletedEvent {
-    pub order_id: Uuid,
-    pub tenant_id: Uuid,
-    #[allow(dead_code)]
-    pub amount: BigDecimal,
-}
-
+struct PaymentCompletedEvent { pub order_id: Uuid, pub tenant_id: Uuid, pub amount: BigDecimal }
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))]
 #[derive(serde::Deserialize, Debug)]
 #[allow(dead_code)]
-struct PaymentFailedEvent {
-    pub order_id: Uuid,
-    pub tenant_id: Uuid,
-    pub method: String,
-    pub reason: String,
-}
-
+struct PaymentFailedEvent { pub order_id: Uuid, pub tenant_id: Uuid, pub method: String, pub reason: String }
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))]
 #[derive(sqlx::FromRow)]
 #[allow(dead_code)]
-struct OrderFinancialSummary {
-    total: Option<BigDecimal>,
-    customer_id: Option<Uuid>,
-    offline: bool,
-    payment_method: String,
-}
-
+struct OrderFinancialSummary { total: Option<BigDecimal>, customer_id: Option<Uuid>, offline: bool, payment_method: String }
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))]
 #[derive(sqlx::FromRow)]
 #[allow(dead_code)]
-struct OrderItemFinancialRow {
-    product_id: Uuid,
-    quantity: i32,
-    unit_price: BigDecimal,
-    line_total: BigDecimal,
-}
-
-// --- Error metrics (mirrors product/inventory services) ---
-static ORDER_REGISTRY: Lazy<Registry> = Lazy::new(Registry::new);
-static HTTP_ERRORS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
-    let v = IntCounterVec::new(
-        Opts::new("http_errors_total", "Count of HTTP error responses emitted (status >= 400)"),
-        &["service", "code", "status"],
-    ).unwrap();
-    ORDER_REGISTRY.register(Box::new(v.clone())).ok();
-    v
-});
-
-async fn http_error_metrics(req: axum::http::Request<axum::body::Body>, next: axum::middleware::Next) -> axum::response::Response {
-    let resp = next.run(req).await;
-    let status = resp.status();
-    if status.as_u16() >= 400 {
-        let code = resp.headers().get("X-Error-Code").and_then(|v| v.to_str().ok()).unwrap_or("unknown");
-        HTTP_ERRORS_TOTAL.with_label_values(&["order-service", code, status.as_str()]).inc();
-    }
-    resp
-}
-
-async fn health() -> &'static str {
-    "ok"
-}
+struct OrderItemFinancialRow { product_id: Uuid, quantity: i32, unit_price: BigDecimal, line_total: BigDecimal }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -154,7 +74,8 @@ async fn main() -> anyhow::Result<()> {
             1024,
         ))),
     };
-    #[cfg(any(feature = "kafka", feature = "kafka-producer"))] tracing::info!(topic = %env::var("AUDIT_TOPIC").unwrap_or_else(|_| "audit.events".to_string()), "Audit producer initialized");
+    #[cfg(any(feature = "kafka", feature = "kafka-producer"))]
+    tracing::info!(topic = %env::var("AUDIT_TOPIC").unwrap_or_else(|_| "audit.events".to_string()), "Audit producer initialized");
     #[cfg(not(any(feature = "kafka", feature = "kafka-producer")))]
     let state = AppState {
         db: db.clone(),
@@ -163,109 +84,8 @@ async fn main() -> anyhow::Result<()> {
         inventory_base_url: inventory_base_url.clone(),
     };
 
-    let allowed_origins = [
-        "http://localhost:3000",
-        "http://localhost:3001",
-        "http://localhost:5173",
-    ];
-
-    let cors = CorsLayer::new()
-        .allow_origin(AllowOrigin::list(
-            allowed_origins
-                .iter()
-                .filter_map(|origin| origin.parse::<HeaderValue>().ok())
-                .collect::<Vec<_>>(),
-        ))
-        .allow_methods(
-            [
-                Method::GET,
-                Method::POST,
-                Method::PUT,
-                Method::DELETE,
-                Method::OPTIONS,
-            ]
-            .into_iter()
-            .collect::<Vec<_>>(),
-        )
-        .allow_headers(
-            [
-                ACCEPT,
-                CONTENT_TYPE,
-                HeaderName::from_static("authorization"),
-                HeaderName::from_static("x-tenant-id"),
-            ]
-            .into_iter()
-            .collect::<Vec<_>>(),
-        );
-
-    async fn audit_metrics(State(state): State<AppState>) -> axum::Json<serde_json::Value> {
-        #[cfg(not(any(feature = "kafka", feature = "kafka-producer")))]
-        let _ = &state; // suppress unused warning when kafka disabled
-        #[cfg(any(feature = "kafka", feature = "kafka-producer"))] {
-            if let Some(buf) = &state.audit_producer {
-                let snap = buf.snapshot();
-                return axum::Json(serde_json::json!({
-                    "queued": snap.queued,
-                    "emitted": snap.emitted,
-                    "dropped": snap.dropped
-                }));
-            }
-        }
-        axum::Json(serde_json::json!({"queued":0,"emitted":0,"dropped":0}))
-    }
-
-    async fn metrics(State(state): State<AppState>) -> (StatusCode, String) {
-        #[cfg(not(any(feature = "kafka", feature = "kafka-producer")))]
-        let _ = &state; // suppress unused warning when kafka disabled
-        let mut out = String::with_capacity(512);
-        #[cfg(any(feature = "kafka", feature = "kafka-producer"))] {
-            if let Some(buf) = &state.audit_producer {
-                let snap = buf.snapshot();
-                out.push_str("# HELP audit_buffer_queued Current in-memory buffered audit events\n");
-                out.push_str("# TYPE audit_buffer_queued gauge\n");
-                out.push_str(&format!("audit_buffer_queued {}\n", snap.queued));
-                out.push_str("# HELP audit_buffer_emitted_total Total audit events emitted from buffer\n");
-                out.push_str("# TYPE audit_buffer_emitted_total counter\n");
-                out.push_str(&format!("audit_buffer_emitted_total {}\n", snap.emitted));
-                out.push_str("# HELP audit_buffer_dropped_total Total audit events dropped due to full buffer\n");
-                out.push_str("# TYPE audit_buffer_dropped_total counter\n");
-                out.push_str(&format!("audit_buffer_dropped_total {}\n", snap.dropped));
-            } else {
-                out.push_str("# HELP audit_buffer_queued Current in-memory buffered audit events\n# TYPE audit_buffer_queued gauge\naudit_buffer_queued 0\n");
-                out.push_str("# HELP audit_buffer_emitted_total Total audit events emitted from buffer\n# TYPE audit_buffer_emitted_total counter\naudit_buffer_emitted_total 0\n");
-                out.push_str("# HELP audit_buffer_dropped_total Total audit events dropped due to full buffer\n# TYPE audit_buffer_dropped_total counter\naudit_buffer_dropped_total 0\n");
-            }
-        }
-        #[cfg(not(any(feature = "kafka", feature = "kafka-producer")))] {
-            out.push_str("# HELP audit_buffer_queued Current in-memory buffered audit events\n# TYPE audit_buffer_queued gauge\naudit_buffer_queued 0\n");
-            out.push_str("# HELP audit_buffer_emitted_total Total audit events emitted from buffer\n# TYPE audit_buffer_emitted_total counter\naudit_buffer_emitted_total 0\n");
-            out.push_str("# HELP audit_buffer_dropped_total Total audit events dropped due to full buffer\n# TYPE audit_buffer_dropped_total counter\naudit_buffer_dropped_total 0\n");
-        }
-        if let Ok(cov) = std::fs::read_to_string("../audit_coverage_metrics.prom") {
-            out.push_str("\n# Audit coverage metrics\n");
-            out.push_str(&cov);
-        }
-        (StatusCode::OK, out)
-    }
-
-    let app = Router::new()
-        .route("/healthz", get(health))
-        .route("/orders", post(create_order).get(list_orders))
-    .route("/orders/sku", post(create_order_from_skus))
-        .route("/orders/compute", post(compute_order))
-        .route("/orders/:order_id", get(get_order))
-        .route("/orders/:order_id/receipt", get(get_order_receipt))
-        .route("/orders/offline/clear", post(clear_offline_orders))
-        .route("/orders/:order_id/void", post(void_order))
-        .route("/orders/refund", post(refund_order))
-        .route("/returns", get(list_returns))
-        .route("/admin/tax_rate_overrides", get(list_tax_rate_overrides).post(upsert_tax_rate_override))
-    .route("/audit/events", get(audit_search))
-    .route("/internal/audit_metrics", get(audit_metrics))
-    .route("/internal/metrics", get(metrics))
-        .with_state(state.clone())
-    .layer(cors)
-    .layer(middleware::from_fn(http_error_metrics));
+    // Build the HTTP app with shared router wiring (CORS, middleware, routes)
+    let app: Router = build_router(state.clone());
 
     #[cfg(any(feature = "kafka", feature = "kafka-producer"))]
     {
@@ -566,63 +386,3 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn build_jwt_verifier_from_env() -> anyhow::Result<Arc<JwtVerifier>> {
-    let issuer = env::var("JWT_ISSUER").context("JWT_ISSUER must be set")?;
-    let audience = env::var("JWT_AUDIENCE").context("JWT_AUDIENCE must be set")?;
-
-    let mut config = JwtConfig::new(issuer, audience);
-    if let Ok(value) = env::var("JWT_LEEWAY_SECONDS") {
-        if let Ok(leeway) = value.parse::<u32>() {
-            config = config.with_leeway(leeway);
-        }
-    }
-
-    let mut builder = JwtVerifier::builder(config);
-
-    if let Ok(url) = env::var("JWT_JWKS_URL") {
-        info!(jwks_url = %url, "Configuring JWKS fetcher");
-        builder = builder.with_jwks_url(url);
-    }
-
-    if let Ok(pem) = env::var("JWT_DEV_PUBLIC_KEY_PEM") {
-        warn!("Using JWT_DEV_PUBLIC_KEY_PEM for verification; do not enable in production");
-        builder = builder
-            .with_rsa_pem("local-dev", pem.as_bytes())
-            .map_err(anyhow::Error::from)?;
-    }
-
-    let verifier = builder.build().await.map_err(anyhow::Error::from)?;
-    info!("JWT verifier initialised");
-    Ok(Arc::new(verifier))
-}
-
-fn spawn_jwks_refresh(verifier: Arc<JwtVerifier>) {
-    let Some(fetcher) = verifier.jwks_fetcher() else {
-        return;
-    };
-
-    let refresh_secs = env::var("JWKS_REFRESH_SECONDS")
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(300);
-    let refresh_secs = refresh_secs.max(60);
-    let interval_duration = Duration::from_secs(refresh_secs);
-    let url = fetcher.url().to_owned();
-    let handle = verifier.clone();
-
-    tokio::spawn(async move {
-        let mut ticker = interval(interval_duration);
-        ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
-        loop {
-            ticker.tick().await;
-            match handle.refresh_jwks().await {
-                Ok(count) => {
-                    debug!(count, jwks_url = %url, "Refreshed JWKS keys");
-                }
-                Err(err) => {
-                    warn!(error = %err, jwks_url = %url, "Failed to refresh JWKS keys");
-                }
-            }
-        }
-    });
-}

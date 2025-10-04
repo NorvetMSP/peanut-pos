@@ -1,7 +1,4 @@
-use bigdecimal::BigDecimal;
-use common_money::Money;
-
-fn cents(v: i64) -> BigDecimal { Money::from_cents(v).into() }
+// no imports needed
 
 #[test]
 fn compute_discount_rounding_half_up() {
