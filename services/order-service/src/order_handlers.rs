@@ -102,6 +102,7 @@ struct InventoryReservationRequestPayload {
 }
 
 // Compute subtotal, discount, and tax for a set of items using product tax_code and DEFAULT_TAX_RATE_BPS.
+#[allow(dead_code)]
 async fn compute_financials_for_items(
     state: &AppState,
     tenant_id: Uuid,
@@ -146,7 +147,14 @@ async fn compute_financials_for_items(
 
 fn clamp_bps2(v: i32) -> i32 { v.clamp(0, 10_000) }
 
-fn resolve_tax_rate_bps(headers: &HeaderMap, req_rate: Option<i32>) -> i32 {
+async fn resolve_tax_rate_bps_with_db(
+    db: &sqlx::PgPool,
+    tenant_id: Uuid,
+    headers: &HeaderMap,
+    req_rate: Option<i32>,
+    location_id: Option<Uuid>,
+    pos_instance_id: Option<Uuid>,
+) -> i32 {
     if let Some(bp) = req_rate { return clamp_bps2(bp); }
     if let Some(v) = headers.get("x-tax-rate-bps").and_then(|h| h.to_str().ok()).and_then(|s| s.parse::<i32>().ok()) {
         return clamp_bps2(v);
@@ -154,6 +162,19 @@ fn resolve_tax_rate_bps(headers: &HeaderMap, req_rate: Option<i32>) -> i32 {
     if let Some(v) = headers.get("x-tenant-tax-rate-bps").and_then(|h| h.to_str().ok()).and_then(|s| s.parse::<i32>().ok()) {
         return clamp_bps2(v);
     }
+    if let Some(pos_id) = pos_instance_id {
+        if let Ok(Some(row)) = sqlx::query_scalar::<_, i32>(
+            "SELECT rate_bps FROM tax_rate_overrides WHERE tenant_id = $1 AND pos_instance_id = $2 ORDER BY updated_at DESC LIMIT 1"
+        ).bind(tenant_id).bind(pos_id).fetch_optional(db).await { return clamp_bps2(row); }
+    }
+    if let Some(loc_id) = location_id {
+        if let Ok(Some(row)) = sqlx::query_scalar::<_, i32>(
+            "SELECT rate_bps FROM tax_rate_overrides WHERE tenant_id = $1 AND location_id = $2 AND pos_instance_id IS NULL ORDER BY updated_at DESC LIMIT 1"
+        ).bind(tenant_id).bind(loc_id).fetch_optional(db).await { return clamp_bps2(row); }
+    }
+    if let Ok(Some(row)) = sqlx::query_scalar::<_, i32>(
+        "SELECT rate_bps FROM tax_rate_overrides WHERE tenant_id = $1 AND location_id IS NULL AND pos_instance_id IS NULL ORDER BY updated_at DESC LIMIT 1"
+    ).bind(tenant_id).fetch_optional(db).await { return clamp_bps2(row); }
     default_tax_rate_bps()
 }
 
@@ -1585,7 +1606,7 @@ pub async fn get_order_receipt(
 }
 
 // --- Compute endpoint: accepts sku/product_id + qty, returns computed totals ---
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct ComputeOrderItemInput {
     #[serde(default)]
     pub sku: Option<String>,
@@ -1645,6 +1666,107 @@ fn is_taxable(tax_code: Option<&str>) -> bool {
         Some(code) if code == "EXEMPT" || code == "ZERO" || code == "NONE" => false,
         _ => true, // treat STD or missing as taxable
     }
+}
+
+// --- Admin: Tax rate overrides CRUD ---
+#[derive(Serialize, sqlx::FromRow)]
+pub struct TaxRateOverrideRow {
+    pub tenant_id: Uuid,
+    pub location_id: Option<Uuid>,
+    pub pos_instance_id: Option<Uuid>,
+    pub rate_bps: i32,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Deserialize, Default)]
+pub struct ListTaxOverridesParams {
+    pub location_id: Option<Uuid>,
+    pub pos_instance_id: Option<Uuid>,
+}
+
+pub async fn list_tax_rate_overrides(
+    State(state): State<AppState>,
+    SecurityCtxExtractor(sec): SecurityCtxExtractor,
+    Query(params): Query<ListTaxOverridesParams>,
+) -> Result<Json<Vec<TaxRateOverrideRow>>, ApiError> {
+    if !sec.roles.iter().any(|r| matches!(r, Role::Admin | Role::Manager)) {
+        return Err(ApiError::ForbiddenMissingRole { role: "admin_or_manager", trace_id: None });
+    }
+    let tenant_id = sec.tenant_id;
+
+    let mut qb: QueryBuilder<Postgres> = QueryBuilder::new(
+        "SELECT tenant_id, location_id, pos_instance_id, rate_bps, updated_at FROM tax_rate_overrides WHERE tenant_id = "
+    );
+    qb.push_bind(tenant_id);
+    if params.location_id.is_some() {
+        qb.push(" AND location_id IS NOT DISTINCT FROM ");
+        qb.push_bind(params.location_id);
+    }
+    if params.pos_instance_id.is_some() {
+        qb.push(" AND pos_instance_id IS NOT DISTINCT FROM ");
+        qb.push_bind(params.pos_instance_id);
+    }
+    qb.push(" ORDER BY updated_at DESC");
+
+    let rows = qb
+        .build_query_as::<TaxRateOverrideRow>()
+        .fetch_all(&state.db)
+        .await
+        .map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to list overrides: {}", e)) })?;
+    Ok(Json(rows))
+}
+
+#[derive(Deserialize)]
+pub struct UpsertTaxRateOverrideRequest {
+    pub location_id: Option<Uuid>,
+    pub pos_instance_id: Option<Uuid>,
+    pub rate_bps: i32,
+}
+
+pub async fn upsert_tax_rate_override(
+    State(state): State<AppState>,
+    SecurityCtxExtractor(sec): SecurityCtxExtractor,
+    Json(req): Json<UpsertTaxRateOverrideRequest>,
+) -> Result<Json<TaxRateOverrideRow>, ApiError> {
+    if !sec.roles.iter().any(|r| matches!(r, Role::Admin | Role::Manager)) {
+        return Err(ApiError::ForbiddenMissingRole { role: "admin_or_manager", trace_id: None });
+    }
+    let tenant_id = sec.tenant_id;
+    let rate = clamp_bps2(req.rate_bps);
+    // Ensure table exists in dev/test; prod will have migration applied
+    let _ = sqlx::query(
+        r#"CREATE TABLE IF NOT EXISTS tax_rate_overrides (
+            tenant_id UUID NOT NULL,
+            location_id UUID NULL,
+            pos_instance_id UUID NULL,
+            rate_bps INTEGER NOT NULL CHECK (rate_bps >= 0 AND rate_bps <= 10000),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )"#
+    ).execute(&state.db).await;
+
+    // Delete existing row for the same scope, then insert new
+    sqlx::query(
+        "DELETE FROM tax_rate_overrides WHERE tenant_id = $1 AND location_id IS NOT DISTINCT FROM $2 AND pos_instance_id IS NOT DISTINCT FROM $3"
+    )
+    .bind(tenant_id)
+    .bind(req.location_id)
+    .bind(req.pos_instance_id)
+    .execute(&state.db)
+    .await
+    .map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to clear existing override: {}", e)) })?;
+
+    let row = sqlx::query_as::<_, TaxRateOverrideRow>(
+        "INSERT INTO tax_rate_overrides (tenant_id, location_id, pos_instance_id, rate_bps) VALUES ($1,$2,$3,$4) RETURNING tenant_id, location_id, pos_instance_id, rate_bps, updated_at"
+    )
+    .bind(tenant_id)
+    .bind(req.location_id)
+    .bind(req.pos_instance_id)
+    .bind(rate)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to upsert override: {}", e)) })?;
+
+    Ok(Json(row))
 }
 
 async fn compute_with_db_inner(
@@ -1750,7 +1872,14 @@ async fn compute_with_db_inner(
             (discount_cents.saturating_mul(taxable_subtotal_cents) + (subtotal_cents / 2)) / subtotal_cents
         } else { 0 };
         let taxable_net_cents = taxable_subtotal_cents.saturating_sub(discount_on_taxable).max(0);
-        let rate_bps = resolve_tax_rate_bps(headers, req.tax_rate_bps) as i64;
+        let rate_bps = resolve_tax_rate_bps_with_db(
+            db,
+            tenant_id,
+            headers,
+            req.tax_rate_bps,
+            req.location_id,
+            req.pos_instance_id,
+        ).await as i64;
         tax_cents = (taxable_net_cents.saturating_mul(rate_bps) + 5_000) / 10_000;
     }
 
@@ -1845,6 +1974,90 @@ mod integration_tests {
         assert_eq!(soda.unit_price_cents, 199);
         assert_eq!(soda.line_subtotal_cents, 398);
     }
+
+    #[tokio::test]
+    async fn compute_uses_db_tax_override_precedence() {
+        // Arrange DB
+        let db_url = std::env::var("TEST_DATABASE_URL").unwrap_or_else(|_| "postgres://postgres:postgres@localhost:5432/postgres".to_string());
+        let pool = sqlx::PgPool::connect(&db_url).await.expect("connect db");
+        let tenant_id = Uuid::new_v4();
+
+        // Ensure tables
+        let _ = pool.execute(
+            r#"
+            CREATE TABLE IF NOT EXISTS products (
+              id uuid PRIMARY KEY,
+              tenant_id uuid NOT NULL,
+              name text NOT NULL,
+              price numeric NOT NULL,
+              sku text,
+              tax_code text,
+              active boolean NOT NULL DEFAULT true
+            );
+            "#
+        ).await;
+        let _ = pool.execute(
+            r#"
+            CREATE TABLE IF NOT EXISTS tax_rate_overrides (
+              tenant_id UUID NOT NULL,
+              location_id UUID NULL,
+              pos_instance_id UUID NULL,
+              rate_bps INTEGER NOT NULL CHECK (rate_bps >= 0 AND rate_bps <= 10000),
+              updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+            "#
+        ).await;
+
+        let _ = sqlx::query("DELETE FROM products WHERE tenant_id = $1").bind(tenant_id).execute(&pool).await;
+        let _ = sqlx::query("DELETE FROM tax_rate_overrides WHERE tenant_id = $1").bind(tenant_id).execute(&pool).await;
+
+        // Seed products
+        let p_std = Uuid::new_v4();
+        let p_exempt = Uuid::new_v4();
+        sqlx::query("INSERT INTO products (id, tenant_id, name, price, sku, tax_code, active) VALUES ($1,$2,$3,$4,$5,$6,$7)")
+            .bind(p_std).bind(tenant_id).bind("Soda Can").bind(cents(199)).bind("SKU-SODA").bind(Some("STD".to_string())).bind(true)
+            .execute(&pool).await.expect("insert std");
+        sqlx::query("INSERT INTO products (id, tenant_id, name, price, sku, tax_code, active) VALUES ($1,$2,$3,$4,$5,$6,$7)")
+            .bind(p_exempt).bind(tenant_id).bind("Bottle Water").bind(cents(149)).bind("SKU-WATER").bind(Some("EXEMPT".to_string())).bind(true)
+            .execute(&pool).await.expect("insert exempt");
+
+        // Seed tax overrides: tenant=700, location=800, pos=900
+        let loc_id = Uuid::new_v4();
+        let pos_id = Uuid::new_v4();
+        sqlx::query("INSERT INTO tax_rate_overrides (tenant_id, location_id, pos_instance_id, rate_bps) VALUES ($1,$2,$3,$4)")
+            .bind(tenant_id).bind(Option::<Uuid>::None).bind(Option::<Uuid>::None).bind(700)
+            .execute(&pool).await.expect("insert tenant override");
+        sqlx::query("INSERT INTO tax_rate_overrides (tenant_id, location_id, pos_instance_id, rate_bps) VALUES ($1,$2,$3,$4)")
+            .bind(tenant_id).bind(Some(loc_id)).bind(Option::<Uuid>::None).bind(800)
+            .execute(&pool).await.expect("insert loc override");
+        sqlx::query("INSERT INTO tax_rate_overrides (tenant_id, location_id, pos_instance_id, rate_bps) VALUES ($1,$2,$3,$4)")
+            .bind(tenant_id).bind(Option::<Uuid>::None).bind(Some(pos_id)).bind(900)
+            .execute(&pool).await.expect("insert pos override");
+
+        let base_items = vec![
+            ComputeOrderItemInput { sku: Some("SKU-SODA".into()), product_id: None, quantity: 2 },
+            ComputeOrderItemInput { sku: Some("SKU-WATER".into()), product_id: None, quantity: 1 },
+        ];
+
+        // Case 1: tenant only (expect tax 25)
+        let req1 = ComputeOrderRequest { items: base_items.clone(), discount_percent_bp: Some(1000), location_id: None, pos_instance_id: None, tax_rate_bps: None };
+        let headers1 = HeaderMap::new();
+        let resp1 = compute_with_db_inner(&pool, tenant_id, &headers1, &req1).await.expect("compute ok");
+        assert_eq!(resp1.subtotal_cents, 547);
+        assert_eq!(resp1.discount_cents, 55);
+        assert_eq!(resp1.tax_cents, 25);
+        assert_eq!(resp1.total_cents, 517);
+
+        // Case 2: location (expect tax 29)
+        let req2 = ComputeOrderRequest { items: base_items.clone(), discount_percent_bp: Some(1000), location_id: Some(loc_id), pos_instance_id: None, tax_rate_bps: None };
+        let resp2 = compute_with_db_inner(&pool, tenant_id, &HeaderMap::new(), &req2).await.expect("compute ok");
+        assert_eq!(resp2.tax_cents, 29);
+
+        // Case 3: pos takes precedence (expect tax 32)
+        let req3 = ComputeOrderRequest { items: base_items.clone(), discount_percent_bp: Some(1000), location_id: Some(loc_id), pos_instance_id: Some(pos_id), tax_rate_bps: None };
+        let resp3 = compute_with_db_inner(&pool, tenant_id, &HeaderMap::new(), &req3).await.expect("compute ok");
+        assert_eq!(resp3.tax_cents, 32);
+    }
 }
 pub async fn clear_offline_orders(
     State(state): State<AppState>,
@@ -1877,6 +2090,8 @@ pub struct NewOrderFromSku {
     pub items: Vec<NewOrderSkuItem>,
     #[serde(default)] pub discount_percent_bp: Option<i32>,
     #[serde(default)] pub tax_rate_bps: Option<i32>,
+    #[serde(default)] pub location_id: Option<Uuid>,
+    #[serde(default)] pub pos_instance_id: Option<Uuid>,
     pub payment_method: String,
     pub customer_id: Option<String>,
     pub customer_name: Option<String>,
@@ -1954,7 +2169,14 @@ pub async fn create_order_from_skus(
         (discount_cents.saturating_mul(taxable_subtotal_cents) + (subtotal_cents / 2)) / subtotal_cents
     } else { 0 };
     let taxable_net = taxable_subtotal_cents.saturating_sub(discount_on_taxable).max(0);
-    let tax_rate_bps = resolve_tax_rate_bps(&headers, req.tax_rate_bps) as i64;
+    let tax_rate_bps = resolve_tax_rate_bps_with_db(
+        &state.db,
+        tenant_id,
+        &headers,
+        req.tax_rate_bps,
+        req.location_id,
+        req.pos_instance_id,
+    ).await as i64;
     let tax_cents = (taxable_net.saturating_mul(tax_rate_bps) + 5_000) / 10_000;
     let total_cents = subtotal_cents.saturating_sub(discount_cents).saturating_add(tax_cents);
 

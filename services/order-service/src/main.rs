@@ -34,6 +34,7 @@ mod order_handlers;
 use order_handlers::{
     clear_offline_orders, create_order, get_order, get_order_receipt, list_orders, list_returns, compute_order,
     refund_order, void_order, create_order_from_skus,
+    list_tax_rate_overrides, upsert_tax_rate_override,
 };
 async fn audit_search() -> (StatusCode, &'static str) { (StatusCode::NOT_IMPLEMENTED, "audit search not implemented") }
 
@@ -258,6 +259,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/orders/:order_id/void", post(void_order))
         .route("/orders/refund", post(refund_order))
         .route("/returns", get(list_returns))
+        .route("/admin/tax_rate_overrides", get(list_tax_rate_overrides).post(upsert_tax_rate_override))
     .route("/audit/events", get(audit_search))
     .route("/internal/audit_metrics", get(audit_metrics))
     .route("/internal/metrics", get(metrics))
