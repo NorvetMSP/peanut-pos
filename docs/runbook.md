@@ -8,13 +8,16 @@ A concise, linked guide for developers and on-call to bring up the stack, run se
 
 - Read: development/dev-bootstrap.md for the canonical bootstrap flow on Windows/PowerShell (also applicable to macOS/Linux with minor changes).
 - TL;DR PowerShell (local dev):
+
   ```powershell
   ./Makefile.ps1 Start-Infra
   ./migrate-all.ps1
   ./regenerate-sqlx-data.ps1 -Prune
   ./Makefile.ps1 Run-Service -Name auth-service
   ```
+
 - Full stack (everything via Docker):
+
   ```powershell
   docker compose up --build -d
   docker compose up kafka-topics-init
@@ -190,6 +193,7 @@ See development/sqlx-offline.md for per-query SQLx metadata workflow, pruning, a
     cargo test -p order-service --no-default-features --features "kafka-core integration-tests" --tests
     popd
     ```
+
   - Other workspace integration tests: `cargo test --manifest-path services/Cargo.toml --features integration`
 
 - Auth embedded Postgres/test flags and examples: tests/README.md and tests/integration.md

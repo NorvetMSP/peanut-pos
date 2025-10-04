@@ -37,12 +37,26 @@ ON CONFLICT (id) DO NOTHING;
 
 Write-Host "Ensuring products table exists..."
 docker compose exec -T postgres psql -U novapos -d novapos -c $ensureTable | Out-Null
+Write-Host "Ensuring payments table exists..."
+$ensurePayments = @"
+CREATE TABLE IF NOT EXISTS payments (
+  id UUID PRIMARY KEY,
+  tenant_id UUID NOT NULL,
+  order_id UUID NOT NULL,
+  method TEXT NOT NULL,
+  amount NUMERIC NOT NULL,
+  status TEXT NOT NULL,
+  change_cents INTEGER NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+"@
+docker compose exec -T postgres psql -U novapos -d novapos -c $ensurePayments | Out-Null
 Write-Host "Seeding products for tenant $TenantId..."
 docker compose exec -T postgres psql -U novapos -d novapos -c $insert | Out-Null
 
 $headers = @{}
 $headers['X-Tenant-ID'] = $TenantId
-$headers['X-Roles'] = 'cashier'
+$headers['X-Roles'] = 'admin'
 $headers['X-Tax-Rate-Bps'] = '800'
 
 # First compute to get total
@@ -75,6 +89,11 @@ $orderBody = [pscustomobject]@{
 $orderJson = $orderBody | ConvertTo-Json -Depth 6
 
 Write-Host "Creating PAID order from SKUs (cash) for tenant $TenantId ..."
+if (-not $env:AUTH_BEARER -or [string]::IsNullOrWhiteSpace($env:AUTH_BEARER)) {
+  Write-Warning "AUTH_BEARER not set. Skipping order creation. Set a valid JWT in AUTH_BEARER to create the order."
+  exit 0
+}
+$headers['Authorization'] = "Bearer $($env:AUTH_BEARER)"
 $order = Invoke-RestMethod -Method Post -Uri 'http://localhost:8084/orders/sku' -Headers $headers -ContentType 'application/json' -Body $orderJson
 $order | ConvertTo-Json -Depth 6
 
