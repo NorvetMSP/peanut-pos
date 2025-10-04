@@ -35,10 +35,22 @@ VALUES ('$p2', '$TenantId', 'Bottle Water', 1.49, '', true, '', '$sku2', 'EXEMPT
 ON CONFLICT (id) DO NOTHING;
 "@
 
+function Invoke-DbSql {
+  param([string]$Sql)
+  $composeFile = Join-Path (Join-Path $PSScriptRoot '..') 'local/docker-compose/docker-compose.yml'
+  $composePs = & docker compose -f $composeFile ps -q postgres 2>$null
+  if ($LASTEXITCODE -eq 0 -and $composePs) {
+    & docker compose -f $composeFile exec -T postgres psql -U novapos -d novapos -c $Sql | Out-Null
+    return
+  }
+  # Fallback: use ephemeral psql container against host Postgres
+  & docker run --rm -i -e PGPASSWORD=novapos postgres:16 psql -h host.docker.internal -U novapos -d novapos -c $Sql | Out-Null
+}
+
 Write-Host "Ensuring products table exists..."
-docker compose exec -T postgres psql -U novapos -d novapos -c $ensureTable | Out-Null
+Invoke-DbSql -Sql $ensureTable
 Write-Host "Seeding products for tenant $TenantId..."
-docker compose exec -T postgres psql -U novapos -d novapos -c $insert | Out-Null
+Invoke-DbSql -Sql $insert
 
 $headers = @{}
 $headers['X-Tenant-ID'] = $TenantId

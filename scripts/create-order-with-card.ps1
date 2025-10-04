@@ -26,16 +26,6 @@ CREATE TABLE IF NOT EXISTS products (
 );
 "@
 
-$insert = @"
-INSERT INTO products (id, tenant_id, name, price, description, active, image, sku, tax_code)
-VALUES ('$p1', '$TenantId', 'Soda Can', 1.99, '', true, '', '$sku1', 'STD')
-ON CONFLICT (id) DO NOTHING;
-INSERT INTO products (id, tenant_id, name, price, description, active, image, sku, tax_code)
-VALUES ('$p2', '$TenantId', 'Bottle Water', 1.49, '', true, '', '$sku2', 'EXEMPT')
-ON CONFLICT (id) DO NOTHING;
-"@
-
-Write-Host "Ensuring products table exists..."
 function Invoke-DbSql {
   param([string]$Sql)
   $composeFile = Join-Path (Join-Path $PSScriptRoot '..') 'local/docker-compose/docker-compose.yml'
@@ -47,22 +37,17 @@ function Invoke-DbSql {
   & docker run --rm -i -e PGPASSWORD=novapos postgres:16 psql -h host.docker.internal -U novapos -d novapos -c $Sql | Out-Null
 }
 
+Write-Host "Ensuring products table exists..."
 Invoke-DbSql -Sql $ensureTable
-Write-Host "Ensuring payments table exists..."
-$ensurePayments = @"
-CREATE TABLE IF NOT EXISTS payments (
-  id UUID PRIMARY KEY,
-  tenant_id UUID NOT NULL,
-  order_id UUID NOT NULL,
-  method TEXT NOT NULL,
-  amount NUMERIC NOT NULL,
-  status TEXT NOT NULL,
-  change_cents INTEGER NULL,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-"@
-Invoke-DbSql -Sql $ensurePayments
 Write-Host "Seeding products for tenant $TenantId..."
+$insert = @"
+INSERT INTO products (id, tenant_id, name, price, description, active, image, sku, tax_code)
+VALUES ('$p1', '$TenantId', 'Soda Can', 1.99, '', true, '', '$sku1', 'STD')
+ON CONFLICT (id) DO NOTHING;
+INSERT INTO products (id, tenant_id, name, price, description, active, image, sku, tax_code)
+VALUES ('$p2', '$TenantId', 'Bottle Water', 1.49, '', true, '', '$sku2', 'EXEMPT')
+ON CONFLICT (id) DO NOTHING;
+"@
 Invoke-DbSql -Sql $insert
 
 $headers = @{}
@@ -85,21 +70,20 @@ $comp = Invoke-RestMethod -Method Post -Uri 'http://localhost:8084/orders/comput
 $comp | ConvertTo-Json -Depth 5
 
 $total = [int]$comp.total_cents
-$tender = $total + 100  # give an extra dollar for change demo
 
-# Create order from SKUs with payment
+# Create order from SKUs with mock card payment (exact amount)
 $orderBody = [pscustomobject]@{
   items = @(
     [pscustomobject]@{ sku = $sku1; quantity = 2 },
     [pscustomobject]@{ sku = $sku2; quantity = 1 }
   )
   discount_percent_bp = 1000
-  payment_method = 'cash'
-  payment = @{ method = 'cash'; amount_cents = $tender }
+  payment_method = 'card'
+  payment = @{ method = 'card'; amount_cents = $total }
 }
 $orderJson = $orderBody | ConvertTo-Json -Depth 6
 
-Write-Host "Creating PAID order from SKUs (cash) for tenant $TenantId ..."
+Write-Host "Creating PAID order from SKUs (card) for tenant $TenantId ..."
 if (-not $env:AUTH_BEARER -or [string]::IsNullOrWhiteSpace($env:AUTH_BEARER)) {
   Write-Warning "AUTH_BEARER not set. Skipping order creation. Set a valid JWT in AUTH_BEARER to create the order."
   exit 0

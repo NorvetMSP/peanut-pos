@@ -72,6 +72,8 @@ We added a helper script to create a PAID order using cash and show the receipt 
 
 ```powershell
 # Ensure order-service is running and Postgres is available
+powershell -File scripts/run-payment-demo.ps1  # mints JWT + runs cash demo end-to-end
+# Or run the script directly if you already have AUTH_BEARER set
 powershell -File scripts/create-order-with-payment.ps1
 ```
 
@@ -105,6 +107,17 @@ Notes:
   3) DB overrides in `tax_rate_overrides` table, with scope precedence: POS instance > Location > Tenant
   4) Env default `DEFAULT_TAX_RATE_BPS`
 - Taxability uses `products.tax_code` (EXEMPT/ZERO/NONE → non-taxable; missing/STD → taxable).
+
+### Create an order with payment (card)
+
+To simulate a card authorization and capture (mocked):
+
+```powershell
+# Requires a valid JWT in AUTH_BEARER or use run-payment-demo to mint one first
+powershell -File scripts/create-order-with-card.ps1
+```
+
+Result: order is marked paid with method=card; receipt shows a Paid line without Change.
 
 ### DB-backed tax rate overrides
 
@@ -313,6 +326,8 @@ Useful docs:
 - `scripts/run-order-local.ps1` — Run order-service locally with Windows-friendly feature flags and dev JWT key
 - `scripts/seed-and-compute.ps1` — Seed SKUs (STD + EXEMPT) and POST /orders/compute with tax override header
 - `scripts/create-order-with-payment.ps1` — Create a paid order (cash) and print the receipt with change due
+- `scripts/create-order-with-card.ps1` — Create a paid order (card) and print the receipt
+- `scripts/run-payment-demo.ps1` — Mint a dev JWT and run the cash payment demo end-to-end
 
 ## Deeper Dives
 

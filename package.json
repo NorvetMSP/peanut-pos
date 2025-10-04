@@ -1,8 +1,12 @@
 {
   "dependencies": {
-    "@fortawesome/fontawesome-free": "^7.0.1"
+    "@fortawesome/fontawesome-free": "^7.0.1",
+    "jsonwebtoken": "^9.0.2"
   },
   "devDependencies": {
     "playwright": "^1.55.1"
+  },
+  "scripts": {
+    "mint:jwt": "node scripts/mint-dev-jwt.js"
   }
 }

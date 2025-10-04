@@ -13,9 +13,14 @@ if (Test-Path $pubKeyPath) {
 }
 
 $servicesPath = Join-Path $rootPath 'services'
+$features = $env:ORDER_FEATURES
 Push-Location $servicesPath
 try {
-    cargo run -p order-service --no-default-features --features kafka-core
+    if ([string]::IsNullOrWhiteSpace($features)) {
+        cargo run -p order-service --no-default-features
+    } else {
+        cargo run -p order-service --no-default-features --features $features
+    }
 } finally {
     Pop-Location
 }
