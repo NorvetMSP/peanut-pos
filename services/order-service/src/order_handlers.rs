@@ -40,7 +40,10 @@ pub struct OrderItem {
 #[derive(Deserialize, Debug)]
 pub struct NewOrder {
     pub items: Vec<OrderItem>,
+    // Back-compat: keep payment_method but prefer `payment` if provided
     pub payment_method: String,
+    #[serde(default)]
+    pub payment: Option<PaymentRequest>,
     pub total: BigDecimal, // accept raw, wrap later
     pub customer_id: Option<String>,
     pub customer_name: Option<String>,
@@ -48,6 +51,12 @@ pub struct NewOrder {
     pub store_id: Option<Uuid>,
     pub offline: Option<bool>,
     pub idempotency_key: Option<String>,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct PaymentRequest {
+    pub method: String, // "cash" | "card"
+    pub amount_cents: i64,
 }
 
 #[derive(Serialize, Debug, sqlx::FromRow)]
@@ -455,7 +464,7 @@ pub async fn create_order(
     if !sec
         .roles
         .iter()
-        .any(|r| matches!(r, Role::Admin | Role::Manager | Role::Support))
+        .any(|r| matches!(r, Role::Admin | Role::Manager | Role::Support | Role::Cashier))
     {
     return Err(ApiError::ForbiddenMissingRole { role: "admin_or_manager_or_support", trace_id: None });
     }
@@ -465,10 +474,13 @@ pub async fn create_order(
     return Err(ApiError::BadRequest { code: "missing_items", trace_id: None, message: Some("Order must contain at least one item".into()) });
     }
 
-    let mut payment_method = new_order.payment_method.trim().to_lowercase();
-    if payment_method.is_empty() {
-        payment_method = "cash".to_string();
-    }
+    // Determine payment method and amount (if provided)
+    let mut payment_method = if let Some(p) = &new_order.payment {
+        p.method.trim().to_lowercase()
+    } else {
+        new_order.payment_method.trim().to_lowercase()
+    };
+    if payment_method.is_empty() { payment_method = "cash".to_string(); }
 
     let idempotency_key = new_order
         .idempotency_key
@@ -518,12 +530,29 @@ pub async fn create_order(
     .await?;
 
     let offline_flag = new_order.offline.unwrap_or(false);
-    let status = if payment_method.eq_ignore_ascii_case("crypto")
-        || payment_method.eq_ignore_ascii_case("card")
-    {
-        "PENDING"
-    } else {
-        "COMPLETED"
+    let total_cents = Money::new(new_order.total.clone()).as_cents();
+    // Determine final order status based on payment semantics (mock card, cash)
+    let status = match payment_method.as_str() {
+        "cash" => {
+            if let Some(p) = &new_order.payment {
+                if p.amount_cents < total_cents { return Err(ApiError::BadRequest { code: "insufficient_cash", trace_id: None, message: Some("Cash provided is less than total".into()) }); }
+                "COMPLETED"
+            } else {
+                // No amount provided; treat as pending until payment is added (strict MVP requires change logic)
+                return Err(ApiError::BadRequest { code: "missing_amount", trace_id: None, message: Some("Cash payment requires amount_cents".into()) });
+            }
+        }
+        "card" => {
+            if let Some(p) = &new_order.payment {
+                if p.amount_cents != total_cents { return Err(ApiError::BadRequest { code: "amount_mismatch", trace_id: None, message: Some("Card amount must equal order total".into()) }); }
+                "COMPLETED"
+            } else {
+                return Err(ApiError::BadRequest { code: "missing_amount", trace_id: None, message: Some("Card payment requires amount_cents".into()) });
+            }
+        }
+        _ => {
+            return Err(ApiError::BadRequest { code: "invalid_method", trace_id: None, message: Some("Unsupported payment method".into()) });
+        }
     };
 
     let customer_uuid = new_order.customer_id.as_ref().and_then(|value| {
@@ -634,6 +663,29 @@ pub async fn create_order(
             tracing::error!(?release_err, order_id = %order_id, tenant_id = %tenant_id, "Failed to release inventory after order item insertion failure");
         }
         return Err(err);
+    }
+
+    // If we have a payment, persist it within the same tx and compute change for cash
+    if let Some(p) = &new_order.payment {
+        let change_cents = if payment_method == "cash" { Some(p.amount_cents.saturating_sub(total_cents) as i32) } else { None };
+        let conn = tx
+            .acquire()
+            .await
+            .map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to acquire transaction connection: {e}")) })?;
+        sqlx::query(
+            r#"INSERT INTO payments (id, tenant_id, order_id, method, amount, status, change_cents)
+               VALUES ($1,$2,$3,$4,$5,$6,$7)"#
+        )
+        .bind(Uuid::new_v4())
+        .bind(tenant_id)
+        .bind(order.id)
+        .bind(&payment_method)
+        .bind(Money::from_cents(p.amount_cents).inner())
+        .bind("captured")
+        .bind(change_cents)
+        .execute(&mut *conn)
+        .await
+        .map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to insert payment: {e}")) })?;
     }
 
     if let Err(e) = tx.commit().await {
@@ -1537,7 +1589,22 @@ pub async fn get_order_receipt(
         writeln!(&mut body, "Discount:         ${:.2}", Money::from_cents(discount_cents)).ok();
         writeln!(&mut body, "Tax:              ${:.2}", Money::from_cents(estimated_tax_cents)).ok();
         writeln!(&mut body, "Total:            ${:.2}", detail.order.total).ok();
-        writeln!(&mut body, "Paid ({}):        ${:.2}", detail.order.payment_method, detail.order.total).ok();
+        // Try to fetch payment to show tendered and change (best-effort; ignore errors)
+        if let Ok(opt) = sqlx::query(
+            r#"SELECT method, amount::FLOAT8 as amount, change_cents FROM payments WHERE order_id = $1 ORDER BY created_at DESC LIMIT 1"#
+        ).bind(detail.order.id).fetch_optional(&state.db).await {
+            if let Some(row) = opt {
+                let method: Option<String> = row.try_get("method").ok();
+                let amount: Option<f64> = row.try_get("amount").ok();
+                let change_cents: Option<i32> = row.try_get("change_cents").ok();
+                if let Some(a) = amount { writeln!(&mut body, "Paid ({}):        ${:.2}", method.unwrap_or(detail.order.payment_method.clone()), a).ok(); }
+                if let Some(ch) = change_cents { writeln!(&mut body, "Change:           ${:.2}", Money::from_cents(ch as i64)).ok(); }
+            } else {
+                writeln!(&mut body, "Paid ({}):        ${:.2}", detail.order.payment_method, detail.order.total).ok();
+            }
+        } else {
+            writeln!(&mut body, "Paid ({}):        ${:.2}", detail.order.payment_method, detail.order.total).ok();
+        }
         body.push_str("-------------------------------------\nThank you!\n");
     } else {
         body.push_str("# Receipt - Order ");
@@ -1898,7 +1965,7 @@ pub async fn compute_order(
     if !sec
         .roles
         .iter()
-        .any(|r| matches!(r, Role::Admin | Role::Manager | Role::Support))
+        .any(|r| matches!(r, Role::Admin | Role::Manager | Role::Support | Role::Cashier))
     {
         return Err(ApiError::ForbiddenMissingRole { role: "admin_or_manager_or_support", trace_id: None });
     }
@@ -2093,6 +2160,7 @@ pub struct NewOrderFromSku {
     #[serde(default)] pub location_id: Option<Uuid>,
     #[serde(default)] pub pos_instance_id: Option<Uuid>,
     pub payment_method: String,
+    #[serde(default)] pub payment: Option<PaymentRequest>,
     pub customer_id: Option<String>,
     pub customer_name: Option<String>,
     pub customer_email: Option<String>,
@@ -2111,7 +2179,7 @@ pub async fn create_order_from_skus(
     if !sec
         .roles
         .iter()
-        .any(|r| matches!(r, Role::Admin | Role::Manager | Role::Support))
+        .any(|r| matches!(r, Role::Admin | Role::Manager | Role::Support | Role::Cashier))
     {
         return Err(ApiError::ForbiddenMissingRole { role: "admin_or_manager_or_support", trace_id: None });
     }
@@ -2184,6 +2252,7 @@ pub async fn create_order_from_skus(
     let new_order = NewOrder {
         items: order_items,
         payment_method: req.payment_method,
+        payment: req.payment,
         total: Money::from_cents(total_cents).into(),
         customer_id: req.customer_id,
         customer_name: req.customer_name,

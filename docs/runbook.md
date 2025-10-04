@@ -63,6 +63,22 @@ $env:SEED_TENANT_ID = [guid]::NewGuid().ToString()
 powershell -File scripts/seed-and-compute.ps1
 ```
 
+### Create an order with payment (cash)
+
+We added a helper script to create a PAID order using cash and show the receipt with change due.
+
+```powershell
+# Ensure order-service is running and Postgres is available
+powershell -File scripts/create-order-with-payment.ps1
+```
+
+What the script does:
+
+- Seeds Soda (STD) and Water (EXEMPT) under a tenant (uses SEED_TENANT_ID if set)
+- Computes totals via /orders/compute
+- Posts /orders/sku with a cash payment that exceeds the total to demonstrate change
+- Fetches the plaintext receipt; look for Paid (cash) and Change lines
+
 Expected JSON:
 
 ```json
@@ -175,6 +191,7 @@ See development/sqlx-offline.md for per-query SQLx metadata workflow, pruning, a
     popd
     ```
   - Other workspace integration tests: `cargo test --manifest-path services/Cargo.toml --features integration`
+
 - Auth embedded Postgres/test flags and examples: tests/README.md and tests/integration.md
 
 Useful docs:
@@ -279,6 +296,7 @@ Useful docs:
   ```powershell
   docker compose stop order-service
   ```
+
 - 401/403 on order endpoints: Include headers `X-Tenant-ID` and `X-Roles` with a role that passes checks (e.g., `admin`). When running natively, `JWT_DEV_PUBLIC_KEY_PEM` is accepted; in Docker, JWKS is used by default from auth-service.
 - Windows Kafka link errors: development/windows-kafka-build.md
 - Metrics not visible: bring up Prometheus/Grafana and confirm scrape targets; see security/prometheus-grafana-bootstrap.md
@@ -290,6 +308,7 @@ Useful docs:
 - `./regenerate-sqlx-data.ps1` — Generate per-query SQLx offline metadata (.sqlx/) with prune/reset options
 - `scripts/run-order-local.ps1` — Run order-service locally with Windows-friendly feature flags and dev JWT key
 - `scripts/seed-and-compute.ps1` — Seed SKUs (STD + EXEMPT) and POST /orders/compute with tax override header
+- `scripts/create-order-with-payment.ps1` — Create a paid order (cash) and print the receipt with change due
 
 ## Deeper Dives
 
