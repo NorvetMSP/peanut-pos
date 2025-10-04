@@ -38,4 +38,5 @@ kafka-producer = ["dep:rdkafka", "dep:common-audit", "common-audit/kafka-produce
 kafka = ["kafka-producer"]
 # Lightweight core (no rdkafka linkage) enables optional dep without rdkafka
 kafka-core = ["dep:common-audit", "common-audit/kafka-core"]
+integration-tests = []
 
