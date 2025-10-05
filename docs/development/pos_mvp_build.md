@@ -3,6 +3,7 @@
 Focused objective: Deliver a cashier-facing flow (Scan / Add Item → View Cart + Totals → Take Payment → Persist Order → Emit Event → Receipt) in the smallest coherent vertical slice.
 
 ## 1. Functional Scope (MVP)
+
 Must Have:
 
 - Product lookup by SKU / barcode
@@ -127,6 +128,7 @@ POST /orders Request (MVP):
   "cashier_id": "...uuid..."
 }
 ```
+
 Response:
 
 ```json
@@ -147,7 +149,7 @@ Assumptions:
 - Tax computed after discount (cart-level percent) proportionally across lines.
 
 Algorithm:
- 
+
 1. Sum line_subtotals = Σ(price_cents * qty)
 2. discount_cents = floor(subtotal * discount_bp / 10_000)
 3. discounted_subtotal = subtotal - discount_cents
@@ -190,6 +192,7 @@ Payload (MVP):
   "occurred_at": "2025-10-02T12:34:56Z"
 }
 ```
+
 Feature Gate: build with `--features kafka` to enable, otherwise no-op.
 
 ## 8. Receipt Format (Plaintext MVP)
@@ -226,19 +229,19 @@ Thank you!
 ## 11. Testing Strategy
 
 Unit:
- 
+
 - tax::compute_tax scenarios (rounding, proportional discount)
 - discount::apply_cart_discount boundary (0%, 100%)
 - payment::cash_change
 Integration:
- 
+
 - create order success (cash + exact amount)
 - create order failure (unknown SKU)
 - cash insufficient
 - card mismatch
 - discount rounding distribution
 Event:
- 
+
 - build with `kafka` feature and set capture env (if using existing harness style) → assert serialized payload shape.
 
 ## 12. Implementation Order (One Sprint)

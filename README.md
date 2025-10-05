@@ -34,3 +34,11 @@ For rationale on using dynamic `sqlx::query` in integration tests (to avoid main
 - frontends/ (React apps)
 - infra/ (Terraform, K8s manifests)
 - local/ (docker-compose for Postgres, Redis, Kafka)
+
+## Quick demos and scripts
+
+See `scripts/README.md` for Windows-friendly try-it scripts:
+
+- `try-compute.ps1` — header vs DB tax override demo
+- `try-precedence.ps1` — location_id/pos_instance_id precedence demo
+- `seed-skus-and-order.ps1` — seed SKUs, compute, optionally create order via `/orders/sku`

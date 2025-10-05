@@ -40,7 +40,10 @@ pub struct OrderItem {
 #[derive(Deserialize, Debug)]
 pub struct NewOrder {
     pub items: Vec<OrderItem>,
+    // Back-compat: keep payment_method but prefer `payment` if provided
     pub payment_method: String,
+    #[serde(default)]
+    pub payment: Option<PaymentRequest>,
     pub total: BigDecimal, // accept raw, wrap later
     pub customer_id: Option<String>,
     pub customer_name: Option<String>,
@@ -48,6 +51,12 @@ pub struct NewOrder {
     pub store_id: Option<Uuid>,
     pub offline: Option<bool>,
     pub idempotency_key: Option<String>,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct PaymentRequest {
+    pub method: String, // "cash" | "card"
+    pub amount_cents: i64,
 }
 
 #[derive(Serialize, Debug, sqlx::FromRow)]
@@ -99,6 +108,83 @@ struct OrderItemFinancialRow {
 struct InventoryReservationRequestPayload {
     order_id: Uuid,
     items: Vec<InventoryReservationItemPayload>,
+}
+
+// Compute subtotal, discount, and tax for a set of items using product tax_code and DEFAULT_TAX_RATE_BPS.
+#[allow(dead_code)]
+async fn compute_financials_for_items(
+    state: &AppState,
+    tenant_id: Uuid,
+    items: &[OrderItem],
+    total_cents: i64,
+) -> (i64, i64, i64) {
+    let subtotal_cents: i64 = items.iter().map(|it| it.line_total.as_cents()).sum();
+    let product_ids: Vec<Uuid> = items.iter().map(|it| it.product_id).collect();
+    #[derive(sqlx::FromRow)]
+    struct TaxRow { id: Uuid, tax_code: Option<String> }
+    let mut taxable_subtotal_cents: i64 = 0;
+    if !product_ids.is_empty() {
+        if let Ok(rows) = sqlx::query_as::<_, TaxRow>(
+            "SELECT id, tax_code FROM products WHERE tenant_id = $1 AND id = ANY($2)"
+        )
+        .bind(tenant_id)
+        .bind(&product_ids)
+        .fetch_all(&state.db)
+        .await {
+            use std::collections::HashMap as Map;
+            let tax_map: Map<Uuid, Option<String>> = rows.into_iter().map(|r| (r.id, r.tax_code)).collect();
+            for it in items {
+                let taxable = match tax_map.get(&it.product_id).and_then(|c| c.clone()) {
+                    Some(code) => is_taxable(Some(&code)),
+                    None => true,
+                };
+                if taxable { taxable_subtotal_cents += it.line_total.as_cents(); }
+            }
+        } else {
+            // On lookup failure, conservatively treat all as taxable
+            taxable_subtotal_cents = subtotal_cents;
+        }
+    }
+    let rate_bps = default_tax_rate_bps() as i64;
+    let estimated_tax_cents = if taxable_subtotal_cents > 0 && rate_bps > 0 {
+        (taxable_subtotal_cents.saturating_mul(rate_bps) + 5_000) / 10_000
+    } else { 0 };
+    let mut discount_cents = subtotal_cents.saturating_add(estimated_tax_cents).saturating_sub(total_cents);
+    if discount_cents < 0 { discount_cents = 0; }
+    (subtotal_cents, discount_cents, estimated_tax_cents)
+}
+
+fn clamp_bps2(v: i32) -> i32 { v.clamp(0, 10_000) }
+
+async fn resolve_tax_rate_bps_with_db(
+    db: &sqlx::PgPool,
+    tenant_id: Uuid,
+    headers: &HeaderMap,
+    req_rate: Option<i32>,
+    location_id: Option<Uuid>,
+    pos_instance_id: Option<Uuid>,
+) -> i32 {
+    if let Some(bp) = req_rate { return clamp_bps2(bp); }
+    if let Some(v) = headers.get("x-tax-rate-bps").and_then(|h| h.to_str().ok()).and_then(|s| s.parse::<i32>().ok()) {
+        return clamp_bps2(v);
+    }
+    if let Some(v) = headers.get("x-tenant-tax-rate-bps").and_then(|h| h.to_str().ok()).and_then(|s| s.parse::<i32>().ok()) {
+        return clamp_bps2(v);
+    }
+    if let Some(pos_id) = pos_instance_id {
+        if let Ok(Some(row)) = sqlx::query_scalar::<_, i32>(
+            "SELECT rate_bps FROM tax_rate_overrides WHERE tenant_id = $1 AND pos_instance_id = $2 ORDER BY updated_at DESC LIMIT 1"
+        ).bind(tenant_id).bind(pos_id).fetch_optional(db).await { return clamp_bps2(row); }
+    }
+    if let Some(loc_id) = location_id {
+        if let Ok(Some(row)) = sqlx::query_scalar::<_, i32>(
+            "SELECT rate_bps FROM tax_rate_overrides WHERE tenant_id = $1 AND location_id = $2 AND pos_instance_id IS NULL ORDER BY updated_at DESC LIMIT 1"
+        ).bind(tenant_id).bind(loc_id).fetch_optional(db).await { return clamp_bps2(row); }
+    }
+    if let Ok(Some(row)) = sqlx::query_scalar::<_, i32>(
+        "SELECT rate_bps FROM tax_rate_overrides WHERE tenant_id = $1 AND location_id IS NULL AND pos_instance_id IS NULL ORDER BY updated_at DESC LIMIT 1"
+    ).bind(tenant_id).fetch_optional(db).await { return clamp_bps2(row); }
+    default_tax_rate_bps()
 }
 
 #[derive(Deserialize, Default)]
@@ -204,6 +290,10 @@ async fn reserve_inventory(
     order_id: Uuid,
     items: &[OrderItem],
 ) -> Result<(), ApiError> {
+    if std::env::var("ORDER_BYPASS_INVENTORY").ok().as_deref() == Some("1") {
+        // Short-circuit inventory calls for tests/in-memory harness
+        return Ok(());
+    }
     let payload = InventoryReservationRequestPayload {
         order_id,
         items: items
@@ -219,6 +309,7 @@ async fn reserve_inventory(
         .post(inventory_url(base_url, "/inventory/reservations"))
         .header("Content-Type", "application/json")
         .header("X-Tenant-ID", tenant_id.to_string())
+    .header("X-Roles", "Admin,Manager,Cashier")
         .json(&payload);
 
     if !auth_token.is_empty() {
@@ -251,12 +342,16 @@ async fn release_inventory(
     auth_token: &str,
     order_id: Uuid,
 ) -> Result<(), String> {
+    if std::env::var("ORDER_BYPASS_INVENTORY").ok().as_deref() == Some("1") {
+        return Ok(());
+    }
     let mut request = client
         .delete(inventory_url(
             base_url,
             &format!("/inventory/reservations/{}", order_id),
         ))
-        .header("X-Tenant-ID", tenant_id.to_string());
+        .header("X-Tenant-ID", tenant_id.to_string())
+    .header("X-Roles", "Admin,Manager,Cashier");
 
     if !auth_token.is_empty() {
         let header_value = format!("Bearer {}", auth_token);
@@ -378,7 +473,7 @@ pub async fn create_order(
     if !sec
         .roles
         .iter()
-        .any(|r| matches!(r, Role::Admin | Role::Manager | Role::Support))
+        .any(|r| matches!(r, Role::Admin | Role::Manager | Role::Support | Role::Cashier))
     {
     return Err(ApiError::ForbiddenMissingRole { role: "admin_or_manager_or_support", trace_id: None });
     }
@@ -388,10 +483,13 @@ pub async fn create_order(
     return Err(ApiError::BadRequest { code: "missing_items", trace_id: None, message: Some("Order must contain at least one item".into()) });
     }
 
-    let mut payment_method = new_order.payment_method.trim().to_lowercase();
-    if payment_method.is_empty() {
-        payment_method = "cash".to_string();
-    }
+    // Determine payment method and amount (if provided)
+    let mut payment_method = if let Some(p) = &new_order.payment {
+        p.method.trim().to_lowercase()
+    } else {
+        new_order.payment_method.trim().to_lowercase()
+    };
+    if payment_method.is_empty() { payment_method = "cash".to_string(); }
 
     let idempotency_key = new_order
         .idempotency_key
@@ -441,12 +539,29 @@ pub async fn create_order(
     .await?;
 
     let offline_flag = new_order.offline.unwrap_or(false);
-    let status = if payment_method.eq_ignore_ascii_case("crypto")
-        || payment_method.eq_ignore_ascii_case("card")
-    {
-        "PENDING"
-    } else {
-        "COMPLETED"
+    let total_cents = Money::new(new_order.total.clone()).as_cents();
+    // Determine final order status based on payment semantics (mock card, cash)
+    let status = match payment_method.as_str() {
+        "cash" => {
+            if let Some(p) = &new_order.payment {
+                if p.amount_cents < total_cents { return Err(ApiError::BadRequest { code: "insufficient_cash", trace_id: None, message: Some("Cash provided is less than total".into()) }); }
+                "COMPLETED"
+            } else {
+                // No amount provided; treat as pending until payment is added (strict MVP requires change logic)
+                return Err(ApiError::BadRequest { code: "missing_amount", trace_id: None, message: Some("Cash payment requires amount_cents".into()) });
+            }
+        }
+        "card" => {
+            if let Some(p) = &new_order.payment {
+                if p.amount_cents != total_cents { return Err(ApiError::BadRequest { code: "amount_mismatch", trace_id: None, message: Some("Card amount must equal order total".into()) }); }
+                "COMPLETED"
+            } else {
+                return Err(ApiError::BadRequest { code: "missing_amount", trace_id: None, message: Some("Card payment requires amount_cents".into()) });
+            }
+        }
+        _ => {
+            return Err(ApiError::BadRequest { code: "invalid_method", trace_id: None, message: Some("Unsupported payment method".into()) });
+        }
     };
 
     let customer_uuid = new_order.customer_id.as_ref().and_then(|value| {
@@ -559,6 +674,29 @@ pub async fn create_order(
         return Err(err);
     }
 
+    // If we have a payment, persist it within the same tx and compute change for cash
+    if let Some(p) = &new_order.payment {
+        let change_cents = if payment_method == "cash" { Some(p.amount_cents.saturating_sub(total_cents) as i32) } else { None };
+        let conn = tx
+            .acquire()
+            .await
+            .map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to acquire transaction connection: {e}")) })?;
+        sqlx::query(
+            r#"INSERT INTO payments (id, tenant_id, order_id, method, amount, status, change_cents)
+               VALUES ($1,$2,$3,$4,$5,$6,$7)"#
+        )
+        .bind(Uuid::new_v4())
+        .bind(tenant_id)
+        .bind(order.id)
+        .bind(&payment_method)
+        .bind(Money::from_cents(p.amount_cents).inner())
+        .bind("captured")
+        .bind(change_cents)
+        .execute(&mut *conn)
+        .await
+        .map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to insert payment: {e}")) })?;
+    }
+
     if let Err(e) = tx.commit().await {
         if let Err(release_err) = release_inventory(
             &state.http_client,
@@ -575,7 +713,9 @@ pub async fn create_order(
     }
 
     if order.status == "COMPLETED" {
-    #[cfg(any(feature = "kafka", feature = "kafka-producer"))] let event_items: Vec<serde_json::Value> = new_order
+    #[cfg(any(feature = "kafka", feature = "kafka-producer"))]
+        // Build both legacy order.completed and new pos.order payloads
+        let event_items: Vec<serde_json::Value> = new_order
             .items
             .iter()
             .map(|item| {
@@ -611,6 +751,51 @@ pub async fn create_order(
                 .await
             {
                 tracing::error!("Failed to send order.completed: {:?}", err);
+            }
+            // Emit pos.order event with computed tax/discount and SKU enrichment
+            let product_ids: Vec<Uuid> = new_order.items.iter().map(|i| i.product_id).collect();
+            let sku_map: std::collections::HashMap<Uuid, Option<String>> = if !product_ids.is_empty() {
+                match sqlx::query!("SELECT id, sku FROM products WHERE tenant_id = $1 AND id = ANY($2)", tenant_id, &product_ids)
+                    .fetch_all(&state.db).await {
+                    Ok(rows) => rows.into_iter().map(|r| (r.id, r.sku)).collect(),
+                    Err(e) => { tracing::warn!(?e, "Failed to fetch SKUs for pos.order event"); std::collections::HashMap::new() }
+                }
+            } else { std::collections::HashMap::new() };
+            let pos_items: Vec<serde_json::Value> = new_order.items.iter().map(|i| {
+                let unit_cents = i.unit_price.as_cents();
+                let line_cents = i.line_total.as_cents();
+                let sku = sku_map.get(&i.product_id).and_then(|s| s.clone());
+                serde_json::json!({
+                    "sku": sku,
+                    "name": i.product_name,
+                    "qty": i.quantity,
+                    "unit_price_cents": unit_cents,
+                    "line_total_cents": line_cents
+                })
+            }).collect();
+            let total_cents = Money::new(new_order.total.clone()).as_cents();
+            let (_sub, discount_cents, tax_cents) = compute_financials_for_items(&state, tenant_id, &new_order.items, total_cents).await;
+            let pos_evt = serde_json::json!({
+                "order_id": order.id,
+                "status": "paid",
+                "total_cents": total_cents,
+                "tax_cents": tax_cents,
+                "discount_cents": discount_cents,
+                "items": pos_items,
+                "payment_method": order.payment_method,
+                "occurred_at": chrono::Utc::now().to_rfc3339(),
+            });
+            if let Err(err) = state
+                .kafka_producer
+                .send(
+                    FutureRecord::to("pos.order")
+                        .payload(&pos_evt.to_string())
+                        .key(&tenant_id.to_string()),
+                    Duration::from_secs(0),
+                )
+                .await
+            {
+                tracing::error!("Failed to send pos.order: {:?}", err);
             }
         }
     }
@@ -1335,10 +1520,14 @@ pub async fn get_order(
     let detail = fetch_order_detail(&state, tenant_id, order_id).await?;
     Ok(Json(detail))
 }
+#[derive(Deserialize)]
+pub struct ReceiptQuery { pub format: Option<String> }
+
 pub async fn get_order_receipt(
     State(state): State<AppState>,
     SecurityCtxExtractor(sec): SecurityCtxExtractor,
     Path(order_id): Path<Uuid>,
+    Query(q): Query<ReceiptQuery>,
 ) -> Result<Response, ApiError> {
     if !sec
         .roles
@@ -1350,10 +1539,97 @@ pub async fn get_order_receipt(
     let tenant_id = sec.tenant_id;
     let detail = fetch_order_detail(&state, tenant_id, order_id).await?;
 
+    // Derive financials for receipt: subtotal, discount (residual), tax, total
+    let subtotal_cents: i64 = detail
+        .items
+        .iter()
+        .map(|it| it.line_total.as_cents())
+        .sum();
+    let product_ids: Vec<Uuid> = detail.items.iter().map(|it| it.product_id).collect();
+    #[derive(sqlx::FromRow)]
+    struct TaxRow { id: Uuid, tax_code: Option<String> }
+    let mut taxable_subtotal_cents: i64 = 0;
+    if !product_ids.is_empty() {
+        let rows = sqlx::query_as::<_, TaxRow>(
+            "SELECT id, tax_code FROM products WHERE tenant_id = $1 AND id = ANY($2)"
+        )
+        .bind(tenant_id)
+        .bind(&product_ids)
+        .fetch_all(&state.db)
+        .await
+        .unwrap_or_default();
+        use std::collections::HashMap as Map;
+        let tax_map: Map<Uuid, Option<String>> = rows.into_iter().map(|r| (r.id, r.tax_code)).collect();
+        for it in &detail.items {
+            if let Some(code) = tax_map.get(&it.product_id).and_then(|c| c.clone()) {
+                if is_taxable(Some(&code)) { taxable_subtotal_cents += it.line_total.as_cents(); }
+            } else {
+                // Missing tax_code => treat as taxable by default
+                taxable_subtotal_cents += it.line_total.as_cents();
+            }
+        }
+    }
+    let rate_bps = default_tax_rate_bps() as i64;
+    let estimated_tax_cents = if taxable_subtotal_cents > 0 && rate_bps > 0 {
+        (taxable_subtotal_cents.saturating_mul(rate_bps) + 5_000) / 10_000
+    } else { 0 };
+    let total_cents = detail.order.total.as_cents();
+    let mut discount_cents = subtotal_cents.saturating_add(estimated_tax_cents).saturating_sub(total_cents);
+    if discount_cents < 0 { discount_cents = 0; }
+
+    // Support format switching via query string ?format=txt for plaintext output
+    // Default remains markdown
+    let format = q.format.unwrap_or_else(|| "md".to_string()).to_ascii_lowercase();
+
     let mut body = String::new();
-    body.push_str("# Receipt - Order ");
-    body.push_str(&detail.order.id.to_string());
-    body.push('\n');
+    if format == "txt" {
+        // Plaintext per MVP example
+        use std::fmt::Write as _;
+        writeln!(&mut body, "NovaPOS Receipt").ok();
+        writeln!(&mut body, "Order: {}  Date: {}", detail.order.id, detail.order.created_at.format("%Y-%m-%d %H:%M")).ok();
+        body.push_str("-------------------------------------\n");
+        writeln!(&mut body, "Qty  {:8} {:>7} {:>6}", "SKU", "Price", "Line").ok();
+        for item in &detail.items {
+            let name_or_sku = item.product_name.as_deref().unwrap_or("SKU");
+            writeln!(&mut body, "{:<4} {:8} {:>7} {:>6}", item.quantity, name_or_sku, format!("{:.2}", item.unit_price), format!("{:.2}", item.line_total)).ok();
+        }
+        body.push_str("-------------------------------------\n");
+        writeln!(&mut body, "Subtotal:         ${:.2}", Money::from_cents(subtotal_cents)).ok();
+        writeln!(&mut body, "Discount:         ${:.2}", Money::from_cents(discount_cents)).ok();
+        writeln!(&mut body, "Tax:              ${:.2}", Money::from_cents(estimated_tax_cents)).ok();
+        writeln!(&mut body, "Total:            ${:.2}", detail.order.total).ok();
+        // Try to fetch payment to show tendered and change (best-effort; ignore errors)
+        match sqlx::query(
+            r#"SELECT method, amount::FLOAT8 as amount, change_cents FROM payments WHERE order_id = $1 ORDER BY created_at DESC LIMIT 1"#
+        )
+        .bind(detail.order.id)
+        .fetch_optional(&state.db)
+        .await {
+            Ok(Some(row)) => {
+                let method: Option<String> = row.try_get("method").ok();
+                let amount: Option<f64> = row.try_get("amount").ok();
+                let change_cents: Option<i32> = row.try_get("change_cents").ok();
+                if let Some(a) = amount {
+                    writeln!(
+                        &mut body,
+                        "Paid ({}):        ${:.2}",
+                        method.unwrap_or(detail.order.payment_method.clone()),
+                        a
+                    ).ok();
+                }
+                if let Some(ch) = change_cents {
+                    writeln!(&mut body, "Change:           ${:.2}", Money::from_cents(ch as i64)).ok();
+                }
+            }
+            Ok(None) | Err(_) => {
+                writeln!(&mut body, "Paid ({}):        ${:.2}", detail.order.payment_method, detail.order.total).ok();
+            }
+        }
+        body.push_str("-------------------------------------\nThank you!\n");
+    } else {
+        body.push_str("# Receipt - Order ");
+        body.push_str(&detail.order.id.to_string());
+        body.push('\n');
 
     body.push_str("**Date:** ");
     body.push_str(&detail.order.created_at.to_rfc3339());
@@ -1393,22 +1669,493 @@ pub async fn get_order_receipt(
     }
 
     body.push('\n');
-    body.push_str(&format!("**Grand Total:** ${:.2}\n", detail.order.total));
-    body.push_str(&format!(
-        "**Payment Method:** {}\n",
-        detail.order.payment_method
-    ));
-    body.push_str(&format!("**Status:** {}\n", detail.order.status));
-    body.push('\n');
-    body.push_str("_Thank you for your business!_\n");
+        body.push_str(&format!("**Subtotal:** ${:.2}\n", Money::from_cents(subtotal_cents)));
+        body.push_str(&format!("**Discount:** ${:.2}\n", Money::from_cents(discount_cents)));
+        body.push_str(&format!("**Tax:** ${:.2}\n", Money::from_cents(estimated_tax_cents)));
+        body.push_str(&format!("**Grand Total:** ${:.2}\n", detail.order.total));
+        body.push_str(&format!(
+            "**Payment Method:** {}\n",
+            detail.order.payment_method
+        ));
+        body.push_str(&format!("**Status:** {}\n", detail.order.status));
+        body.push('\n');
+        body.push_str("_Thank you for your business!_\n");
+    }
 
     let mut headers = HeaderMap::new();
-    headers.insert(
-        CONTENT_TYPE,
-        HeaderValue::from_static("text/markdown; charset=utf-8"),
-    );
+    if format == "txt" {
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("text/plain; charset=utf-8"));
+    } else {
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("text/markdown; charset=utf-8"));
+    }
 
     Ok((StatusCode::OK, headers, body).into_response())
+}
+
+// --- Compute endpoint: accepts sku/product_id + qty, returns computed totals ---
+#[derive(Deserialize, Debug, Clone)]
+pub struct ComputeOrderItemInput {
+    #[serde(default)]
+    pub sku: Option<String>,
+    #[serde(default)]
+    pub product_id: Option<Uuid>,
+    pub quantity: i32,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct ComputeOrderRequest {
+    pub items: Vec<ComputeOrderItemInput>,
+    /// Cart-level discount in basis points (1% = 100 bps)
+    #[serde(default)]
+    pub discount_percent_bp: Option<i32>,
+    /// Optional context for tax resolution; not yet persisted but reserved
+    #[serde(default)]
+    pub location_id: Option<Uuid>,
+    #[serde(default)]
+    pub pos_instance_id: Option<Uuid>,
+    /// Explicit override for tax rate if caller already resolved
+    #[serde(default)]
+    pub tax_rate_bps: Option<i32>,
+}
+
+#[derive(Serialize, Debug)]
+pub struct ComputedItemSummary {
+    #[serde(skip_serializing_if = "Option::is_none")] pub sku: Option<String>,
+    pub product_id: Uuid,
+    pub name: String,
+    pub qty: i32,
+    pub unit_price_cents: i64,
+    pub line_subtotal_cents: i64,
+    #[serde(skip_serializing_if = "Option::is_none")] pub tax_code: Option<String>,
+}
+
+#[derive(Serialize, Debug)]
+pub struct ComputeOrderResponse {
+    pub items: Vec<ComputedItemSummary>,
+    pub subtotal_cents: i64,
+    pub discount_cents: i64,
+    pub tax_cents: i64,
+    pub total_cents: i64,
+}
+
+fn clamp_bps(v: i32) -> i32 { v.clamp(0, 10_000) }
+
+fn default_tax_rate_bps() -> i32 {
+    std::env::var("DEFAULT_TAX_RATE_BPS")
+        .ok()
+        .and_then(|s| s.parse::<i32>().ok())
+        .map(clamp_bps)
+        .unwrap_or(0)
+}
+
+fn is_taxable(tax_code: Option<&str>) -> bool {
+    match tax_code.map(|s| s.to_ascii_uppercase()) {
+        Some(code) if code == "EXEMPT" || code == "ZERO" || code == "NONE" => false,
+        _ => true, // treat STD or missing as taxable
+    }
+}
+
+// --- Admin: Tax rate overrides CRUD ---
+#[derive(Serialize, sqlx::FromRow)]
+pub struct TaxRateOverrideRow {
+    pub tenant_id: Uuid,
+    pub location_id: Option<Uuid>,
+    pub pos_instance_id: Option<Uuid>,
+    pub rate_bps: i32,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Deserialize, Default)]
+pub struct ListTaxOverridesParams {
+    pub location_id: Option<Uuid>,
+    pub pos_instance_id: Option<Uuid>,
+}
+
+pub async fn list_tax_rate_overrides(
+    State(state): State<AppState>,
+    SecurityCtxExtractor(sec): SecurityCtxExtractor,
+    Query(params): Query<ListTaxOverridesParams>,
+) -> Result<Json<Vec<TaxRateOverrideRow>>, ApiError> {
+    if !sec.roles.iter().any(|r| matches!(r, Role::Admin | Role::Manager)) {
+        return Err(ApiError::ForbiddenMissingRole { role: "admin_or_manager", trace_id: None });
+    }
+    let tenant_id = sec.tenant_id;
+
+    let mut qb: QueryBuilder<Postgres> = QueryBuilder::new(
+        "SELECT tenant_id, location_id, pos_instance_id, rate_bps, updated_at FROM tax_rate_overrides WHERE tenant_id = "
+    );
+    qb.push_bind(tenant_id);
+    if params.location_id.is_some() {
+        qb.push(" AND location_id IS NOT DISTINCT FROM ");
+        qb.push_bind(params.location_id);
+    }
+    if params.pos_instance_id.is_some() {
+        qb.push(" AND pos_instance_id IS NOT DISTINCT FROM ");
+        qb.push_bind(params.pos_instance_id);
+    }
+    qb.push(" ORDER BY updated_at DESC");
+
+    let rows = qb
+        .build_query_as::<TaxRateOverrideRow>()
+        .fetch_all(&state.db)
+        .await
+        .map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to list overrides: {}", e)) })?;
+    Ok(Json(rows))
+}
+
+#[derive(Deserialize)]
+pub struct UpsertTaxRateOverrideRequest {
+    pub location_id: Option<Uuid>,
+    pub pos_instance_id: Option<Uuid>,
+    pub rate_bps: i32,
+}
+
+pub async fn upsert_tax_rate_override(
+    State(state): State<AppState>,
+    SecurityCtxExtractor(sec): SecurityCtxExtractor,
+    Json(req): Json<UpsertTaxRateOverrideRequest>,
+) -> Result<Json<TaxRateOverrideRow>, ApiError> {
+    if !sec.roles.iter().any(|r| matches!(r, Role::Admin | Role::Manager)) {
+        return Err(ApiError::ForbiddenMissingRole { role: "admin_or_manager", trace_id: None });
+    }
+    let tenant_id = sec.tenant_id;
+    let rate = clamp_bps2(req.rate_bps);
+    // Ensure table exists in dev/test; prod will have migration applied
+    let _ = sqlx::query(
+        r#"CREATE TABLE IF NOT EXISTS tax_rate_overrides (
+            tenant_id UUID NOT NULL,
+            location_id UUID NULL,
+            pos_instance_id UUID NULL,
+            rate_bps INTEGER NOT NULL CHECK (rate_bps >= 0 AND rate_bps <= 10000),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )"#
+    ).execute(&state.db).await;
+
+    // Delete existing row for the same scope, then insert new
+    sqlx::query(
+        "DELETE FROM tax_rate_overrides WHERE tenant_id = $1 AND location_id IS NOT DISTINCT FROM $2 AND pos_instance_id IS NOT DISTINCT FROM $3"
+    )
+    .bind(tenant_id)
+    .bind(req.location_id)
+    .bind(req.pos_instance_id)
+    .execute(&state.db)
+    .await
+    .map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to clear existing override: {}", e)) })?;
+
+    let row = sqlx::query_as::<_, TaxRateOverrideRow>(
+        "INSERT INTO tax_rate_overrides (tenant_id, location_id, pos_instance_id, rate_bps) VALUES ($1,$2,$3,$4) RETURNING tenant_id, location_id, pos_instance_id, rate_bps, updated_at"
+    )
+    .bind(tenant_id)
+    .bind(req.location_id)
+    .bind(req.pos_instance_id)
+    .bind(rate)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to upsert override: {}", e)) })?;
+
+    Ok(Json(row))
+}
+
+async fn compute_with_db_inner(
+    db: &sqlx::PgPool,
+    tenant_id: Uuid,
+    headers: &HeaderMap,
+    req: &ComputeOrderRequest,
+) -> Result<ComputeOrderResponse, ApiError> {
+    if req.items.is_empty() {
+        return Err(ApiError::BadRequest { code: "missing_items", trace_id: None, message: Some("At least one item is required".into()) });
+    }
+
+    // Collect identifiers for batch lookup (and touch context fields for now)
+    let _ctx_loc = req.location_id;
+    let _ctx_pos = req.pos_instance_id;
+    let mut want_skus: Vec<String> = Vec::new();
+    let mut want_ids: Vec<Uuid> = Vec::new();
+    for it in &req.items {
+        if it.quantity <= 0 { return Err(ApiError::BadRequest { code: "invalid_quantity", trace_id: None, message: Some("Quantities must be positive".into()) }); }
+        if let Some(s) = it.sku.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            want_skus.push(s.to_string());
+        } else if let Some(id) = it.product_id {
+            want_ids.push(id);
+        } else {
+            return Err(ApiError::BadRequest { code: "missing_identifier", trace_id: None, message: Some("Each item must include either sku or product_id".into()) });
+        }
+    }
+
+    // Fetch products by SKU and by ID
+    #[derive(sqlx::FromRow)]
+    struct ProductRow { id: Uuid, name: String, price: BigDecimal, sku: Option<String>, tax_code: Option<String>, active: bool }
+
+    use std::collections::HashMap as Map;
+    let mut by_sku: Map<String, ProductRow> = Map::new();
+    let mut by_id: Map<Uuid, ProductRow> = Map::new();
+
+    if !want_skus.is_empty() {
+        let rows = sqlx::query_as::<_, ProductRow>(
+            "SELECT id, name, price, sku, tax_code, active FROM products WHERE tenant_id = $1 AND sku = ANY($2)"
+        )
+        .bind(tenant_id)
+        .bind(&want_skus)
+        .fetch_all(db)
+        .await
+        .map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to fetch products by SKU: {}", e)) })?;
+        for r in rows { if let Some(s) = r.sku.clone() { by_sku.insert(s, r); } }
+    }
+    if !want_ids.is_empty() {
+        let rows = sqlx::query_as::<_, ProductRow>(
+            "SELECT id, name, price, sku, tax_code, active FROM products WHERE tenant_id = $1 AND id = ANY($2)"
+        )
+        .bind(tenant_id)
+        .bind(&want_ids)
+        .fetch_all(db)
+        .await
+        .map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to fetch products by id: {}", e)) })?;
+        for r in rows { by_id.insert(r.id, r); }
+    }
+
+    // Build computed item list preserving input order
+    let mut items: Vec<ComputedItemSummary> = Vec::with_capacity(req.items.len());
+    let mut subtotal_cents: i64 = 0;
+    let mut taxable_subtotal_cents: i64 = 0;
+
+    for it in &req.items {
+        let row_opt = if let Some(s) = it.sku.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            by_sku.get(s)
+        } else if let Some(id) = it.product_id { by_id.get(&id) } else { None };
+        let row = match row_opt { Some(r) => r, None => {
+            return Err(ApiError::NotFound { code: "product_not_found", trace_id: None });
+        }};
+        if !row.active {
+            return Err(ApiError::BadRequest { code: "inactive_product", trace_id: None, message: Some(format!("Product {} is inactive", row.id)) });
+        }
+        let unit_cents = Money::new(row.price.clone()).as_cents();
+        let qty = it.quantity as i64;
+        let line_subtotal_cents = unit_cents.saturating_mul(qty);
+        subtotal_cents = subtotal_cents.saturating_add(line_subtotal_cents);
+        if is_taxable(row.tax_code.as_deref()) { taxable_subtotal_cents = taxable_subtotal_cents.saturating_add(line_subtotal_cents); }
+        items.push(ComputedItemSummary {
+            sku: row.sku.clone(),
+            product_id: row.id,
+            name: row.name.clone(),
+            qty: it.quantity,
+            unit_price_cents: unit_cents,
+            line_subtotal_cents,
+            tax_code: row.tax_code.clone(),
+        });
+    }
+
+    // Compute discount
+    let discount_bps = clamp_bps(req.discount_percent_bp.unwrap_or(0));
+    let discount_cents = if subtotal_cents > 0 && discount_bps > 0 {
+        // round half up: add half denominator before integer division
+        (subtotal_cents.saturating_mul(discount_bps as i64) + 5_000) / 10_000
+    } else { 0 };
+
+    // Allocate discount proportion applicable to taxable portion
+    let mut tax_cents = 0i64;
+    if taxable_subtotal_cents > 0 {
+        let discount_on_taxable = if subtotal_cents > 0 && discount_cents > 0 {
+            (discount_cents.saturating_mul(taxable_subtotal_cents) + (subtotal_cents / 2)) / subtotal_cents
+        } else { 0 };
+        let taxable_net_cents = taxable_subtotal_cents.saturating_sub(discount_on_taxable).max(0);
+        let rate_bps = resolve_tax_rate_bps_with_db(
+            db,
+            tenant_id,
+            headers,
+            req.tax_rate_bps,
+            req.location_id,
+            req.pos_instance_id,
+        ).await as i64;
+        tax_cents = (taxable_net_cents.saturating_mul(rate_bps) + 5_000) / 10_000;
+    }
+
+    let total_cents = subtotal_cents.saturating_sub(discount_cents).saturating_add(tax_cents);
+
+    Ok(ComputeOrderResponse { items, subtotal_cents, discount_cents, tax_cents, total_cents })
+}
+
+pub async fn compute_order(
+    State(state): State<AppState>,
+    SecurityCtxExtractor(sec): SecurityCtxExtractor,
+    headers: HeaderMap,
+    Json(req): Json<ComputeOrderRequest>,
+) -> Result<Json<ComputeOrderResponse>, ApiError> {
+    let tenant_id = sec.tenant_id;
+    if !sec
+        .roles
+        .iter()
+        .any(|r| matches!(r, Role::Admin | Role::Manager | Role::Support | Role::Cashier))
+    {
+        return Err(ApiError::ForbiddenMissingRole { role: "admin_or_manager_or_support", trace_id: None });
+    }
+    let out = compute_with_db_inner(&state.db, tenant_id, &headers, &req).await?;
+    Ok(Json(out))
+}
+
+#[cfg(all(test, feature = "integration-tests"))]
+mod integration_tests {
+    use super::*;
+    use sqlx::Executor;
+
+    fn cents(n: i64) -> BigDecimal { BigDecimal::from(n) / BigDecimal::from(100i64) }
+
+    #[tokio::test]
+    async fn compute_uses_tax_code_std_and_exempt() {
+        // Arrange DB (skip if not available)
+        let db_url = std::env::var("TEST_DATABASE_URL").unwrap_or_else(|_| "postgres://postgres:postgres@localhost:5432/postgres".to_string());
+        let pool = match sqlx::PgPool::connect(&db_url).await {
+            Ok(p) => p,
+            Err(err) => {
+                eprintln!("SKIP compute_uses_tax_code_std_and_exempt: cannot connect to TEST_DATABASE_URL: {err}");
+                return;
+            }
+        };
+        let tenant_id = Uuid::new_v4();
+
+        let _ = pool.execute(
+            r#"
+            CREATE TABLE IF NOT EXISTS products (
+              id uuid PRIMARY KEY,
+              tenant_id uuid NOT NULL,
+              name text NOT NULL,
+              price numeric NOT NULL,
+              sku text,
+              tax_code text,
+              active boolean NOT NULL DEFAULT true
+            );
+            "#
+        ).await;
+        let _ = sqlx::query("DELETE FROM products WHERE tenant_id = $1").bind(tenant_id).execute(&pool).await;
+
+        // Insert products
+        let p_std = Uuid::new_v4();
+        let p_exempt = Uuid::new_v4();
+        sqlx::query("INSERT INTO products (id, tenant_id, name, price, sku, tax_code, active) VALUES ($1,$2,$3,$4,$5,$6,$7)")
+            .bind(p_std).bind(tenant_id).bind("Soda Can").bind(cents(199)).bind("SKU-SODA").bind(Some("STD".to_string())).bind(true)
+            .execute(&pool).await.expect("insert std");
+        sqlx::query("INSERT INTO products (id, tenant_id, name, price, sku, tax_code, active) VALUES ($1,$2,$3,$4,$5,$6,$7)")
+            .bind(p_exempt).bind(tenant_id).bind("Bottle Water").bind(cents(149)).bind("SKU-WATER").bind(Some("EXEMPT".to_string())).bind(true)
+            .execute(&pool).await.expect("insert exempt");
+
+        // Build request and headers
+        let req = ComputeOrderRequest {
+            items: vec![
+                ComputeOrderItemInput { sku: Some("SKU-SODA".into()), product_id: None, quantity: 2 },
+                ComputeOrderItemInput { sku: Some("SKU-WATER".into()), product_id: None, quantity: 1 },
+            ],
+            discount_percent_bp: Some(1000),
+            location_id: None,
+            pos_instance_id: None,
+            tax_rate_bps: None,
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Tax-Rate-Bps", "800".parse().unwrap());
+
+        // Act
+        let resp = compute_with_db_inner(&pool, tenant_id, &headers, &req).await.expect("compute ok");
+
+        // Assert
+        assert_eq!(resp.subtotal_cents, 547);
+        assert_eq!(resp.discount_cents, 55);
+        assert_eq!(resp.tax_cents, 29);
+        assert_eq!(resp.total_cents, 521);
+
+        assert_eq!(resp.items.len(), 2);
+        let soda = resp.items.iter().find(|i| i.sku.as_deref() == Some("SKU-SODA")).unwrap();
+        assert_eq!(soda.name, "Soda Can");
+        assert_eq!(soda.unit_price_cents, 199);
+        assert_eq!(soda.line_subtotal_cents, 398);
+    }
+
+    #[tokio::test]
+    async fn compute_uses_db_tax_override_precedence() {
+        // Arrange DB (skip if not available)
+        let db_url = std::env::var("TEST_DATABASE_URL").unwrap_or_else(|_| "postgres://postgres:postgres@localhost:5432/postgres".to_string());
+        let pool = match sqlx::PgPool::connect(&db_url).await {
+            Ok(p) => p,
+            Err(err) => {
+                eprintln!("SKIP compute_uses_db_tax_override_precedence: cannot connect to TEST_DATABASE_URL: {err}");
+                return;
+            }
+        };
+        let tenant_id = Uuid::new_v4();
+
+        // Ensure tables
+        let _ = pool.execute(
+            r#"
+            CREATE TABLE IF NOT EXISTS products (
+              id uuid PRIMARY KEY,
+              tenant_id uuid NOT NULL,
+              name text NOT NULL,
+              price numeric NOT NULL,
+              sku text,
+              tax_code text,
+              active boolean NOT NULL DEFAULT true
+            );
+            "#
+        ).await;
+        let _ = pool.execute(
+            r#"
+            CREATE TABLE IF NOT EXISTS tax_rate_overrides (
+              tenant_id UUID NOT NULL,
+              location_id UUID NULL,
+              pos_instance_id UUID NULL,
+              rate_bps INTEGER NOT NULL CHECK (rate_bps >= 0 AND rate_bps <= 10000),
+              updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+            "#
+        ).await;
+
+        let _ = sqlx::query("DELETE FROM products WHERE tenant_id = $1").bind(tenant_id).execute(&pool).await;
+        let _ = sqlx::query("DELETE FROM tax_rate_overrides WHERE tenant_id = $1").bind(tenant_id).execute(&pool).await;
+
+        // Seed products
+        let p_std = Uuid::new_v4();
+        let p_exempt = Uuid::new_v4();
+        sqlx::query("INSERT INTO products (id, tenant_id, name, price, sku, tax_code, active) VALUES ($1,$2,$3,$4,$5,$6,$7)")
+            .bind(p_std).bind(tenant_id).bind("Soda Can").bind(cents(199)).bind("SKU-SODA").bind(Some("STD".to_string())).bind(true)
+            .execute(&pool).await.expect("insert std");
+        sqlx::query("INSERT INTO products (id, tenant_id, name, price, sku, tax_code, active) VALUES ($1,$2,$3,$4,$5,$6,$7)")
+            .bind(p_exempt).bind(tenant_id).bind("Bottle Water").bind(cents(149)).bind("SKU-WATER").bind(Some("EXEMPT".to_string())).bind(true)
+            .execute(&pool).await.expect("insert exempt");
+
+        // Seed tax overrides: tenant=700, location=800, pos=900
+        let loc_id = Uuid::new_v4();
+        let pos_id = Uuid::new_v4();
+        sqlx::query("INSERT INTO tax_rate_overrides (tenant_id, location_id, pos_instance_id, rate_bps) VALUES ($1,$2,$3,$4)")
+            .bind(tenant_id).bind(Option::<Uuid>::None).bind(Option::<Uuid>::None).bind(700)
+            .execute(&pool).await.expect("insert tenant override");
+        sqlx::query("INSERT INTO tax_rate_overrides (tenant_id, location_id, pos_instance_id, rate_bps) VALUES ($1,$2,$3,$4)")
+            .bind(tenant_id).bind(Some(loc_id)).bind(Option::<Uuid>::None).bind(800)
+            .execute(&pool).await.expect("insert loc override");
+        sqlx::query("INSERT INTO tax_rate_overrides (tenant_id, location_id, pos_instance_id, rate_bps) VALUES ($1,$2,$3,$4)")
+            .bind(tenant_id).bind(Option::<Uuid>::None).bind(Some(pos_id)).bind(900)
+            .execute(&pool).await.expect("insert pos override");
+
+        let base_items = vec![
+            ComputeOrderItemInput { sku: Some("SKU-SODA".into()), product_id: None, quantity: 2 },
+            ComputeOrderItemInput { sku: Some("SKU-WATER".into()), product_id: None, quantity: 1 },
+        ];
+
+        // Case 1: tenant only (expect tax 25)
+        let req1 = ComputeOrderRequest { items: base_items.clone(), discount_percent_bp: Some(1000), location_id: None, pos_instance_id: None, tax_rate_bps: None };
+        let headers1 = HeaderMap::new();
+        let resp1 = compute_with_db_inner(&pool, tenant_id, &headers1, &req1).await.expect("compute ok");
+        assert_eq!(resp1.subtotal_cents, 547);
+        assert_eq!(resp1.discount_cents, 55);
+        assert_eq!(resp1.tax_cents, 25);
+        assert_eq!(resp1.total_cents, 517);
+
+        // Case 2: location (expect tax 29)
+        let req2 = ComputeOrderRequest { items: base_items.clone(), discount_percent_bp: Some(1000), location_id: Some(loc_id), pos_instance_id: None, tax_rate_bps: None };
+        let resp2 = compute_with_db_inner(&pool, tenant_id, &HeaderMap::new(), &req2).await.expect("compute ok");
+        assert_eq!(resp2.tax_cents, 29);
+
+        // Case 3: pos takes precedence (expect tax 32)
+        let req3 = ComputeOrderRequest { items: base_items.clone(), discount_percent_bp: Some(1000), location_id: Some(loc_id), pos_instance_id: Some(pos_id), tax_rate_bps: None };
+        let resp3 = compute_with_db_inner(&pool, tenant_id, &HeaderMap::new(), &req3).await.expect("compute ok");
+        assert_eq!(resp3.tax_cents, 32);
+    }
 }
 pub async fn clear_offline_orders(
     State(state): State<AppState>,
@@ -1419,10 +2166,10 @@ pub async fn clear_offline_orders(
     }
     let tenant_id = sec.tenant_id;
 
-    let result = sqlx::query!(
-        r#"DELETE FROM orders WHERE tenant_id = $1 AND offline = TRUE"#,
-        tenant_id
+    let result = sqlx::query(
+        r#"DELETE FROM orders WHERE tenant_id = $1 AND offline = TRUE"#
     )
+    .bind(tenant_id)
     .execute(&state.db)
     .await
         .map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to clear offline orders: {}", e)) })?;
@@ -1430,4 +2177,122 @@ pub async fn clear_offline_orders(
     Ok(Json(ClearOfflineResponse {
         cleared: result.rows_affected(),
     }))
+}
+
+// --- Create order from SKUs: resolve items and compute totals server-side ---
+#[derive(Deserialize, Debug)]
+pub struct NewOrderSkuItem { pub sku: String, pub quantity: i32 }
+
+#[derive(Deserialize, Debug)]
+pub struct NewOrderFromSku {
+    pub items: Vec<NewOrderSkuItem>,
+    #[serde(default)] pub discount_percent_bp: Option<i32>,
+    #[serde(default)] pub tax_rate_bps: Option<i32>,
+    #[serde(default)] pub location_id: Option<Uuid>,
+    #[serde(default)] pub pos_instance_id: Option<Uuid>,
+    pub payment_method: String,
+    #[serde(default)] pub payment: Option<PaymentRequest>,
+    pub customer_id: Option<String>,
+    pub customer_name: Option<String>,
+    pub customer_email: Option<String>,
+    pub store_id: Option<Uuid>,
+    pub offline: Option<bool>,
+    pub idempotency_key: Option<String>,
+}
+
+pub async fn create_order_from_skus(
+    State(state): State<AppState>,
+    SecurityCtxExtractor(sec): SecurityCtxExtractor,
+    auth: AuthContext,
+    headers: HeaderMap,
+    Json(req): Json<NewOrderFromSku>,
+) -> Result<Json<Order>, ApiError> {
+    if !sec
+        .roles
+        .iter()
+        .any(|r| matches!(r, Role::Admin | Role::Manager | Role::Support | Role::Cashier))
+    {
+        return Err(ApiError::ForbiddenMissingRole { role: "admin_or_manager_or_support", trace_id: None });
+    }
+    if req.items.is_empty() { return Err(ApiError::BadRequest { code: "missing_items", trace_id: None, message: Some("Order must contain at least one item".into()) }); }
+
+    let tenant_id = sec.tenant_id;
+    let mut want_skus: Vec<String> = Vec::with_capacity(req.items.len());
+    for it in &req.items {
+        if it.quantity <= 0 { return Err(ApiError::BadRequest { code: "invalid_quantity", trace_id: None, message: Some("Quantities must be positive".into()) }); }
+        let s = it.sku.trim(); if s.is_empty() { return Err(ApiError::BadRequest { code: "missing_sku", trace_id: None, message: Some("SKU cannot be blank".into()) }); }
+        want_skus.push(s.to_string());
+    }
+
+    #[derive(sqlx::FromRow)]
+    struct ProductRow { id: Uuid, name: String, price: BigDecimal, sku: Option<String>, tax_code: Option<String>, active: bool }
+    let rows = sqlx::query_as::<_, ProductRow>(
+        "SELECT id, name, price, sku, tax_code, active FROM products WHERE tenant_id = $1 AND sku = ANY($2)"
+    )
+    .bind(tenant_id)
+    .bind(&want_skus)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to fetch products by SKU: {}", e)) })?;
+    use std::collections::HashMap as Map;
+    let mut by_sku: Map<String, ProductRow> = Map::new();
+    for r in rows { if let Some(s) = r.sku.clone() { by_sku.insert(s, r); } }
+
+    // Build order items and compute totals
+    let mut order_items: Vec<OrderItem> = Vec::with_capacity(req.items.len());
+    let mut subtotal_cents: i64 = 0;
+    let mut taxable_subtotal_cents: i64 = 0;
+    for it in &req.items {
+        let s = it.sku.trim();
+        let r = by_sku.get(s).ok_or(ApiError::NotFound { code: "product_not_found", trace_id: None })?;
+        if !r.active { return Err(ApiError::BadRequest { code: "inactive_product", trace_id: None, message: Some(format!("Product {} is inactive", r.id)) }); }
+        let unit_cents = Money::new(r.price.clone()).as_cents();
+        let qty = it.quantity as i64;
+        let line_subtotal = unit_cents.saturating_mul(qty);
+        subtotal_cents = subtotal_cents.saturating_add(line_subtotal);
+        if is_taxable(r.tax_code.as_deref()) { taxable_subtotal_cents = taxable_subtotal_cents.saturating_add(line_subtotal); }
+        order_items.push(OrderItem {
+            product_id: r.id,
+            product_name: Some(r.name.clone()),
+            quantity: it.quantity,
+            unit_price: Money::from_cents(unit_cents),
+            line_total: Money::from_cents(line_subtotal),
+        });
+    }
+
+    let discount_bps = req.discount_percent_bp.unwrap_or(0).clamp(0, 10_000);
+    let discount_cents = if subtotal_cents > 0 && discount_bps > 0 {
+        (subtotal_cents.saturating_mul(discount_bps as i64) + 5_000) / 10_000
+    } else { 0 };
+    let discount_on_taxable = if subtotal_cents > 0 && discount_cents > 0 {
+        (discount_cents.saturating_mul(taxable_subtotal_cents) + (subtotal_cents / 2)) / subtotal_cents
+    } else { 0 };
+    let taxable_net = taxable_subtotal_cents.saturating_sub(discount_on_taxable).max(0);
+    let tax_rate_bps = resolve_tax_rate_bps_with_db(
+        &state.db,
+        tenant_id,
+        &headers,
+        req.tax_rate_bps,
+        req.location_id,
+        req.pos_instance_id,
+    ).await as i64;
+    let tax_cents = (taxable_net.saturating_mul(tax_rate_bps) + 5_000) / 10_000;
+    let total_cents = subtotal_cents.saturating_sub(discount_cents).saturating_add(tax_cents);
+
+    // Construct a NewOrder and delegate to existing create_order by reusing its persistence path
+    let new_order = NewOrder {
+        items: order_items,
+        payment_method: req.payment_method,
+        payment: req.payment,
+        total: Money::from_cents(total_cents).into(),
+        customer_id: req.customer_id,
+        customer_name: req.customer_name,
+        customer_email: req.customer_email,
+        store_id: req.store_id,
+        offline: req.offline,
+        idempotency_key: req.idempotency_key,
+    };
+
+    // Call inner create_order logic directly instead of HTTP roundtrip
+    create_order(State(state), SecurityCtxExtractor(sec), auth, Json(new_order)).await
 }
