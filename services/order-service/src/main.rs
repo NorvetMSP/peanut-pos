@@ -4,6 +4,7 @@ use reqwest::Client;
 use sqlx::PgPool;
 use std::env;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use tokio::net::TcpListener;
 #[cfg(any(feature = "kafka", feature = "kafka-producer"))]
 use uuid::Uuid;
