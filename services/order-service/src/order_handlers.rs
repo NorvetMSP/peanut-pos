@@ -1599,20 +1599,31 @@ pub async fn get_order_receipt(
         writeln!(&mut body, "Tax:              ${:.2}", Money::from_cents(estimated_tax_cents)).ok();
         writeln!(&mut body, "Total:            ${:.2}", detail.order.total).ok();
         // Try to fetch payment to show tendered and change (best-effort; ignore errors)
-        if let Ok(opt) = sqlx::query(
+        match sqlx::query(
             r#"SELECT method, amount::FLOAT8 as amount, change_cents FROM payments WHERE order_id = $1 ORDER BY created_at DESC LIMIT 1"#
-        ).bind(detail.order.id).fetch_optional(&state.db).await {
-            if let Some(row) = opt {
+        )
+        .bind(detail.order.id)
+        .fetch_optional(&state.db)
+        .await {
+            Ok(Some(row)) => {
                 let method: Option<String> = row.try_get("method").ok();
                 let amount: Option<f64> = row.try_get("amount").ok();
                 let change_cents: Option<i32> = row.try_get("change_cents").ok();
-                if let Some(a) = amount { writeln!(&mut body, "Paid ({}):        ${:.2}", method.unwrap_or(detail.order.payment_method.clone()), a).ok(); }
-                if let Some(ch) = change_cents { writeln!(&mut body, "Change:           ${:.2}", Money::from_cents(ch as i64)).ok(); }
-            } else {
+                if let Some(a) = amount {
+                    writeln!(
+                        &mut body,
+                        "Paid ({}):        ${:.2}",
+                        method.unwrap_or(detail.order.payment_method.clone()),
+                        a
+                    ).ok();
+                }
+                if let Some(ch) = change_cents {
+                    writeln!(&mut body, "Change:           ${:.2}", Money::from_cents(ch as i64)).ok();
+                }
+            }
+            Ok(None) | Err(_) => {
                 writeln!(&mut body, "Paid ({}):        ${:.2}", detail.order.payment_method, detail.order.total).ok();
             }
-        } else {
-            writeln!(&mut body, "Paid ({}):        ${:.2}", detail.order.payment_method, detail.order.total).ok();
         }
         body.push_str("-------------------------------------\nThank you!\n");
     } else {
@@ -1912,8 +1923,7 @@ async fn compute_with_db_inner(
             by_sku.get(s)
         } else if let Some(id) = it.product_id { by_id.get(&id) } else { None };
         let row = match row_opt { Some(r) => r, None => {
-            if it.sku.is_some() { return Err(ApiError::NotFound { code: "product_not_found", trace_id: None }); }
-            else { return Err(ApiError::NotFound { code: "product_not_found", trace_id: None }); }
+            return Err(ApiError::NotFound { code: "product_not_found", trace_id: None });
         }};
         if !row.active {
             return Err(ApiError::BadRequest { code: "inactive_product", trace_id: None, message: Some(format!("Product {} is inactive", row.id)) });
