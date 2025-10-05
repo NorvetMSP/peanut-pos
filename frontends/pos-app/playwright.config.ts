@@ -1,6 +1,6 @@
 import { defineConfig } from '@playwright/test';
 
-const PORT = 4173;
+const PORT = 4174; // avoid clashing with admin-portal
 const HOST = 'localhost';
 const BASE_URL = `http://${HOST}:${PORT}`;
 
@@ -18,8 +18,8 @@ export default defineConfig({
   },
   webServer: {
     command: `npm run dev -- --host ${HOST} --port ${PORT} --strictPort`,
-    url: `${BASE_URL}/customers`,
-    reuseExistingServer: false,
+    url: `${BASE_URL}/pos`,
+    reuseExistingServer: !process.env.CI,
     timeout: 120_000,
   },
 });

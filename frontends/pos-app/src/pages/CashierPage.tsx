@@ -70,6 +70,7 @@ const CashierPage: React.FC = () => {
   const [inactiveItems, setInactiveItems] = useState<string[]>([]);
   const [pendingSubmit, setPendingSubmit] = useState(false);
   const [idleSeconds, setIdleSeconds] = useState(0);
+  const [paymentError, setPaymentError] = useState<string | null>(null);
 
   useSyncOnReconnect();
 
@@ -185,15 +186,24 @@ const CashierPage: React.FC = () => {
       items: itemsPayload,
       payment_method: paymentMethod,
       total: Number(totalAmount.toFixed(2)),
+      metadata: paymentError ? { retry: Date.now() } : undefined,
     };
     try {
       const result = await submitOrder(payload);
       if (!result) return;
+      // If payment failed (e.g., card declined), surface error and allow retry without clearing cart
+      if (result.status === 'submitted' && result.paymentError) {
+        setPaymentError(`Payment error: ${result.paymentError}`);
+        return;
+      }
+      // Success path: clear any prior error, clear cart, and proceed
+      setPaymentError(null);
       clearCart();
       setInactiveItems([]);
       openPaymentLink(result);
     } catch (err) {
       console.error('Order submission failed', err);
+      setPaymentError(err instanceof Error ? err.message : 'Order submission failed');
     } finally {
       setPendingSubmit(false);
     }
@@ -370,6 +380,9 @@ const CashierPage: React.FC = () => {
             </div>
             {error && !isLoadingProducts && (
               <div className="cashier-card__notice cashier-card__notice--error">{error}</div>
+            )}
+            {paymentError && (
+              <div className="cashier-card__notice cashier-card__notice--error">{paymentError}</div>
             )}
             {isOfflineResult && !isLoadingProducts && (
               <div className="cashier-card__notice cashier-card__notice--offline">

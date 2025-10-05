@@ -14,6 +14,8 @@ on:
 jobs:
   pos_app:
     runs-on: ubuntu-latest
+    env:
+      CI: true
     defaults:
       run:
         working-directory: frontends/pos-app
@@ -42,8 +44,31 @@ jobs:
       - name: Build
         run: npm run build
 
+      - name: Install Playwright Browsers
+        run: npx playwright install --with-deps
+
+      - name: Cache Playwright Browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-playwright-
+
+      - name: E2E (Playwright)
+        run: npm run test:e2e -- --reporter=dot --workers=1 --trace=on-first-retry
+
+      - name: Upload Playwright Report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pos-app-playwright-report
+          path: frontends/pos-app/playwright-report
+
   admin_portal:
     runs-on: ubuntu-latest
+    env:
+      CI: true
     defaults:
       run:
         working-directory: frontends/admin-portal
@@ -71,3 +96,24 @@ jobs:
 
       - name: Build
         run: npm run build
+
+      - name: Install Playwright Browsers
+        run: npx playwright install --with-deps
+
+      - name: Cache Playwright Browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-playwright-
+
+      - name: E2E (Playwright)
+        run: npm run test:e2e -- --reporter=dot --workers=1 --trace=on-first-retry
+
+      - name: Upload Playwright Report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: admin-portal-playwright-report
+          path: frontends/admin-portal/playwright-report

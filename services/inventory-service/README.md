@@ -2,6 +2,14 @@
 
 This service manages product inventory quantities, reservations, and related Kafka events (low_stock, reservation.expired, audit events).
 
+Low stock events
+
+- Emitted to topic `inventory.low_stock` only when inventory crosses from above threshold to at-or-below threshold.
+- Crossing rule: prev_quantity > threshold AND new_quantity <= threshold.
+- This prevents repeated alerts while the item remains below threshold; alerts resume after stock is replenished above threshold and later crosses again.
+- Threshold source: `inventory.threshold` (legacy) or `inventory_items.threshold` (multi-location; we use MIN across locations when aggregating).
+
+
 ## Integration Tests & sqlx
 
 We intentionally avoid using `sqlx::query!` / `query_as!` macros inside long‑running or containerized integration tests (see `tests/`). CI sets `SQLX_OFFLINE=true` to speed builds and prevent network access during compilation. The compile‑time macros require a prepared offline cache (`sqlx-data.json`) covering every query shape. Maintaining that cache for ephemeral test setup SQL (INSERT seed rows, ad‑hoc SELECT aggregates) caused friction and frequent CI breaks.

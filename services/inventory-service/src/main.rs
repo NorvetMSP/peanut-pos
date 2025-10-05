@@ -319,6 +319,19 @@ async fn handle_order_completed(text: &str, db: &PgPool, producer: &FutureProduc
                 let mut latest: Option<(i32, i32)> = None;
                 if multi_location_enabled {
                     // Use dynamic queries (query / query_as) to avoid sqlx compile-time validation failing before migrations.
+                    // Compute previous aggregate quantity first for crossing detection
+                    let mut prev: Option<(i32, i32)> = None;
+                    if let Ok(row) = sqlx::query(
+                        "SELECT COALESCE(SUM(quantity),0) as quantity, MIN(threshold) as threshold FROM inventory_items WHERE tenant_id = $1 AND product_id = $2"
+                    )
+                    .bind(tenant_id)
+                    .bind(product_id)
+                    .fetch_one(&mut *tx)
+                    .await {
+                        let q: i64 = row.get("quantity");
+                        let th: Option<i32> = row.get::<Option<i32>, _>("threshold");
+                        if let Some(thr) = th { prev = Some((q as i32, thr)); }
+                    }
                     if let Ok(res_rows) = sqlx::query(
                         "SELECT location_id, quantity FROM inventory_reservations WHERE order_id = $1 AND tenant_id = $2 AND product_id = $3"
                     )
@@ -356,6 +369,12 @@ async fn handle_order_completed(text: &str, db: &PgPool, producer: &FutureProduc
                         let q: i64 = row.get("quantity");
                         let th: Option<i32> = row.get::<Option<i32>, _>("threshold");
                         if let Some(thr) = th { latest = Some((q as i32, thr)); }
+                    }
+                    // After computing latest, determine if we crossed the threshold
+                    if let (Some((prev_q, thr)), Some((new_q, _))) = (prev, latest) {
+                        if crate::crossed_below_threshold(prev_q, new_q, thr) {
+                            alerts.push((product_id, new_q, thr));
+                        }
                     }
                 } else {
                     loop {
@@ -434,7 +453,10 @@ async fn handle_order_completed(text: &str, db: &PgPool, producer: &FutureProduc
                 }
 
                 if let Some((quantity, threshold)) = latest {
-                    if quantity <= threshold {
+                    // In single-inventory path we don't have a pre-read; simulate prev as (quantity + delta)
+                    // to detect a crossing event and avoid repeat alerts when already below.
+                    let prev_q = quantity + quantity_delta;
+                    if crate::crossed_below_threshold(prev_q, quantity, threshold) {
                         alerts.push((product_id, quantity, threshold));
                     }
                 }

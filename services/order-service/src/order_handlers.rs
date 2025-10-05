@@ -53,7 +53,7 @@ pub struct NewOrder {
     pub idempotency_key: Option<String>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct PaymentRequest {
     pub method: String, // "cash" | "card"
     pub amount_cents: i64,
@@ -259,6 +259,253 @@ pub struct RefundRequest {
     pub items: Vec<RefundLine>,
     pub total: Option<BigDecimal>,
     pub reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SettlementQuery {
+    pub date: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SettlementByMethod {
+    pub method: String,
+    pub count: i64,
+    pub amount: BigDecimal,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SettlementReport {
+    pub date: String,
+    pub totals: Vec<SettlementByMethod>,
+}
+
+pub async fn get_settlement_report(
+    State(state): State<AppState>,
+    SecurityCtxExtractor(sec): SecurityCtxExtractor,
+    Query(q): Query<SettlementQuery>,
+) -> Result<Json<SettlementReport>, ApiError> {
+    if !sec
+        .roles
+        .iter()
+        .any(|r| matches!(r, Role::Admin | Role::Manager | Role::Support))
+    {
+        return Err(ApiError::ForbiddenMissingRole { role: "admin_or_manager_or_support", trace_id: None });
+    }
+
+    let tenant_id = sec.tenant_id;
+    let date_str = q
+        .date
+        .unwrap_or_else(|| chrono::Utc::now().format("%Y-%m-%d").to_string());
+    let date = chrono::NaiveDate::parse_from_str(&date_str, "%Y-%m-%d")
+        .map_err(|_| ApiError::BadRequest { code: "invalid_date", trace_id: None, message: Some("Expected YYYY-MM-DD".into()) })?;
+
+    let rows = sqlx::query!(
+        r#"SELECT method, COUNT(*) as count, COALESCE(SUM(amount)::NUMERIC, 0)::NUMERIC as amount
+            FROM payments
+            WHERE tenant_id = $1 AND status = 'captured' AND created_at::date = $2
+            GROUP BY method
+            ORDER BY method"#,
+        tenant_id,
+        date
+    )
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to query settlement: {}", e)) })?;
+
+    let mut totals = Vec::with_capacity(rows.len());
+    for r in rows {
+        totals.push(SettlementByMethod {
+            method: r.method,
+            count: r.count.unwrap_or(0) as i64,
+            amount: r.amount.unwrap_or(BigDecimal::from(0)),
+        });
+    }
+
+    Ok(Json(SettlementReport { date: date_str, totals }))
+}
+
+// --- Exchanges (MVP) ---
+#[derive(Deserialize, Debug)]
+pub struct ExchangeReturnItem { pub product_id: Uuid, pub qty: i32 }
+
+#[derive(Deserialize, Debug)]
+pub struct ExchangeNewItem { pub sku: String, pub qty: i32 }
+
+#[derive(Deserialize, Debug)]
+pub struct ExchangeRequest {
+    pub return_items: Vec<ExchangeReturnItem>,
+    pub new_items: Vec<ExchangeNewItem>,
+    #[serde(default)] pub discount_percent_bp: Option<i32>,
+    pub payment: Option<PaymentRequest>,
+    pub cashier_id: Option<Uuid>,
+    pub idempotency_key: Option<String>,
+}
+
+#[derive(Serialize, Debug)]
+pub struct ExchangeResponse {
+    pub original_order_id: Uuid,
+    pub exchange_order_id: Uuid,
+    pub refund: Option<Uuid>,
+    pub refunded_cents: i64,
+    pub new_order_total_cents: i64,
+    pub net_delta_cents: i64,
+    pub net_direction: String,
+}
+
+pub async fn exchange_order(
+    State(state): State<AppState>,
+    SecurityCtxExtractor(sec): SecurityCtxExtractor,
+    Path(original_order_id): Path<Uuid>,
+    headers: HeaderMap,
+    auth: AuthContext,
+    Json(req): Json<ExchangeRequest>,
+) -> Result<Json<ExchangeResponse>, ApiError> {
+    if !sec.roles.iter().any(|r| matches!(r, Role::Admin | Role::Manager)) {
+        return Err(ApiError::ForbiddenMissingRole { role: "admin_or_manager", trace_id: None });
+    }
+    let tenant_id = sec.tenant_id;
+
+    if req.return_items.is_empty() && req.new_items.is_empty() {
+        return Err(ApiError::BadRequest { code: "invalid_request", trace_id: None, message: Some("Must provide return_items or new_items".into()) });
+    }
+
+    // 1) Load original order and items with returned balance
+    let detail = fetch_order_detail(&state, tenant_id, original_order_id).await?;
+    if !matches!(detail.order.status.as_str(), "COMPLETED" | "PAID" | "REFUNDED" | "PARTIAL_REFUNDED") {
+        return Err(ApiError::BadRequest { code: "order_not_completed", trace_id: None, message: Some("Original order not in a refundable state".into()) });
+    }
+
+    // Build product_id -> refundable quantity map and order_item_id lookup
+    #[derive(Clone)]
+    struct ItemRow { order_item_id: Uuid, qty: i32, returned: i32, unit_price_cents: i64 }
+    let mut by_product: HashMap<Uuid, ItemRow> = HashMap::new();
+    {
+        let rows = sqlx::query(
+            "SELECT id, product_id, quantity, returned_quantity, unit_price FROM order_items WHERE order_id = $1"
+        ).bind(original_order_id).fetch_all(&state.db).await
+            .map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to load original order items: {}", e)) })?;
+        for row in rows {
+            let order_item_id: Uuid = row.try_get("id").unwrap();
+            let product_id: Uuid = row.try_get("product_id").unwrap();
+            let quantity: i32 = row.try_get("quantity").unwrap();
+            let returned_quantity: i32 = row.try_get("returned_quantity").unwrap_or(0);
+            let unit_price: BigDecimal = row.try_get("unit_price").unwrap();
+            by_product.insert(product_id, ItemRow { order_item_id, qty: quantity, returned: returned_quantity, unit_price_cents: Money::new(unit_price).as_cents() });
+        }
+    }
+
+    // 2) Compute refund_total_cents and update returned_quantity in a tx
+    let mut tx = state.db.begin().await.map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to begin exchange tx: {}", e)) })?;
+    let mut refund_total_cents: i64 = 0;
+    let mut return_id: Option<Uuid> = None;
+    if !req.return_items.is_empty() {
+        // Validate quantities
+        for it in &req.return_items {
+            if it.qty <= 0 { return Err(ApiError::BadRequest { code: "invalid_quantity", trace_id: None, message: Some("Return quantities must be positive".into()) }); }
+            let row = by_product.get(&it.product_id).ok_or(ApiError::BadRequest { code: "product_not_in_order", trace_id: None, message: Some("Product is not part of original order".into()) })?;
+            let available = row.qty - row.returned;
+            if it.qty > available { return Err(ApiError::BadRequest { code: "refundable_qty_exceeded", trace_id: None, message: Some(format!("Cannot return {} units; only {} remain", it.qty, available)) }); }
+        }
+
+        let rid = Uuid::new_v4();
+        return_id = Some(rid);
+        {
+            let conn = tx.acquire().await.map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to acquire conn: {}", e)) })?;
+            sqlx::query("INSERT INTO order_returns (id, order_id, tenant_id, total) VALUES ($1,$2,$3,$4)")
+                .bind(rid)
+                .bind(original_order_id)
+                .bind(tenant_id)
+                .bind(Money::from_cents(0).inner())
+                .execute(&mut *conn).await
+                .map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to insert return: {}", e)) })?;
+        }
+        for it in &req.return_items {
+            let row = by_product.get(&it.product_id).unwrap();
+            let line_cents = (row.unit_price_cents as i64).saturating_mul(it.qty as i64);
+            refund_total_cents = refund_total_cents.saturating_add(line_cents);
+            // update returned_quantity and insert return item row
+            let conn = tx.acquire().await.map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to acquire conn: {}", e)) })?;
+            sqlx::query("UPDATE order_items SET returned_quantity = returned_quantity + $1 WHERE id = $2")
+                .bind(it.qty)
+                .bind(row.order_item_id)
+                .execute(&mut *conn).await
+                .map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to update returned qty: {}", e)) })?;
+            let conn2 = tx.acquire().await.map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to acquire conn: {}", e)) })?;
+            sqlx::query("INSERT INTO order_return_items (id, return_id, order_item_id, quantity, line_total) VALUES ($1,$2,$3,$4,$5)")
+                .bind(Uuid::new_v4())
+                .bind(return_id.unwrap())
+                .bind(row.order_item_id)
+                .bind(it.qty)
+                .bind(Money::from_cents(line_cents).inner())
+                .execute(&mut *conn2).await
+                .map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to insert return item: {}", e)) })?;
+        }
+        // finalize return total and possibly order status partial/full
+        let all_returned = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM order_items WHERE order_id = $1 AND returned_quantity < quantity")
+            .bind(original_order_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to compute return completion: {}", e)) })? == 0;
+        let new_status = if all_returned { "REFUNDED" } else { "PARTIAL_REFUNDED" };
+        let conn = tx.acquire().await.map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to acquire conn: {}", e)) })?;
+        sqlx::query("UPDATE order_returns SET total = $2 WHERE id = $1")
+            .bind(return_id.unwrap())
+            .bind(Money::from_cents(refund_total_cents).inner())
+            .execute(&mut *conn).await
+            .map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to finalize return: {}", e)) })?;
+        let conn2 = tx.acquire().await.map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to acquire conn: {}", e)) })?;
+        sqlx::query("UPDATE orders SET status = $3 WHERE id = $1 AND tenant_id = $2")
+            .bind(original_order_id)
+            .bind(tenant_id)
+            .bind(new_status)
+            .execute(&mut *conn2).await
+            .map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to update order status: {}", e)) })?;
+    }
+
+    // 3) Build new order from SKUs
+    let new_items: Vec<NewOrderSkuItem> = req.new_items.iter().map(|i| NewOrderSkuItem { sku: i.sku.clone(), quantity: i.qty }).collect();
+    let new_req = NewOrderFromSku {
+        items: new_items,
+        discount_percent_bp: req.discount_percent_bp,
+        tax_rate_bps: None,
+        location_id: None,
+        pos_instance_id: None,
+        payment_method: req.payment.as_ref().map(|p| p.method.clone()).unwrap_or_else(|| "cash".to_string()),
+        payment: req.payment.clone(),
+        customer_id: detail.order.customer_id.map(|id| id.to_string()),
+        customer_name: detail.order.customer_name.clone(),
+        customer_email: detail.order.customer_email.clone(),
+        store_id: detail.order.store_id,
+        offline: Some(detail.order.offline),
+        idempotency_key: req.idempotency_key.clone(),
+    };
+    let created = create_order_from_skus(State(state.clone()), SecurityCtxExtractor(sec.clone()), auth, headers.clone(), Json(new_req)).await?;
+    let exchange_order = created.0;
+
+    // 4) Link the new order to the original via exchange_of_order_id
+    sqlx::query("UPDATE orders SET exchange_of_order_id = $3 WHERE id = $1 AND tenant_id = $2")
+        .bind(exchange_order.id)
+        .bind(tenant_id)
+        .bind(original_order_id)
+        .execute(&state.db)
+        .await
+        .map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to link exchange order: {}", e)) })?;
+
+    let new_total_cents = exchange_order.total.as_cents();
+    let net_delta_cents = new_total_cents.saturating_sub(refund_total_cents);
+    let net_direction = if net_delta_cents > 0 { "collect" } else if net_delta_cents < 0 { "refund" } else { "even" }.to_string();
+
+    tx.commit().await.map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Exchange transaction commit failed: {}", e)) })?;
+
+    Ok(Json(ExchangeResponse {
+        original_order_id,
+        exchange_order_id: exchange_order.id,
+        refund: return_id,
+        refunded_cents: refund_total_cents,
+        new_order_total_cents: new_total_cents,
+        net_delta_cents,
+        net_direction,
+    }))
 }
 
 #[derive(Deserialize)]

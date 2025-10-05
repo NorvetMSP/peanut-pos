@@ -5,6 +5,7 @@ import EcommerceTemplate from './pages/EcommerceTemplate';
 import CheckoutPage from './pages/CheckoutPage';
 import OrderHistoryPage from './pages/OrderHistoryPage';
 import CashierPage from './pages/CashierPage';
+import ExchangePage from './pages/ExchangePage';
 import { RequireAuth } from './AuthContext';
 
 function App() {
@@ -49,6 +50,14 @@ function App() {
           element={(
             <RequireAuth>
               <CashierPage />
+            </RequireAuth>
+          )}
+        />
+        <Route
+          path="/exchange"
+          element={(
+            <RequireAuth>
+              <ExchangePage />
             </RequireAuth>
           )}
         />

@@ -1,6 +1,31 @@
-# POS MVP Build Plan
+# POS MVP Build Plan (Updated)
 
 Focused objective: Deliver a cashier-facing flow (Scan / Add Item → View Cart + Totals → Take Payment → Persist Order → Emit Event → Receipt) in the smallest coherent vertical slice.
+
+Note: Implementation is consolidated into the existing order-service (Axum + SQLx). JWT auth is required; callers must send X-Tenant-ID, X-Roles, and Authorization: Bearer `<jwt>`.
+
+## MVP status at a glance (2025-10-05)
+
+- [x] Product lookup by SKU/barcode
+- [x] Cart operations (add/remove/qty)
+- [x] Tax calculation (flat rate per tax_code)
+- [x] Discount (cart-level %)
+- [x] Payment capture (mock card + cash) with change due
+- [x] Order persistence (orders, items, payments)
+- [x] Receipt generation (plaintext + JSON data)
+- [x] Event emission `pos.order` (feature-gated via `kafka`)
+- [x] RBAC enforcement (Cashier/Manager/Admin); E2E verified
+- [x] Z-report settlement by tender (`GET /reports/settlement`); admin page added; integration + E2E coverage
+
+Delivered early from “Should Have”:
+
+- [x] Partial refunds (per-item quantities) and returns listing
+- [x] Inventory decrement/enforcement via inventory-service
+- [x] Loyalty earn on order.completed (simple accrual)
+
+Still pending from “Should Have”:
+
+- [ ] CI running frontend E2Es in PRs (Playwright)
 
 ## 1. Functional Scope (MVP)
 
@@ -18,11 +43,25 @@ Must Have:
 
 Should Have (next sprint):
 
-- Returns / exchanges referencing original order
-- Inventory decrement + low-stock event stub
-- Loyalty points accrue (simple earn: e.g. 1 point per $1)
-- End-of-day settlement (Z-report by tender type)
-- Partial refunds
+- Returns / exchanges referencing original order (returns + partial refunds delivered; exchanges flow pending)
+- Inventory decrement + low-stock event stub (enforcement delivered; low-stock event pending)
+- Loyalty points accrue (delivered: simple earn on order.completed)
+- End-of-day settlement (Z-report by tender type) — delivered early
+- Partial refunds — delivered early
+
+Status update (2025-10-05):
+
+- Inventory enforcement is ON (compose has no bypass); order-service forwards Admin/Manager/Cashier roles to inventory-service for reservations.
+- Returns/refunds: POST /orders/refund implemented; GET /returns lists refunds. Partial refunds supported via per-item quantities.
+- Z-report: GET /reports/settlement?date=YYYY-MM-DD aggregates captured payments by method for the date; indexed for performance.
+- Exchanges: POST /orders/{id}/exchange orchestrates returns + replacement order; links via `orders.exchange_of_order_id`; integration tests added.
+- Low stock: inventory-service emits `inventory.low_stock` only when crossing from above threshold to at/below threshold (prevents spam while below).
+- Loyalty: upsert on order.completed is present in loyalty-service; simple earn path implemented.
+
+Frontend status (2025-10-05):
+
+- Admin Portal: SettlementReportPage available under `/reports/settlement` with manager/admin guard; totals formatted as currency; RBAC E2E tests passing; date filter E2E passing.
+- POS App: Cashier flow E2E (cash) passing; Card redirect and Card failure E2Es passing (error banner + retry UX); ExchangePage supports selecting items from original order and submitting exchange; E2Es for basic and selection flows passing.
 
 Deferred (intentionally not MVP):
 
@@ -91,32 +130,38 @@ Optional Future:
 - `inventory_ledger` table for stock movements
 - `returns` referencing original `order_id`
 
-## 3. Domain Modules (Rust Crates / Folders)
+## 3. Domain Modules (Current services)
 
-Service: `pos-service` (new) OR extend `order-service` (Recommendation: new `pos-service` for cashier UX separation, later consolidation possible).
+We extended `order-service` to serve the POS MVP:
 
-Modules:
+- Catalog lookups via `products` table
+- Tax precedence: POS override > Location override > Tenant default; product `tax_code` controls taxability
+- Discount: cart-level percent supported; proportional allocation in compute
+- Orders: create from SKUs (`/orders/sku`) and raw product IDs (`/orders`), idempotency supported
+- Payments: mock card and cash; change for cash; `payments` table records captured payments
+- Receipts: plaintext (`/orders/{id}/receipt`) based on computed cents
+- Events: `pos.order` and order lifecycle events (Kafka optional via feature flags)
 
-- `catalog`: product lookup, tax_code retrieval
-- `tax`: compute_tax(subtotal_cents, tax_code) -> tax_cents
-- `discount`: apply_cart_discount(subtotal, percent_basis_points) -> (discount_cents, discounted_subtotal)
-- `cart`: in-memory struct (frontend) – backend only validates at order creation
-- `orders`: create_order, persist_items, finalize_totals
-- `payments`: mock processor trait + implementations (CardMock, CashImmediate)
-- `receipts`: format_plaintext(order, items, payment) + json view
-- `events`: emit_pos_order(order_event) (feature gate `kafka` optional)
-
-## 4. API Endpoints
+## 4. API Endpoints (order-service)
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | /products?sku= | Lookup product by SKU/barcode |
-| POST | /orders | Create order + (optional inline payment) |
+| POST | /orders/compute | Compute totals for items, discount, tax precedence |
+| POST | /orders | Create order from product payload |
+| POST | /orders/sku | Create order from SKUs |
+| GET | /orders | List orders (filters, date range) |
 | GET | /orders/{id} | Fetch order detail |
-| POST | /orders/{id}/payments | Add payment (if not inline) |
-| GET | /orders/{id}/receipt | Get receipt text/json |
-| POST | /orders/{id}/void (manager) | Mark order void (future) |
-| POST | /orders/{id}/refund (manager) | Refund (future) |
+| GET | /orders/{id}/receipt | Get receipt text |
+| POST | /orders/{id}/void | Void an order (manager) |
+| POST | /orders/refund | Refund items from an order (manager) |
+| GET | /returns | List returns/refunds |
+| GET | /reports/settlement?date=YYYY-MM-DD | Z-report totals by payment method |
+
+Headers required:
+
+- `X-Tenant-ID: <uuid>`
+- `X-Roles: Admin|Manager|Cashier` (comma/space separated)
+- `Authorization: Bearer <jwt>` (tid claim required)
 
 POST /orders Request (MVP):
 
@@ -216,9 +261,11 @@ Thank you!
 
 ## 9. Security / Roles (Minimal)
 
-- JWT claim `role`: `cashier` or `manager`.
-- Only `manager` can void / refund (endpoints may return 403 for now if invoked pre-implementation).
-- No deep capability engine until after MVP adoption.
+- JWT must include `tid` (tenant id) and UUID `sub`.
+- Header `X-Tenant-ID` must match `tid`.
+- Roles header: `X-Roles` must include appropriate roles. Admin/Manager/Support can access admin/reporting endpoints; Cashier can create orders.
+- Only Manager/Admin can void/refund.
+- No deep capability engine until after MVP.
 
 ## 10. Offline Strategy (Design Stub)
 
@@ -240,6 +287,10 @@ Integration:
 - cash insufficient
 - card mismatch
 - discount rounding distribution
+UI/E2E:
+
+- Admin-portal RBAC for settlement report (cashier denied, manager allowed via UI)
+- POS cashier smoke (cash) and card redirect (window.open) with network mocks
 Event:
 
 - build with `kafka` feature and set capture env (if using existing harness style) → assert serialized payload shape.
@@ -269,17 +320,136 @@ Day 7: Buffer / hardening / minimal PWA UI stub (optional)
 - Create order with mock data returns correct totals & receipt
 - Payment captured (cash & card) reflected in DB
 - Event emitted (or safely skipped without feature)
-- All unit + integration tests pass in CI (< 2s for domain tests)
+- Settlement report returns expected aggregates by method for a given date
+- All unit + integration tests pass in CI
 - No external infra (Kafka, Redis) required for default build
 
 ## 15. Follow-Up Backlog Seeds
 
-- POS Returns (reference original order items, restock integration)
+- POS Returns: extend refund detail endpoint and exchange flow; restock via inventory-service on returns
 - Loyalty accrual + redemption (points ledger)
 - Promotion codes (stack rules) framework
 - Multi-tax jurisdiction (destination-based breakdown)
 - Real payment gateway adapter layer (Stripe/Adyen)
 - Offline replay queue service endpoint
 
+Related design doc:
+
+- Exchanges API RFC: `docs/rfcs/exchanges_api.md`
+
+### Windows/Dev Notes
+
+- Local testing: set `TEST_DATABASE_URL` for integration tests. Use PowerShell scripts under `scripts/` to seed and demo flows.
+
+```powershell
+# From repo root
+$env:TEST_DATABASE_URL = "postgres://postgres:postgres@localhost:5432/novapos_test"
+pushd services; cargo test -p order-service --no-default-features --features integration-tests --tests -- --test-threads=1; popd
+```
+
+- JWT: `scripts\mint-dev-jwt.js` can mint dev tokens; for tests where we inject a dev key, set `JWT_DEV_PUBLIC_KEY_PEM`.
+
+```powershell
+# Example: mint a token (requires Node.js)
+node .\scripts\mint-dev-jwt.js -t <tenant-uuid> -r Admin,Cashier -a novapos-admin -i https://auth.novapos.local
+```
+
+- Inventory: compose no longer sets `ORDER_BYPASS_INVENTORY`; service forwards `X-Roles: Admin,Manager,Cashier` to inventory-service.
+- SQLx offline: use `regenerate-sqlx-data.ps1` to refresh query metadata across crates.
+
+Optional: Frontend tests (run from each app folder):
+
+```powershell
+# Admin Portal unit tests (Vitest)
+pushd .\frontends\admin-portal; npm test --silent; popd
+
+# Admin Portal E2E (Playwright)
+pushd .\frontends\admin-portal; npx playwright install; npx playwright test --workers=1; popd
+
+# POS App E2E (Playwright)
+pushd .\frontends\pos-app; npx playwright install; npx playwright test --workers=1; popd
+```
+
+Prepared: 2025-10-02 | Updated: 2025-10-05
+
+## Summary of changes (this update)
+
+- Consolidated plan to reflect actual `order-service` implementation (Axum + SQLx) with JWT and tenant headers.
+- Added status update: inventory enforcement on; refunds/returns implemented; settlement (Z-report) endpoint live.
+- Replaced the old pos-service sketch with accurate endpoints and flows (compute, create by SKUs, refund, returns, settlement report).
+- Clarified security and roles (tid claim, X-Tenant-ID, X-Roles) and who can access admin/reporting endpoints.
+- Polished Windows developer steps with PowerShell commands for tests and JWT minting.
+
+Next documentation improvements (optional):
+
+- Add curl examples for compute, create (SKU), refund, and Z-report.
+- Link to runbook “Demo 3: inventory-on” section and scripts to create seed data.
+- Include a JSON example for a return record (`/returns`) and a sample receipt output for parity with tests.
+
 ---
 Prepared: 2025-10-02
+
+## Quick curl examples (PowerShell)
+
+Prereqs: replace placeholders for $tenant, $token, and service URL. On Windows PowerShell, use backtick ` for line continuation if desired; below are single-line commands for copy/paste.
+
+Compute totals:
+
+```powershell
+$tenant = "<tenant-uuid>"; $token = "<jwt>"; $body = '{"items":[{"sku":"SKU-ABC","quantity":2}],"discount_percent_bp":500,"tax_rate_bps":800}';
+curl -Method POST -Uri http://localhost:8080/orders/compute -Headers @{ 'Content-Type'='application/json'; 'X-Tenant-ID'=$tenant; 'X-Roles'='admin'; 'Authorization'="Bearer $token" } -Body $body
+```
+
+Create order by SKUs:
+
+```powershell
+$tenant = "<tenant-uuid>"; $token = "<jwt>"; $body = '{"items":[{"sku":"SKU-ABC","qty":2}],"discount_percent_bp":500,"payment":{"method":"cash","amount_cents":3250},"cashier_id":"<cashier-uuid>"}';
+curl -Method POST -Uri http://localhost:8080/orders/sku -Headers @{ 'Content-Type'='application/json'; 'X-Tenant-ID'=$tenant; 'X-Roles'='cashier'; 'Authorization'="Bearer $token" } -Body $body
+```
+
+Refund items from an order:
+
+```powershell
+$tenant = "<tenant-uuid>"; $token = "<jwt>"; $orderId = "<original-order-uuid>"; $body = '{"order_id":"'+$orderId+'","items":[{"product_id":"<product-uuid>","quantity":1}],"reason":"customer_return"}';
+curl -Method POST -Uri http://localhost:8080/orders/refund -Headers @{ 'Content-Type'='application/json'; 'X-Tenant-ID'=$tenant; 'X-Roles'='manager'; 'Authorization'="Bearer $token" } -Body $body
+```
+
+Settlement (Z-report) for a date:
+
+```powershell
+$tenant = "<tenant-uuid>"; $token = "<jwt>"; $date = (Get-Date).ToString('yyyy-MM-dd');
+curl -Method GET -Uri ("http://localhost:8080/reports/settlement?date="+$date) -Headers @{ 'X-Tenant-ID'=$tenant; 'X-Roles'='admin'; 'Authorization'="Bearer $token" }
+```
+
+Exchange (return + replacement order):
+
+```powershell
+$tenant = "<tenant-uuid>"; $token = "<jwt>"; $orig = "<original-order-uuid>";
+$body = '{"return_items":[{"product_id":"<product-uuid>","qty":1}],"new_items":[{"sku":"SKU-NEW","qty":1}],"payment":{"method":"cash","amount_cents":0}}';
+curl -Method POST -Uri ("http://localhost:8080/orders/"+$orig+"/exchange") -Headers @{ 'Content-Type'='application/json'; 'X-Tenant-ID'=$tenant; 'X-Roles'='manager'; 'Authorization'="Bearer $token" } -Body $body
+```
+
+Low stock behavior:
+
+- The inventory-service emits `inventory.low_stock` only when stock crosses from above threshold to at/below threshold; it won’t spam while remaining below.
+
+Create order from SKUs (cash):
+
+```powershell
+$tenant = "<tenant-uuid>"; $token = "<jwt>"; $body = '{"items":[{"sku":"SKU-ABC","quantity":1}],"payment_method":"cash","payment":{"method":"cash","amount_cents":1500}}';
+curl -Method POST -Uri http://localhost:8080/orders/sku -Headers @{ 'Content-Type'='application/json'; 'X-Tenant-ID'=$tenant; 'X-Roles'='cashier'; 'Authorization'="Bearer $token" } -Body $body
+```
+
+Refund items from an order (manager):
+
+```powershell
+$tenant = "<tenant-uuid>"; $token = "<jwt>"; $orderId = "<order-uuid>"; $body = '{"order_id":"'+$orderId+'","items":[{"product_id":"<product-uuid>","quantity":1}],"reason":"customer_return"}';
+curl -Method POST -Uri http://localhost:8080/orders/refund -Headers @{ 'Content-Type'='application/json'; 'X-Tenant-ID'=$tenant; 'X-Roles'='manager'; 'Authorization'="Bearer $token" } -Body $body
+```
+
+Z-report for a date:
+
+```powershell
+$tenant = "<tenant-uuid>"; $token = "<jwt>"; $date = (Get-Date).ToString('yyyy-MM-dd');
+curl -Method GET -Uri "http://localhost:8080/reports/settlement?date=$date" -Headers @{ 'X-Tenant-ID'=$tenant; 'X-Roles'='manager'; 'Authorization'="Bearer $token" }
+```

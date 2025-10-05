@@ -20,6 +20,7 @@ const AdminHome: React.FC = () => {
   const canManageCustomers = useHasAnyRole(MANAGER_ROLES);
   const canManageUsers = useHasAnyRole(ADMIN_ROLES);
   const canManageSettings = useHasAnyRole(SUPER_ADMIN_ROLES);
+  const canViewReports = useHasAnyRole(MANAGER_ROLES);
 
   React.useEffect(() => {
     if (!isLoggedIn && location.pathname !== "/login") {
@@ -94,6 +95,20 @@ const AdminHome: React.FC = () => {
               </div>
               <button className="admin-home-card-btn" type="button">
                 Go to Orders
+              </button>
+            </div>
+          )}
+          {canViewReports && (
+            <div
+              className="admin-home-card"
+              onClick={handleNavigate("/reports/settlement")}
+            >
+              <div className="admin-home-card-title">Reports</div>
+              <div className="admin-home-card-desc">
+                View daily settlement totals by payment method.
+              </div>
+              <button className="admin-home-card-btn" type="button">
+                Go to Reports
               </button>
             </div>
           )}

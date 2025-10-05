@@ -7,6 +7,7 @@ import UsersPage from "./pages/UsersPage";
 import SettingsPage from "./pages/SettingsPage";
 import OrdersPage from "./pages/OrdersPage";
 import ReturnsPage from "./pages/ReturnsPage";
+import SettlementReportPage from "./pages/SettlementReportPage";
 import CustomersPage from "./pages/CustomersPage";
 import AdminHome from "./pages/AdminHome";
 import { RequireAuth, RequireRoles } from "./AuthContext";
@@ -25,6 +26,7 @@ const PROTECTED_ROUTES: readonly ProtectedRoute[] = [
   { path: "/orders", component: OrdersPage, roles: MANAGER_ROLES },
   { path: "/customers", component: CustomersPage, roles: MANAGER_ROLES },
   { path: "/returns", component: ReturnsPage, roles: MANAGER_ROLES },
+  { path: "/reports/settlement", component: SettlementReportPage },
   { path: "/users", component: UsersPage, roles: ADMIN_ROLES },
   { path: "/settings", component: SettingsPage, roles: SUPER_ADMIN_ROLES },
 ] as const;
