@@ -323,7 +323,7 @@ pub async fn get_settlement_report(
     for r in rows {
         totals.push(SettlementByMethod {
             method: r.method,
-            count: r.count.unwrap_or(0) as i64,
+            count: r.count.unwrap_or(0),
             amount: r.amount.unwrap_or(BigDecimal::from(0)),
         });
     }
@@ -428,7 +428,7 @@ pub async fn exchange_order(
         }
         for it in &req.return_items {
             let row = by_product.get(&it.product_id).unwrap();
-            let line_cents = (row.unit_price_cents as i64).saturating_mul(it.qty as i64);
+            let line_cents = row.unit_price_cents.saturating_mul(it.qty as i64);
             refund_total_cents = refund_total_cents.saturating_add(line_cents);
             // update returned_quantity and insert return item row
             let conn = tx.acquire().await.map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to acquire conn: {}", e)) })?;

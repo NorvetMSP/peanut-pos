@@ -39,6 +39,11 @@ jobs:
       - name: Clippy (workspace strict)
         working-directory: services
         run: cargo clippy --workspace ${{ matrix.features }} --all-targets -- -D warnings
+      - name: Future incompat report (non-blocking)
+        if: always()
+        working-directory: services
+        run: |
+          cargo report future-incompatibilities --id 1 || true
       - name: Metrics smoke (gateway core metrics)
         working-directory: services
         run: |
