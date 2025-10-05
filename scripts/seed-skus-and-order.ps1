@@ -19,7 +19,7 @@ $ErrorActionPreference = 'Stop'
 if (-not $ProductServiceUrl) { $ProductServiceUrl = "http://localhost:8081" }
 if (-not $OrderServiceUrl) { $OrderServiceUrl = "http://localhost:8084" }
 if (-not $JwtIssuer) { $JwtIssuer = "https://auth.novapos.local" }
-if (-not $JwtAudience) { $JwtAudience = "novapos-admin" }
+if (-not $JwtAudience) { $JwtAudience = "novapos-frontend,novapos-admin,novapos-postgres" }
 if (-not $JwtPemPath) { $JwtPemPath = (Join-Path $PSScriptRoot "..\jwt-dev.pem") }
 if (-not $Kid) { $Kid = "local-dev" }
 if (-not $DiscountPercentBp) { $DiscountPercentBp = 1000 }
@@ -35,9 +35,10 @@ if (-not $Token) {
   if (-not (Test-Path $JwtPemPath)) { throw "PEM not found at $JwtPemPath" }
   $node = (Get-Command node -ErrorAction SilentlyContinue)
   if (-not $node) { throw "Node.js not found in PATH. Install Node or pass -Token manually." }
+  $UserId = [guid]::NewGuid().ToString()
   Push-Location (Join-Path $PSScriptRoot "..")
   try {
-    $Token = node .\scripts\mint-dev-jwt.js --tenant $TenantId --roles Admin,Cashier --iss $JwtIssuer --aud $JwtAudience --audMode single --kid $Kid
+    $Token = node .\scripts\mint-dev-jwt.js --tenant $TenantId --sub $UserId --roles Admin,Cashier --iss $JwtIssuer --aud $JwtAudience --audMode single --kid $Kid
   } finally { Pop-Location }
 }
 
@@ -82,6 +83,12 @@ $p1 = Set-ProductBySku -Sku 'SKU-SODA' -Name 'Soda Can' -Price 1.99 -TaxCode 'ST
 $p2 = Set-ProductBySku -Sku 'SKU-WATER' -Name 'Bottle Water' -Price 1.49 -TaxCode 'EXEMPT'
 Write-Host "Seeded: $($p1.id) SKU-SODA, $($p2.id) SKU-WATER"
 
+# Build a local SKU->ID map from seeded responses to avoid downstream re-fetch mismatches
+$skuToIdSeeded = @{
+  'SKU-SODA' = $p1.id
+  'SKU-WATER' = $p2.id
+}
+
 # Build compute/order payload
 $items = @(
   @{ sku = 'SKU-SODA'; quantity = 2 },
@@ -105,24 +112,19 @@ try {
   $body = $_.ErrorDetails.Message
   if ($body -and $body -like '*product_not_found*') {
     Write-Warning "SKU compute returned product_not_found. Falling back to product_id-based compute."
-    # Resolve SKUs to IDs
-    $skuToId = @{}
-    foreach ($it in $items) {
-      $findUrl = ("{0}/products?sku={1}" -f $ProductServiceUrl.TrimEnd('/'), [uri]::EscapeDataString($it.sku))
-      $resp = @()
-      try {
-        $r = Invoke-RestMethod -Method Get -Uri $findUrl -Headers @{ 'X-Tenant-ID'=$TenantId; 'X-Roles'='Admin'; 'Authorization'="Bearer $Token" }
-        if ($r -is [Array]) { $resp = $r } elseif ($r) { $resp = @($r) }
-      } catch { $resp = @() }
-      $match = @($resp | Where-Object { $_.sku -eq $it.sku })
-      if ($match.Count -gt 0) { $skuToId[$it.sku] = $match[0].id }
-    }
+    # Use IDs from the seeded responses to avoid any filtering inconsistencies
     $itemsById = @()
     foreach ($it in $items) {
-      if ($skuToId.ContainsKey($it.sku)) { $itemsById += @{ product_id = $skuToId[$it.sku]; quantity = $it.quantity } }
+      if ($skuToIdSeeded.ContainsKey($it.sku)) {
+        $obj = New-Object psobject
+        $obj | Add-Member -NotePropertyName 'product_id' -NotePropertyValue $skuToIdSeeded[$it.sku]
+        $obj | Add-Member -NotePropertyName 'quantity' -NotePropertyValue $it.quantity
+        $itemsById += $obj
+      }
     }
     if ($itemsById.Count -eq 0) { throw }
-    $computeBody2 = @{ items = $itemsById; discount_percent_bp = $DiscountPercentBp } | ConvertTo-Json -Depth 5
+  $computeBody2 = @{ items = $itemsById; discount_percent_bp = $DiscountPercentBp } | ConvertTo-Json -Depth 5
+  Write-Host ("Fallback compute with product_ids: {0}" -f (($itemsById | ForEach-Object { $_.'product_id' }) -join ',')) -ForegroundColor Gray
     try {
       $comp = Invoke-RestMethod -Method Post -Uri $computeUrl -Headers $headersCompute -Body $computeBody2
     } catch {
@@ -146,7 +148,7 @@ if ($CreateOrder) {
   $headersOrder = @{
     'Content-Type'   = 'application/json'
     'X-Tenant-ID'    = $TenantId
-    'X-Roles'        = 'admin,cashier'
+    'X-Roles'        = 'admin,manager,cashier'
     'Authorization'  = "Bearer $Token"
   }
   $payment = $null
@@ -165,23 +167,39 @@ if ($CreateOrder) {
     $body = $_.ErrorDetails.Message
     if ($body -and $body -like '*product_not_found*') {
       Write-Warning "Order /orders/sku returned product_not_found. Falling back to /orders with product_id items."
-      # Build items by id using the previously resolved or re-resolved IDs
-      $skuToId2 = @{}
-      foreach ($it in $items) {
-        $findUrl = ("{0}/products?sku={1}" -f $ProductServiceUrl.TrimEnd('/'), [uri]::EscapeDataString($it.sku))
-        $resp = @()
-        try {
-          $r = Invoke-RestMethod -Method Get -Uri $findUrl -Headers @{ 'X-Tenant-ID'=$TenantId; 'X-Roles'='Admin'; 'Authorization'="Bearer $Token" }
-          if ($r -is [Array]) { $resp = $r } elseif ($r) { $resp = @($r) }
-        } catch { $resp = @() }
-        $match = @($resp | Where-Object { $_.sku -eq $it.sku })
-        if ($match.Count -gt 0) { $skuToId2[$it.sku] = $match[0].id }
-      }
+      # Build items by id including unit_price and line_total using compute response (cents)
       $itemsId2 = @()
-      foreach ($it in $items) {
-        if ($skuToId2.ContainsKey($it.sku)) { $itemsId2 += @{ product_id = $skuToId2[$it.sku]; quantity = $it.quantity } }
+      $compItemsByPid = @{}
+      if ($comp -and $comp.items) {
+        foreach ($ci in $comp.items) { $compItemsByPid[$ci.product_id] = $ci }
       }
-      $orderBody2 = @{ items = $itemsId2; discount_percent_bp = $DiscountPercentBp; payment_method = $PaymentMethod; payment = $payment; tax_rate_bps = $HeaderTaxBps }
+      foreach ($it in $items) {
+        if ($skuToIdSeeded.ContainsKey($it.sku)) {
+          $pid2 = $skuToIdSeeded[$it.sku]
+          $ci = $compItemsByPid[$pid2]
+          $unitCents = if ($ci) { [int]$ci.unit_price_cents } else { 0 }
+          $lineCents = if ($ci) { [int]$ci.line_subtotal_cents } else { [int]$unitCents * [int]$it.quantity }
+          $obj2 = [pscustomobject]@{
+            product_id   = $pid2
+            product_name = $null
+            quantity     = [int]$it.quantity
+            unit_price   = [decimal]($unitCents / 100.0)
+            line_total   = [decimal]($lineCents / 100.0)
+          }
+          $itemsId2 += $obj2
+        }
+      }
+      # Total from compute to keep parity with tax/discount used in compute
+      $totalCents = if ($comp -and $comp.total_cents) { [int]$comp.total_cents } else { 0 }
+      $orderBody2 = @{
+        items = $itemsId2
+        payment_method = $PaymentMethod
+        payment = $payment
+        total = [decimal]($totalCents / 100.0)
+      }
+      # Add optional fields if present
+      $orderBody2.tax_rate_bps = $HeaderTaxBps
+  Write-Host ("Fallback order with product_ids: {0}" -f (($itemsId2 | ForEach-Object { $_.'product_id' }) -join ',')) -ForegroundColor Gray
       try {
         $order = Invoke-RestMethod -Method Post -Uri ("{0}/orders" -f $OrderServiceUrl.TrimEnd('/')) -Headers $headersOrder -Body ($orderBody2 | ConvertTo-Json -Depth 6)
       } catch {

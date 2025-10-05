@@ -49,6 +49,8 @@ const payload = {
   iss,
   iat: now,
   exp: now + expMins * 60,
+  // Support both legacy and new claim names for tenant id
+  tid: tenant,
   tenant_id: tenant,
   roles,
 };

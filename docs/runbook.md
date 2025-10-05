@@ -318,6 +318,30 @@ Useful docs:
 - Windows Kafka link errors: development/windows-kafka-build.md
 - Metrics not visible: bring up Prometheus/Grafana and confirm scrape targets; see security/prometheus-grafana-bootstrap.md
 
+### Demo 3: end-to-end with inventory on
+
+This demo seeds SKUs, computes totals, creates an order, reserves inventory, and prints a receipt. Inventory is enforced (no bypass). Requirements:
+
+- JWT must include tid and a UUID sub; audience should be a single string that matches service config.
+- Required headers for requests you issue: `Authorization: Bearer <token>`, `X-Tenant-ID: <uuid>`, and `X-Roles: admin,cashier`.
+- The order-service forwards roles `Admin,Manager,Cashier` to inventory-service for server-to-server authorization.
+
+How to run (PowerShell):
+
+- Use `scripts/run-payment-demo.ps1` to mint a dev JWT and run the cash demo end-to-end; or use `scripts/seed-skus-and-order.ps1` directly if you already have a token.
+- If `/orders/sku` returns `product_not_found`, the script automatically falls back to `/orders` using seeded product_ids and the cents returned by `/orders/compute` to ensure correct unit prices and totals.
+- The compute call also has a fallback path: if SKU-based compute fails due to DB misalignment, it retries using the seeded product_ids.
+
+Preflight DB alignment check:
+
+- The smoke check and demo scripts perform a quick alignment check using a minted JWT with proper roles to avoid SKU mismatches across services.
+- If misalignment is detected, re-run `./migrate-all.ps1` and reseed via the scripts.
+
+Common issues:
+
+- 403 from inventory: ensure your client `X-Roles` includes `manager` or use the helper scripts which set roles and the JWT properly; order-service will forward the required role set to inventory.
+- Totals are $0.00 on receipt: ensure the order creation path used the compute response cents for `unit_price_cents`, `line_total_cents`, and `total_cents`. The provided scripts do this automatically.
+
 ## Helpful Scripts
 
 - `./Makefile.ps1` — Start/Stop infra, build, test, run service, frontends

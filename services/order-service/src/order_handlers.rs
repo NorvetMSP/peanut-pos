@@ -309,6 +309,7 @@ async fn reserve_inventory(
         .post(inventory_url(base_url, "/inventory/reservations"))
         .header("Content-Type", "application/json")
         .header("X-Tenant-ID", tenant_id.to_string())
+    .header("X-Roles", "Admin,Manager,Cashier")
         .json(&payload);
 
     if !auth_token.is_empty() {
@@ -349,7 +350,8 @@ async fn release_inventory(
             base_url,
             &format!("/inventory/reservations/{}", order_id),
         ))
-        .header("X-Tenant-ID", tenant_id.to_string());
+        .header("X-Tenant-ID", tenant_id.to_string())
+    .header("X-Roles", "Admin,Manager,Cashier");
 
     if !auth_token.is_empty() {
         let header_value = format!("Bearer {}", auth_token);

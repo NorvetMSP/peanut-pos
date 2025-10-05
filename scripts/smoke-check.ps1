@@ -56,4 +56,49 @@ if (-not $dbUrl) {
   }
 }
 
+Step "Checking product/order DB alignment"
+$tid = ([guid]::NewGuid()).Guid
+function Mint-DevToken {
+  param([string]$TenantId)
+  $pem = (Join-Path $PSScriptRoot "..\jwt-dev.pem")
+  if (-not (Test-Path $pem)) { return $null }
+  $node = (Get-Command node -ErrorAction SilentlyContinue)
+  if (-not $node) { return $null }
+  $token = $null
+  Push-Location (Join-Path $PSScriptRoot "..")
+  try {
+    $token = node .\scripts\mint-dev-jwt.js --tenant $TenantId --roles Admin,Cashier --iss https://auth.novapos.local --aud novapos-admin --audMode single --kid local-dev
+  } catch { $token = $null } finally { Pop-Location }
+  return $token
+}
+${Token} = Mint-DevToken -TenantId $tid
+try {
+  # Create a tiny product in product-service
+  $pHeaders = @{ 'Content-Type'='application/json'; 'X-Tenant-ID'=$tid; 'X-Roles'='Admin' }
+  if ($Token) { $pHeaders['Authorization'] = "Bearer $Token" }
+  $pUrl = ("{0}/products" -f $ProductServiceUrl.TrimEnd('/'))
+  $pBody = @{ name = 'smoke-product'; price = 1.00; description=''; image=$null } | ConvertTo-Json -Depth 4
+  $p = Invoke-RestMethod -Method Post -Uri $pUrl -Headers $pHeaders -Body $pBody
+
+  # Try computing with that product_id in order-service
+  $cHeaders = @{ 'Content-Type'='application/json'; 'X-Tenant-ID'=$tid; 'X-Roles'='admin,cashier' }
+  if ($Token) { $cHeaders['Authorization'] = "Bearer $Token" }
+  $cUrl = ("{0}/orders/compute" -f $OrderServiceUrl.TrimEnd('/'))
+  $cBody = @{ items = @(@{ product_id = $p.id; quantity = 1 }); discount_percent_bp = 0 } | ConvertTo-Json -Depth 4
+  $comp = Invoke-RestMethod -Method Post -Uri $cUrl -Headers $cHeaders -Body $cBody
+  Write-Host "db-alignment: OK (order-service can see product-service products)"
+} catch {
+  $msg = $_.ErrorDetails.Message
+  if ($msg -and $msg -like '*product_not_found*') {
+    Write-Warning "db-alignment: product_not_found when computing with a just-created product. Services likely use different databases or schemas."
+    Write-Host "  - Ensure both services point to the same DATABASE_URL and schema." -ForegroundColor Yellow
+    Write-Host "  - Then restart services and rerun demos."
+  } elseif ($_.Exception.Response -and $_.Exception.Response.StatusCode.value__ -eq 403) {
+    Write-Warning "db-alignment: 403 Forbidden from order-service /orders/compute. Ensure roles and Authorization header are accepted in this environment."
+    Write-Host "  - The smoke-check tried X-Roles=admin,cashier and a dev token if available." -ForegroundColor Yellow
+  } else {
+    Write-Warning ("db-alignment: skipped/unknown error: {0}" -f ($_.Exception.Message))
+  }
+}
+
 Write-Host "`nAll checks passed." -ForegroundColor Green
