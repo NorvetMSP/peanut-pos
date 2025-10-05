@@ -291,17 +291,28 @@ foreach ($svc in $Services) {
         Write-Host "[prepare] no matching requested features for $svc; skipping feature flags"
       }
     }
-  cargo sqlx prepare -- @postArgs
-  if (-not (Test-Path .sqlx)) {
-    if ($classification -in @('runtime-only','no-sqlx','no-macro')) {
-      # Accept absence when no macro queries are expected
-      $_queryCountReport[$svc] = 0
-      Pop-Location | Out-Null
-      continue
-    } else {
-      throw "sqlx offline artifact not produced (missing .sqlx)"
+    # Run prepare allowing warning-only stderr without tripping Stop semantics; honor non-zero exit codes.
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+      $ErrorActionPreference = 'Continue'
+      & cargo sqlx prepare -- @postArgs
+    } finally {
+      $ErrorActionPreference = $previousErrorActionPreference
     }
-  }
+    $prepareExitCode = $LASTEXITCODE
+    if ($prepareExitCode -ne 0) {
+      throw "cargo sqlx prepare exited with code $prepareExitCode"
+    }
+    if (-not (Test-Path .sqlx)) {
+      if ($classification -in @('runtime-only','no-sqlx','no-macro')) {
+        # Accept absence when no macro queries are expected
+        $_queryCountReport[$svc] = 0
+        Pop-Location | Out-Null
+        continue
+      } else {
+        throw "sqlx offline artifact not produced (missing .sqlx)"
+      }
+    }
     try {
       $count = 0
       $files = Get-ChildItem .sqlx -Filter 'query-*.json' -ErrorAction SilentlyContinue
