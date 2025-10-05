@@ -170,28 +170,31 @@ async fn main() -> anyhow::Result<()> {
                         let mut to_flush = Vec::new();
                         std::mem::swap(&mut buffer, &mut to_flush);
                         for evt in to_flush.into_iter() {
-                            let res = sqlx::query!(r#"INSERT INTO audit_events (
+                            let res = sqlx::query(
+                                "INSERT INTO audit_events (
                                     event_id, event_version, tenant_id, actor_id, actor_name, actor_email,
                                     entity_type, entity_id, action, severity, source_service, occurred_at,
                                     trace_id, payload, meta
                                 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
-                                ON CONFLICT (event_id) DO NOTHING"#,
-                                    evt.event_id,
-                                    evt.event_version as i32,
-                                    evt.tenant_id,
-                                    evt.actor.id,
-                                    evt.actor.name,
-                                    evt.actor.email,
-                                    evt.entity_type,
-                                    evt.entity_id,
-                                    evt.action,
-                                    format!("{:?}", evt.severity),
-                                    evt.source_service,
-                                    evt.occurred_at,
-                                    evt.trace_id,
-                                    serde_json::to_value(&evt.payload).unwrap(),
-                                    serde_json::to_value(&evt.meta).unwrap()
-                                ).execute(&db_pool).await;
+                                ON CONFLICT (event_id) DO NOTHING"
+                            )
+                            .bind(evt.event_id)
+                            .bind(evt.event_version as i32)
+                            .bind(evt.tenant_id)
+                            .bind(evt.actor.id)
+                            .bind(evt.actor.name.clone())
+                            .bind(evt.actor.email.clone())
+                            .bind(evt.entity_type.clone())
+                            .bind(evt.entity_id.clone())
+                            .bind(evt.action.clone())
+                            .bind(format!("{:?}", evt.severity))
+                            .bind(evt.source_service.clone())
+                            .bind(evt.occurred_at)
+                            .bind(evt.trace_id)
+                            .bind(serde_json::to_value(&evt.payload).unwrap())
+                            .bind(serde_json::to_value(&evt.meta).unwrap())
+                            .execute(&db_pool)
+                            .await;
                             match res {
                                 Ok(_) => {
                                     ingested.fetch_add(1, Ordering::Relaxed);
@@ -231,7 +234,10 @@ async fn main() -> anyhow::Result<()> {
             let cutoff = chrono::Utc::now() - chrono::Duration::days(retention_days as i64);
             let start = chrono::Utc::now();
             // Count eligible
-            let count_res = sqlx::query_scalar!("SELECT count(*)::BIGINT as \"count!\" FROM audit_events WHERE occurred_at < $1", cutoff).fetch_one(&retention_db).await;
+            let count_res = sqlx::query_scalar::<_, i64>("SELECT count(*)::BIGINT FROM audit_events WHERE occurred_at < $1")
+                .bind(cutoff)
+                .fetch_one(&retention_db)
+                .await;
             match count_res {
                 Ok(candidate_count) => {
                     if retention_dry_run {
@@ -241,7 +247,10 @@ async fn main() -> anyhow::Result<()> {
                         continue;
                     }
                     if candidate_count > 0 {
-                        let del_res = sqlx::query!("DELETE FROM audit_events WHERE occurred_at < $1", cutoff).execute(&retention_db).await;
+                        let del_res = sqlx::query("DELETE FROM audit_events WHERE occurred_at < $1")
+                            .bind(cutoff)
+                            .execute(&retention_db)
+                            .await;
                         match del_res {
                             Ok(done) => {
                                 let deleted = done.rows_affected() as u64;

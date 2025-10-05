@@ -22,7 +22,7 @@ use common_security::context::SecurityContext;
 use common_security::roles::Role;
 use common_audit::AuditActor;
 use uuid::Uuid;
-use sqlx::{PgPool, Executor};
+use sqlx::{PgPool, Executor, Row};
 use common_crypto::MasterKey;
 use common_auth::{JwtVerifier, JwtConfig};
 use chrono::Utc;
@@ -107,10 +107,13 @@ async fn customer_encryption_round_trip() -> Result<(), ApiError> {
         .execute(&state.db).await.expect("insert customer");
 
     // Fetch raw row
-    let raw_row = sqlx::query!("SELECT id, name, email, phone FROM customers WHERE id = $1", customer_id)
+    let raw_row = sqlx::query("SELECT id, name, email, phone FROM customers WHERE id = $1")
+        .bind(customer_id)
         .fetch_one(&state.db).await.expect("fetch customer");
-    assert_eq!(raw_row.email.as_deref(), email_plain.as_deref());
-    assert_eq!(raw_row.phone.as_deref(), phone_plain.as_deref());
+    let email: Option<String> = raw_row.get("email");
+    let phone: Option<String> = raw_row.get("phone");
+    assert_eq!(email.as_deref(), email_plain.as_deref());
+    assert_eq!(phone.as_deref(), phone_plain.as_deref());
 
     // Simulate export (simplified) - just verify we can pull and shape JSON.
     let export = serde_json::json!({

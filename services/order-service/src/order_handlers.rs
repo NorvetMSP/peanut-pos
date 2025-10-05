@@ -299,15 +299,22 @@ pub async fn get_settlement_report(
     let date = chrono::NaiveDate::parse_from_str(&date_str, "%Y-%m-%d")
         .map_err(|_| ApiError::BadRequest { code: "invalid_date", trace_id: None, message: Some("Expected YYYY-MM-DD".into()) })?;
 
-    let rows = sqlx::query!(
+    #[derive(sqlx::FromRow)]
+    struct SettlementRow {
+        method: String,
+        count: Option<i64>,
+        amount: Option<BigDecimal>,
+    }
+
+    let rows = sqlx::query_as::<_, SettlementRow>(
         r#"SELECT method, COUNT(*) as count, COALESCE(SUM(amount)::NUMERIC, 0)::NUMERIC as amount
             FROM payments
             WHERE tenant_id = $1 AND status = 'captured' AND created_at::date = $2
             GROUP BY method
             ORDER BY method"#,
-        tenant_id,
-        date
     )
+    .bind(tenant_id)
+    .bind(date)
     .fetch_all(&state.db)
     .await
     .map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to query settlement: {}", e)) })?;
@@ -1002,12 +1009,27 @@ pub async fn create_order(
             // Emit pos.order event with computed tax/discount and SKU enrichment
             let product_ids: Vec<Uuid> = new_order.items.iter().map(|i| i.product_id).collect();
             let sku_map: std::collections::HashMap<Uuid, Option<String>> = if !product_ids.is_empty() {
-                match sqlx::query!("SELECT id, sku FROM products WHERE tenant_id = $1 AND id = ANY($2)", tenant_id, &product_ids)
-                    .fetch_all(&state.db).await {
-                    Ok(rows) => rows.into_iter().map(|r| (r.id, r.sku)).collect(),
-                    Err(e) => { tracing::warn!(?e, "Failed to fetch SKUs for pos.order event"); std::collections::HashMap::new() }
+                #[derive(sqlx::FromRow)]
+                struct ProductSkuRow {
+                    id: Uuid,
+                    sku: Option<String>,
                 }
-            } else { std::collections::HashMap::new() };
+                match sqlx::query_as::<_, ProductSkuRow>(
+                    "SELECT id, sku FROM products WHERE tenant_id = $1 AND id = ANY($2)",
+                )
+                .bind(tenant_id)
+                .bind(&product_ids)
+                .fetch_all(&state.db)
+                .await {
+                    Ok(rows) => rows.into_iter().map(|r| (r.id, r.sku)).collect(),
+                    Err(e) => {
+                        tracing::warn!(?e, "Failed to fetch SKUs for pos.order event");
+                        std::collections::HashMap::new()
+                    }
+                }
+            } else {
+                std::collections::HashMap::new()
+            };
             let pos_items: Vec<serde_json::Value> = new_order.items.iter().map(|i| {
                 let unit_cents = i.unit_price.as_cents();
                 let line_cents = i.line_total.as_cents();

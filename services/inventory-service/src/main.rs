@@ -378,28 +378,28 @@ async fn handle_order_completed(text: &str, db: &PgPool, producer: &FutureProduc
                     }
                 } else {
                     loop {
-                        match sqlx::query!(
-                            "UPDATE inventory SET quantity = quantity - $1 WHERE product_id = $2 AND tenant_id = $3 RETURNING quantity, threshold",
-                            quantity_delta,
-                            product_id,
-                            tenant_id
+                        match sqlx::query(
+                            "UPDATE inventory SET quantity = quantity - $1 WHERE product_id = $2 AND tenant_id = $3 RETURNING quantity, threshold"
                         )
+                        .bind(quantity_delta)
+                        .bind(product_id)
+                        .bind(tenant_id)
                         .fetch_optional(&mut *tx)
                         .await
                         {
                             Ok(Some(row)) => {
-                                latest = Some((row.quantity, row.threshold));
+                                latest = Some((row.get::<i32, _>("quantity"), row.get::<i32, _>("threshold")));
                                 break;
                             }
                             Ok(None) if attempts == 0 => {
                                 attempts += 1;
-                                if let Err(err) = sqlx::query!(
-                                    "INSERT INTO inventory (product_id, tenant_id, quantity, threshold) VALUES ($1, $2, $3, $4) ON CONFLICT (product_id, tenant_id) DO NOTHING",
-                                    product_id,
-                                    tenant_id,
-                                    0,
-                                    DEFAULT_THRESHOLD
+                                if let Err(err) = sqlx::query(
+                                    "INSERT INTO inventory (product_id, tenant_id, quantity, threshold) VALUES ($1, $2, $3, $4) ON CONFLICT (product_id, tenant_id) DO NOTHING"
                                 )
+                                .bind(product_id)
+                                .bind(tenant_id)
+                                .bind(0)
+                                .bind(DEFAULT_THRESHOLD)
                                 .execute(&mut *tx)
                                 .await
                                 {
@@ -434,12 +434,12 @@ async fn handle_order_completed(text: &str, db: &PgPool, producer: &FutureProduc
                     }
                 }
 
-                if let Err(err) = sqlx::query!(
-                    "DELETE FROM inventory_reservations WHERE order_id = $1 AND tenant_id = $2 AND product_id = $3",
-                    order_id,
-                    tenant_id,
-                    product_id
+                if let Err(err) = sqlx::query(
+                    "DELETE FROM inventory_reservations WHERE order_id = $1 AND tenant_id = $2 AND product_id = $3"
                 )
+                .bind(order_id)
+                .bind(tenant_id)
+                .bind(product_id)
                 .execute(&mut *tx)
                 .await
                 {
@@ -547,11 +547,17 @@ async fn handle_order_voided(text: &str, db: &PgPool) {
                 }
             };
 
-            let reservations = match sqlx::query!(
-                "DELETE FROM inventory_reservations WHERE order_id = $1 AND tenant_id = $2 RETURNING product_id, quantity",
-                order_id,
-                tenant_id
+            #[derive(sqlx::FromRow)]
+            struct ReservationRow {
+                product_id: Uuid,
+                quantity: i32,
+            }
+
+            let reservations: Vec<ReservationRow> = match sqlx::query_as::<_, ReservationRow>(
+                "DELETE FROM inventory_reservations WHERE order_id = $1 AND tenant_id = $2 RETURNING product_id, quantity"
             )
+            .bind(order_id)
+            .bind(tenant_id)
             .fetch_all(&mut *tx)
             .await
             {
@@ -570,25 +576,25 @@ async fn handle_order_voided(text: &str, db: &PgPool) {
 
                 let mut attempts = 0;
                 loop {
-                    match sqlx::query!(
-                        "UPDATE inventory SET quantity = quantity + $1 WHERE product_id = $2 AND tenant_id = $3 RETURNING quantity",
-                        row.quantity,
-                        row.product_id,
-                        tenant_id
+                    match sqlx::query(
+                        "UPDATE inventory SET quantity = quantity + $1 WHERE product_id = $2 AND tenant_id = $3 RETURNING quantity"
                     )
+                    .bind(row.quantity)
+                    .bind(row.product_id)
+                    .bind(tenant_id)
                     .fetch_optional(&mut *tx)
                     .await
                     {
                         Ok(Some(_)) => break,
                         Ok(None) if attempts == 0 => {
                             attempts += 1;
-                            if let Err(err) = sqlx::query!(
-                                "INSERT INTO inventory (product_id, tenant_id, quantity, threshold) VALUES ($1, $2, $3, $4) ON CONFLICT (product_id, tenant_id) DO NOTHING",
-                                row.product_id,
-                                tenant_id,
-                                row.quantity,
-                                DEFAULT_THRESHOLD
+                            if let Err(err) = sqlx::query(
+                                "INSERT INTO inventory (product_id, tenant_id, quantity, threshold) VALUES ($1, $2, $3, $4) ON CONFLICT (product_id, tenant_id) DO NOTHING"
                             )
+                            .bind(row.product_id)
+                            .bind(tenant_id)
+                            .bind(row.quantity)
+                            .bind(DEFAULT_THRESHOLD)
                             .execute(&mut *tx)
                             .await
                             {
@@ -640,13 +646,13 @@ async fn handle_product_created(text: &str, db: &PgPool) {
         Ok(event) => {
             let initial_quantity = event.initial_quantity.unwrap_or(0);
             let threshold = event.threshold.unwrap_or(DEFAULT_THRESHOLD);
-            if let Err(err) = sqlx::query!(
-                "INSERT INTO inventory (product_id, tenant_id, quantity, threshold) VALUES ($1, $2, $3, $4) ON CONFLICT (product_id, tenant_id) DO NOTHING",
-                event.product_id,
-                event.tenant_id,
-                initial_quantity,
-                threshold
+            if let Err(err) = sqlx::query(
+                "INSERT INTO inventory (product_id, tenant_id, quantity, threshold) VALUES ($1, $2, $3, $4) ON CONFLICT (product_id, tenant_id) DO NOTHING"
             )
+            .bind(event.product_id)
+            .bind(event.tenant_id)
+            .bind(initial_quantity)
+            .bind(threshold)
             .execute(db)
             .await
             {

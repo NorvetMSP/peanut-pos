@@ -29,14 +29,14 @@ pub async fn get_points(
         .and_then(|s| Uuid::parse_str(s).ok())
         .ok_or(ApiError::BadRequest { code: "missing_customer_id", trace_id: sec.trace_id, message: Some("customer_id required".into()) })?;
 
-    let rec = sqlx::query!(
-        r#"SELECT points FROM loyalty_points WHERE customer_id = $1 AND tenant_id = $2"#,
-        cust_id,
-        tenant_id
+    let points: i64 = sqlx::query_scalar(
+        "SELECT points FROM loyalty_points WHERE customer_id = $1 AND tenant_id = $2",
     )
+    .bind(cust_id)
+    .bind(tenant_id)
     .fetch_one(&state.db)
     .await
     .map_err(|e| ApiError::Internal { trace_id: sec.trace_id, message: Some(format!("DB error: {e}")) })?;
 
-    Ok(rec.points.to_string())
+    Ok(points.to_string())
 }
