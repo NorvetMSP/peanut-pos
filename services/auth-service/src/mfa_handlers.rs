@@ -66,11 +66,11 @@ pub async fn begin_mfa_enrollment(
     let account_label = format!("{} ({tenant_id})", current.email);
     let otpauth_url = build_otpauth_uri(&state.config.mfa_issuer, &account_label, &secret);
 
-    sqlx::query!(
-        r#"UPDATE users SET mfa_pending_secret = $1, mfa_enrolled_at = NULL WHERE id = $2"#,
-        secret,
-        user_id
+    sqlx::query(
+        "UPDATE users SET mfa_pending_secret = $1, mfa_enrolled_at = NULL WHERE id = $2",
     )
+    .bind(&secret)
+    .bind(user_id)
     .execute(&state.db)
     .await
         .map_err(|err| {

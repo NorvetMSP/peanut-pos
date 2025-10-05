@@ -49,15 +49,18 @@ async fn handle_completed_event(evt: &CompletedEvent, customer_id: Uuid, pool: &
     // Minimal upsert logic: grant points proportional to total (1 point per whole currency unit)
     let points = evt.total.floor() as i32;
     if points <= 0 { return; }
-    if let Err(err) = sqlx::query!(
-        r#"INSERT INTO loyalty_points (customer_id, tenant_id, points)
+    if let Err(err) = sqlx::query(
+        "INSERT INTO loyalty_points (customer_id, tenant_id, points)
             VALUES ($1,$2,$3)
             ON CONFLICT (customer_id, tenant_id)
-            DO UPDATE SET points = loyalty_points.points + EXCLUDED.points"#,
-        customer_id,
-        evt.tenant_id,
-        points
-    ).execute(pool).await {
+            DO UPDATE SET points = loyalty_points.points + EXCLUDED.points",
+    )
+    .bind(customer_id)
+    .bind(evt.tenant_id)
+    .bind(points)
+    .execute(pool)
+    .await
+    {
         tracing::warn!(error=%err, "Failed to upsert loyalty points");
         return;
     }
@@ -230,15 +233,15 @@ mod tests {
         };
         handle_completed_event(&evt, customer_id, &pool, &producer).await;
 
-        let rec = sqlx::query!(
-            r#"SELECT points FROM loyalty_points WHERE customer_id = $1 AND tenant_id = $2"#,
-            customer_id,
-            tenant_id
+        let points: i64 = sqlx::query_scalar(
+            "SELECT points FROM loyalty_points WHERE customer_id = $1 AND tenant_id = $2",
         )
+        .bind(customer_id)
+        .bind(tenant_id)
         .fetch_one(&pool)
         .await
         .expect("fetch points");
-        assert!(rec.points > 0, "points should have been incremented");
+        assert!(points > 0, "points should have been incremented");
     }
 }
 

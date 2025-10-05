@@ -497,27 +497,11 @@ pub(crate) async fn update_customer_impl(
     let tenant_id = sec.tenant_id;
     let mut key_cache = TenantKeyCache::new(&state, tenant_id);
 
-    let existing = sqlx::query!(
-        r#"
-        SELECT
-            id,
-            tenant_id,
-            name,
-            email,
-            phone,
-            email_encrypted,
-            phone_encrypted,
-            email_hash,
-            phone_hash,
-            pii_key_version,
-            pii_encrypted_at,
-            created_at
-        FROM customers
-        WHERE tenant_id = $1 AND id = $2
-        "#,
-        tenant_id,
-        customer_id
+    let existing = sqlx::query_as::<_, CustomerRow>(
+        "SELECT id, tenant_id, name, email, phone, email_encrypted, phone_encrypted, pii_key_version, created_at FROM customers WHERE tenant_id = $1 AND id = $2",
     )
+    .bind(tenant_id)
+    .bind(customer_id)
     .fetch_optional(&state.db)
     .await
     .map_err(db_internal)?
@@ -643,10 +627,8 @@ pub(crate) async fn update_customer_impl(
         (None, None, None, None, None, None)
     };
 
-    let row = sqlx::query_as!(
-        CustomerRow,
-        r#"
-        UPDATE customers
+    let row = sqlx::query_as::<_, CustomerRow>(
+        "UPDATE customers
         SET name = $1,
             email = NULL,
             phone = NULL,
@@ -657,27 +639,17 @@ pub(crate) async fn update_customer_impl(
             pii_key_version = $6,
             pii_encrypted_at = $7
         WHERE tenant_id = $8 AND id = $9
-        RETURNING
-            id,
-            tenant_id,
-            name,
-            email,
-            phone,
-            email_encrypted,
-            phone_encrypted,
-            pii_key_version,
-            created_at
-        "#,
-        final_name,
-        email_encrypted_param.as_deref(),
-        phone_encrypted_param.as_deref(),
-        email_hash_param.as_deref(),
-        phone_hash_param.as_deref(),
-        pii_key_version_param,
-        pii_encrypted_at_param,
-        tenant_id,
-        customer_id
+        RETURNING id, tenant_id, name, email, phone, email_encrypted, phone_encrypted, pii_key_version, created_at",
     )
+    .bind(&final_name)
+    .bind(email_encrypted_param.as_ref().map(|v| v.as_slice()))
+    .bind(phone_encrypted_param.as_ref().map(|v| v.as_slice()))
+    .bind(email_hash_param.as_ref().map(|v| v.as_slice()))
+    .bind(phone_hash_param.as_ref().map(|v| v.as_slice()))
+    .bind(pii_key_version_param)
+    .bind(pii_encrypted_at_param)
+    .bind(tenant_id)
+    .bind(customer_id)
     .fetch_optional(&state.db)
     .await
     .map_err(db_internal)?
@@ -1079,7 +1051,7 @@ mod tests {
     use common_security::SecurityContext;
     use common_crypto::{generate_dek, MasterKey};
     // serde_json::json no longer needed in this test module after refactor
-    use sqlx::{migrate::MigrateError, PgPool};
+    use sqlx::{migrate::MigrateError, PgPool, Row};
     use std::{io, sync::Arc};
     use uuid::Uuid;
 
@@ -1124,14 +1096,14 @@ mod tests {
         let dek = generate_dek();
         let encrypted_key = master_key.encrypt_tenant_dek(&dek)?;
 
-        sqlx::query!(
+        sqlx::query(
             "INSERT INTO tenant_data_keys (id, tenant_id, key_version, encrypted_key, active)
              VALUES ($1, $2, $3, $4, TRUE)",
-            Uuid::new_v4(),
-            tenant_id,
-            1i32,
-            encrypted_key
         )
+        .bind(Uuid::new_v4())
+        .bind(tenant_id)
+        .bind(1i32)
+        .bind(&encrypted_key)
         .execute(&pool)
         .await?;
 
@@ -1188,30 +1160,33 @@ mod tests {
         assert_eq!(updated.email.as_deref(), Some("alice.cooper@example.com"));
         assert!(updated.phone.is_none());
 
-        let row = sqlx::query!(
-            "SELECT email_encrypted, phone_encrypted, email_hash, phone_hash, pii_key_version
-             FROM customers
-             WHERE id = $1",
-            customer_id
+        let row = sqlx::query(
+            "SELECT email_encrypted, phone_encrypted, email_hash, phone_hash, pii_key_version FROM customers WHERE id = $1"
         )
+        .bind(customer_id)
         .fetch_one(&pool)
         .await?;
 
-        assert!(row.email_encrypted.is_some());
-        assert!(row.email_hash.is_some());
-        assert!(row.phone_encrypted.is_none());
-        assert!(row.phone_hash.is_none());
-        assert_eq!(row.pii_key_version, Some(1));
+        let email_encrypted: Option<Vec<u8>> = row.get("email_encrypted");
+        let email_hash: Option<Vec<u8>> = row.get("email_hash");
+        let phone_encrypted: Option<Vec<u8>> = row.get("phone_encrypted");
+        let phone_hash: Option<Vec<u8>> = row.get("phone_hash");
+        let pii_key_version: Option<i32> = row.get("pii_key_version");
 
-        sqlx::query!("DELETE FROM customers WHERE id = $1", customer_id)
+        assert!(email_encrypted.is_some());
+        assert!(email_hash.is_some());
+        assert!(phone_encrypted.is_none());
+        assert!(phone_hash.is_none());
+        assert_eq!(pii_key_version, Some(1));
+
+        sqlx::query("DELETE FROM customers WHERE id = $1")
+            .bind(customer_id)
             .execute(&pool)
             .await?;
-        sqlx::query!(
-            "DELETE FROM tenant_data_keys WHERE tenant_id = $1",
-            tenant_id
-        )
-        .execute(&pool)
-        .await?;
+        sqlx::query("DELETE FROM tenant_data_keys WHERE tenant_id = $1")
+            .bind(tenant_id)
+            .execute(&pool)
+            .await?;
 
         Ok(())
     }

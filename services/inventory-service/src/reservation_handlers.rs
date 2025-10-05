@@ -4,7 +4,7 @@ use axum::{ Json };
 use common_security::{SecurityCtxExtractor, Capability, ensure_capability};
 use common_http_errors::ApiError;
 use serde::{Deserialize, Serialize};
-use sqlx::{query, query_as, Row}; // dynamic + typed queries
+use sqlx::{query, query_as, query_scalar, Row}; // dynamic + typed queries
 use std::collections::HashMap;
 use uuid::Uuid;
 
@@ -69,10 +69,10 @@ pub async fn create_reservation(
     .await
     .map_err(|err| ApiError::internal(err, None))?;
 
-    let existing = sqlx::query_scalar!(
+    let existing = query_scalar::<_, i64>(
         "SELECT 1 FROM inventory_reservations WHERE order_id = $1",
-        payload.order_id
     )
+    .bind(payload.order_id)
     .fetch_optional(&mut *tx)
     .await
     .map_err(|err| ApiError::internal(err, None))?;
@@ -139,37 +139,36 @@ pub async fn create_reservation(
             });
         } else {
             // Legacy single-inventory path
-            let inventory_row = sqlx::query!(
+            let inventory_row = query(
                 "SELECT quantity FROM inventory WHERE tenant_id = $1 AND product_id = $2 FOR UPDATE",
-                tenant_id,
-                product_id
             )
+            .bind(tenant_id)
+            .bind(product_id)
             .fetch_optional(&mut *tx)
             .await
             .map_err(|err| ApiError::internal(err, None))?;
-            let current_quantity = inventory_row.map(|row| row.quantity).unwrap_or(0);
-            let reserved_total: i64 = {
-                let sum_opt = sqlx::query_scalar!(
-                    "SELECT COALESCE(SUM(quantity), 0) FROM inventory_reservations WHERE tenant_id = $1 AND product_id = $2",
-                    tenant_id,
-                    product_id
-                )
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(|err| ApiError::internal(err, None))?;
-                sum_opt.flatten().unwrap_or(0)
-            };
+            let current_quantity = inventory_row
+                .map(|row| row.get::<i32, _>("quantity"))
+                .unwrap_or(0);
+            let reserved_total: i64 = query_scalar::<_, i64>(
+                "SELECT COALESCE(SUM(quantity), 0) FROM inventory_reservations WHERE tenant_id = $1 AND product_id = $2",
+            )
+            .bind(tenant_id)
+            .bind(product_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|err| ApiError::internal(err, None))?;
             let available = current_quantity - reserved_total as i32;
             if *quantity > available {
                 return Err(ApiError::BadRequest { code: "insufficient_stock", trace_id: None, message: Some(format!("Insufficient stock for product {} (requested {}, available {})", product_id, quantity, available)) });
             }
-            sqlx::query!(
+            query(
                 "INSERT INTO inventory_reservations (order_id, tenant_id, product_id, quantity) VALUES ($1, $2, $3, $4)",
-                payload.order_id,
-                tenant_id,
-                product_id,
-                quantity
             )
+            .bind(payload.order_id)
+            .bind(tenant_id)
+            .bind(product_id)
+            .bind(quantity)
             .execute(&mut *tx)
             .await
             .map_err(|err| ApiError::internal(err, None))?;
@@ -243,12 +242,11 @@ pub async fn release_reservation(
             })
             .collect::<Vec<_>>()
     } else {
-        let legacy = query_as!(
-            LegacyReservationRow,
+        let legacy = query_as::<_, LegacyReservationRow>(
             "DELETE FROM inventory_reservations WHERE order_id = $1 AND tenant_id = $2 RETURNING product_id, quantity",
-            order_id,
-            tenant_id
         )
+        .bind(order_id)
+        .bind(tenant_id)
         .fetch_all(&mut *tx)
     .await
     .map_err(|err| ApiError::internal(err, None))?;
@@ -262,25 +260,25 @@ pub async fn release_reservation(
 
         let mut attempts = 0;
         loop {
-            match sqlx::query!(
-                "UPDATE inventory SET quantity = quantity + $1 WHERE product_id = $2 AND tenant_id = $3 RETURNING quantity",
-                item.quantity,
-                item.product_id,
-                tenant_id
+            match query(
+                "UPDATE inventory SET quantity = quantity + $1 WHERE product_id = $2 AND tenant_id = $3 RETURNING quantity"
             )
+            .bind(item.quantity)
+            .bind(item.product_id)
+            .bind(tenant_id)
             .fetch_optional(&mut *tx)
             .await
             {
                 Ok(Some(_)) => break,
                 Ok(None) if attempts == 0 => {
                     attempts += 1;
-                    sqlx::query!(
-                        "INSERT INTO inventory (product_id, tenant_id, quantity, threshold) VALUES ($1, $2, $3, $4) ON CONFLICT (product_id, tenant_id) DO NOTHING",
-                        item.product_id,
-                        tenant_id,
-                        item.quantity,
-                        DEFAULT_THRESHOLD
+                    query(
+                        "INSERT INTO inventory (product_id, tenant_id, quantity, threshold) VALUES ($1, $2, $3, $4) ON CONFLICT(product_id, tenant_id) DO NOTHING"
                     )
+                    .bind(item.product_id)
+                    .bind(tenant_id)
+                    .bind(item.quantity)
+                    .bind(DEFAULT_THRESHOLD)
                     .execute(&mut *tx)
                     .await
                     .map_err(|err| ApiError::internal(err, None))?;

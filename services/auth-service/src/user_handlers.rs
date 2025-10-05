@@ -706,10 +706,10 @@ pub async fn login_user(
             return Err(AuthError::account_locked(Some(locked_until)));
         }
 
-        if let Err(err) = sqlx::query!(
-            r#"UPDATE users SET failed_attempts = 0, mfa_failed_attempts = 0, locked_until = NULL WHERE id = $1"#,
-            auth_data.id
+        if let Err(err) = sqlx::query(
+            "UPDATE users SET failed_attempts = 0, mfa_failed_attempts = 0, locked_until = NULL WHERE id = $1",
         )
+        .bind(auth_data.id)
         .execute(&state.db)
         .await
         {
@@ -733,11 +733,11 @@ pub async fn login_user(
             if auth_data.password_hash == password {
                 match hash_password(&password) {
                     Ok(new_hash) => {
-                        if let Err(err) = sqlx::query!(
-                            r#"UPDATE users SET password_hash = $1 WHERE id = $2"#,
-                            new_hash,
-                            auth_data.id
+                        if let Err(err) = sqlx::query(
+                            "UPDATE users SET password_hash = $1 WHERE id = $2",
                         )
+                        .bind(&new_hash)
+                        .bind(auth_data.id)
                         .execute(&state.db)
                         .await
                         {
@@ -777,12 +777,12 @@ pub async fn login_user(
             None
         };
 
-        if let Err(err) = sqlx::query!(
-            r#"UPDATE users SET failed_attempts = $1, locked_until = $2 WHERE id = $3"#,
-            new_attempts,
-            lock_until,
-            auth_data.id
+        if let Err(err) = sqlx::query(
+            "UPDATE users SET failed_attempts = $1, locked_until = $2 WHERE id = $3",
         )
+        .bind(new_attempts)
+        .bind(lock_until)
+        .bind(auth_data.id)
         .execute(&state.db)
         .await
         {
@@ -801,10 +801,10 @@ pub async fn login_user(
     }
 
     if auth_data.failed_attempts != 0 || auth_data.locked_until.is_some() {
-        if let Err(err) = sqlx::query!(
-            r#"UPDATE users SET failed_attempts = 0, locked_until = NULL WHERE id = $1"#,
-            auth_data.id
+        if let Err(err) = sqlx::query(
+            "UPDATE users SET failed_attempts = 0, locked_until = NULL WHERE id = $1",
         )
+        .bind(auth_data.id)
         .execute(&state.db)
         .await
         {
