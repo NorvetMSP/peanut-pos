@@ -7,8 +7,14 @@ test('POS exchange basic net-collect flow', async ({ page }) => {
   const originalOrderId = '11111111-1111-4111-8111-111111111111';
   const tenantId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 
+  // Seed localStorage session so RequireAuth passes before any page script runs
+  const session = { token: 'dev-token', user: { tenant_id: tenantId, roles: ['cashier'] }, timestamp: Date.now() };
+  await page.addInitScript((data: unknown) => {
+    try { localStorage.setItem('session', JSON.stringify(data)); } catch {}
+  }, session);
+
   // Seed session
-  await page.route('**/session', async route => {
+  await page.route('**/session', async (route: any) => {
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -17,12 +23,12 @@ test('POS exchange basic net-collect flow', async ({ page }) => {
   });
 
   // Minimal /login HTML to avoid navigation
-  await page.route('**/login', async route => {
+  await page.route('**/login', async (route: any) => {
     await route.fulfill({ status: 200, contentType: 'text/html', body: '<html></html>' });
   });
 
   // Mock exchange endpoint
-  await page.route('**/orders/*/exchange', async route => {
+  await page.route('**/orders/*/exchange', async (route: any) => {
     const body = await route.request().postDataJSON();
     expect(body.return_items?.length).toBeGreaterThan(0);
     expect(body.new_items?.length).toBeGreaterThan(0);

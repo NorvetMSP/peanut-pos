@@ -19,13 +19,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
-          override: true
           components: clippy
       - name: Cache cargo
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
@@ -33,12 +31,16 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
       - name: Build workspace (locked)
+        working-directory: services
         run: cargo build --workspace ${{ matrix.features }} --all-targets --locked
       - name: Run tests (locked)
+        working-directory: services
         run: cargo test --workspace ${{ matrix.features }} --all-targets --locked --no-fail-fast
       - name: Clippy (workspace strict)
+        working-directory: services
         run: cargo clippy --workspace ${{ matrix.features }} --all-targets -- -D warnings
       - name: Metrics smoke (gateway core metrics)
+        working-directory: services
         run: |
           OUT=$(cargo run -p integration-gateway --bin metrics_smoke ${{ matrix.features }})
           echo "$OUT" | head -n 200

@@ -354,7 +354,7 @@ pushd services; cargo test -p order-service --no-default-features --features int
 node .\scripts\mint-dev-jwt.js -t <tenant-uuid> -r Admin,Cashier -a novapos-admin -i https://auth.novapos.local
 ```
 
-- Inventory: compose no longer sets `ORDER_BYPASS_INVENTORY`; service forwards `X-Roles: Admin,Manager,Cashier` to inventory-service.
+- Inventory:  compose no longer sets `ORDER_BYPASS_INVENTORY`; service forwards `X-Roles: Admin,Manager,Cashier` to inventory-service.
 - SQLx offline: use `regenerate-sqlx-data.ps1` to refresh query metadata across crates.
 
 Optional: Frontend tests (run from each app folder):
