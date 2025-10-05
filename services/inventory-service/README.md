@@ -9,7 +9,6 @@ Low stock events
 - This prevents repeated alerts while the item remains below threshold; alerts resume after stock is replenished above threshold and later crosses again.
 - Threshold source: `inventory.threshold` (legacy) or `inventory_items.threshold` (multi-location; we use MIN across locations when aggregating).
 
-
 ## Integration Tests & sqlx
 
 We intentionally avoid using `sqlx::query!` / `query_as!` macros inside long‑running or containerized integration tests (see `tests/`). CI sets `SQLX_OFFLINE=true` to speed builds and prevent network access during compilation. The compile‑time macros require a prepared offline cache (`sqlx-data.json`) covering every query shape. Maintaining that cache for ephemeral test setup SQL (INSERT seed rows, ad‑hoc SELECT aggregates) caused friction and frequent CI breaks.
@@ -44,3 +43,18 @@ Environment variables of interest:
 - `RESERVATION_DEFAULT_TTL_SECS` / `RESERVATION_EXPIRY_SWEEP_SECS`
 - `INVENTORY_DUAL_WRITE` – dual-write validation logging
 
+## Windows tips: SQLx offline metadata
+
+Regenerate SQLx offline metadata and reapply migrations using the script at the repo root. From PowerShell:
+
+```powershell
+# From the repository root
+Set-Location -Path 'C:\Projects\novapos'
+./regenerate-sqlx-data.ps1 -AutoResetOnChecksum
+
+# Or from the services folder reference the parent path
+Set-Location -Path 'C:\Projects\novapos\services'
+..\regenerate-sqlx-data.ps1 -AutoResetOnChecksum
+```
+
+You can also run the VS Code task “sqlx: regenerate offline metadata”, which executes the same script with the correct working directory.

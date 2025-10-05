@@ -25,7 +25,9 @@ use tokio::net::TcpListener;
 use tokio::time::{interval, MissedTickBehavior};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tracing::{debug, info, warn};
-use inventory_service::{DEFAULT_THRESHOLD, crossed_below_threshold}; // import shared constant and helper
+use inventory_service::DEFAULT_THRESHOLD; // import shared constant
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))]
+use inventory_service::crossed_below_threshold; // helper used only in kafka paths
 use uuid::Uuid;
 
 mod inventory_handlers;
