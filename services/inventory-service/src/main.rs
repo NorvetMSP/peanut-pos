@@ -25,7 +25,7 @@ use tokio::net::TcpListener;
 use tokio::time::{interval, MissedTickBehavior};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tracing::{debug, info, warn};
-use inventory_service::DEFAULT_THRESHOLD; // import shared constant
+use inventory_service::{DEFAULT_THRESHOLD, crossed_below_threshold}; // import shared constant and helper
 use uuid::Uuid;
 
 mod inventory_handlers;
@@ -372,7 +372,7 @@ async fn handle_order_completed(text: &str, db: &PgPool, producer: &FutureProduc
                     }
                     // After computing latest, determine if we crossed the threshold
                     if let (Some((prev_q, thr)), Some((new_q, _))) = (prev, latest) {
-                        if crate::crossed_below_threshold(prev_q, new_q, thr) {
+                        if crossed_below_threshold(prev_q, new_q, thr) {
                             alerts.push((product_id, new_q, thr));
                         }
                     }
@@ -456,7 +456,7 @@ async fn handle_order_completed(text: &str, db: &PgPool, producer: &FutureProduc
                     // In single-inventory path we don't have a pre-read; simulate prev as (quantity + delta)
                     // to detect a crossing event and avoid repeat alerts when already below.
                     let prev_q = quantity + quantity_delta;
-                    if crate::crossed_below_threshold(prev_q, quantity, threshold) {
+                    if crossed_below_threshold(prev_q, quantity, threshold) {
                         alerts.push((product_id, quantity, threshold));
                     }
                 }

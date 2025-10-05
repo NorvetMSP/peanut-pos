@@ -3,6 +3,8 @@ use common_money::log_rounding_mode_once;
 use reqwest::Client;
 use sqlx::PgPool;
 use std::env;
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))]
+use std::sync::Arc;
 use std::net::SocketAddr; 
 use tokio::net::TcpListener;
 #[cfg(any(feature = "kafka", feature = "kafka-producer"))]
