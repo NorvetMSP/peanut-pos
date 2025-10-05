@@ -64,12 +64,12 @@ impl<S> FromRequestParts<S> for SecurityCtxExtractor where S: Send + Sync {
 
         let actor = extract_actor_from_headers(headers, &claims, subject);
         let roles = roles_from_headers(headers);
-    let trace_id = trace_id_from_headers(headers).or_else(|| Some(Uuid::new_v4()));
+        let trace_id = trace_id_from_headers(headers).or_else(|| Some(Uuid::new_v4()));
 
-    Span::current().record("tenant_id", tracing::field::display(tenant_id));
-    if let Some(tid) = trace_id {
-        Span::current().record("trace_id", tracing::field::display(tid));
-    }
+        Span::current().record("tenant_id", tracing::field::display(tenant_id));
+        if let Some(tid) = trace_id.as_ref() {
+            Span::current().record("trace_id", tracing::field::display(tid));
+        }
 
         Ok(SecurityCtxExtractor(SecurityContext { tenant_id, actor, roles, trace_id }))
     }
