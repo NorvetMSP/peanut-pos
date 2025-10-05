@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO loyalty_points (customer_id, tenant_id, points)\n            VALUES ($1,$2,$3)\n            ON CONFLICT (customer_id, tenant_id)\n            DO UPDATE SET points = loyalty_points.points + EXCLUDED.points",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d434605d0f47f2a458bb1771543d68f52d6ad2e94963f039cf2f7007b780f8ab"
+}
