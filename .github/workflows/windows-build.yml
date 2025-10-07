@@ -70,5 +70,6 @@ jobs:
 
       - name: Build service
         shell: pwsh
+        working-directory: services
         run: |
           cargo build -p ${{ matrix.service }} --release
