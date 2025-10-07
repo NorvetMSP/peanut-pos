@@ -74,7 +74,8 @@ jobs:
           fi
           echo "sqlx-cli version parity OK ($CLI_VERSION)"
       - name: Regenerate offline metadata (diff)
-        run: pwsh ./regenerate-sqlx-data.ps1 -Prune -Diff -FailOnDrift -Features integration
+        shell: pwsh
+        run: ./regenerate-sqlx-data.ps1 -Prune -Diff -FailOnDrift -Features integration -ReportPath "$env:RUNNER_TEMP/sqlx-query-report.json"
         env:
           DATABASE_URL: postgres://novapos:novapos@localhost:5432/novapos
       - name: Verify no unstaged changes after regen
