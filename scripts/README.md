@@ -35,3 +35,19 @@ All scripts can mint a dev JWT automatically if -Token is not provided (uses scr
 # Interactive orchestrator (runs smoke-check first)
 ./run-demos.ps1
 ```
+
+## Keep the Service matrix in sync
+
+We auto-generate the Service matrix in `docs/Architecture/Architecture_10_7_2025.md` from `docker-compose.yml`, `.env`, and `docs/topics-map.json`.
+
+- To generate manually:
+  - `./scripts/generate-service-matrix.ps1`
+
+- Pre-commit hook (local):
+  - Install: `./scripts/install-git-hooks.ps1`
+  - On each commit, the hook runs the generator and blocks the commit if the doc changes. Commit the updated doc and retry.
+
+- CI check (GitHub Actions):
+  - Workflow `.github/workflows/verify-service-matrix.yml` re-runs the generator and fails if the file changes, preventing drift on PRs.
+
+Topic configuration lives in `docs/topics-map.json`. Update it when services publish/consume new topics.

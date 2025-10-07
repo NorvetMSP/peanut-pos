@@ -1,0 +1,41 @@
+{
+  "auth-service": {
+    "pub": [
+      "security.mfa.activity",
+      "audit.events"
+    ],
+    "con": []
+  },
+  "product-service": {
+    "pub": ["product.created"],
+    "con": []
+  },
+  "inventory-service": {
+    "pub": ["inventory.low_stock"],
+    "con": ["order.completed", "order.voided", "payment.completed", "product.created"]
+  },
+  "order-service": {
+    "pub": ["order.completed", "order.voided"],
+    "con": ["payment.completed", "payment.failed"]
+  },
+  "payment-service": {
+    "pub": ["payment.completed"],
+    "con": []
+  },
+  "integration-gateway": {
+    "pub": ["payment.completed"],
+    "con": []
+  },
+  "customer-service": {
+    "pub": ["customer.created"],
+    "con": ["order.completed"]
+  },
+  "loyalty-service": {
+    "pub": ["loyalty.events"],
+    "con": ["order.completed"]
+  },
+  "analytics-service": {
+    "pub": ["analytics.events"],
+    "con": ["order.completed", "payment.completed"]
+  }
+}

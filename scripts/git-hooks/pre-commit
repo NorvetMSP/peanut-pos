@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Ensure we're at the repo root
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+# Run the generator using PowerShell (pwsh preferred)
+if command -v pwsh >/dev/null 2>&1; then
+  pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass -Command "& { ./scripts/generate-service-matrix.ps1 }"
+elif command -v powershell >/dev/null 2>&1; then
+  powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -Command "& { ./scripts/generate-service-matrix.ps1 }"
+else
+  echo "[pre-commit] No PowerShell found; skipping service matrix generation." >&2
+fi
+
+# Fail commit if the matrix changed
+if ! git diff --quiet -- docs/Architecture/Architecture_10_7_2025.md; then
+  echo "[pre-commit] Service matrix is out of date. Please run ./scripts/generate-service-matrix.ps1 and commit the changes." >&2
+  exit 1
+fi

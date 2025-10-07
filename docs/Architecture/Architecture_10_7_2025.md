@@ -89,6 +89,12 @@ The POS Edge Client is a React web app (tablet/kiosk friendly) deployed per stor
 
 Note: While syncing, the UI may show cached receipt data until cloud confirmation, leading to small, later-reconciled differences.
 
+### Implementation notes
+
+- POS Edge Client uses a PWA stack (Vite + `vite-plugin-pwa`) with Workbox for caching.
+- Catalog data is cached per-tenant in `localStorage`; an offline order queue uses idempotency keys.
+- Communicates with `order-service` and `integration-gateway` over REST; status polling is used (WebSocket scaffolding exists but backend WS is not implemented yet).
+
 ## Cloud backend and microservices
 
 Containerized Rust services are deployable to Kubernetes or Docker Compose.
@@ -133,21 +139,16 @@ The Integration Gateway acts as a secure façade for partner APIs and omnichanne
 
 ### Capabilities
 
-- Handles inbound/outbound APIs and webhooks (e-commerce, payment gateways).
-- API keys or OAuth tokens, rate limiting (Redis), and HMAC signature checks.
-- HTTPS everywhere; all integration traffic is audited.
-
 Typical scenarios:
 
 - Online orders → in-store inventory sync.
-- Daily sales → accounting systems.
-- Loyalty data → marketing platforms.
 
 ## AI and analytics stack
 
 The Analytics & AI Service (port `8082`) consumes transactional and inventory events to power insights.
 
 ### Current functionality
+
 
 - Aggregations: sales summaries, top sellers.
 - Early AI: anomaly detection (e.g., refund spikes) and trend forecasting.
@@ -175,6 +176,7 @@ Architecture is ready to offload to an analytical store or warehouse (e.g., BigQ
   - Integration settings (API keys, tax rules).
   - Dashboards with analytics and alerts.
 - Auth: JWT; routes guarded by role (e.g., `RequireRoles(["admin"])`).
+- Built with Vite; simple RBAC implemented in `rbac.ts`.
 
 ### 3. Authentication and User Service (Auth Service)
 
@@ -185,6 +187,13 @@ Architecture is ready to offload to an analytical store or warehouse (e.g., BigQ
 - JWKS endpoint for token validation.
 - API keys for external integrations.
 - Comprehensive auth logging and audit.
+- Vault integration at service startup to load secrets.
+- Emits security activity events (e.g., `security.mfa.activity`).
+
+Quick links:
+
+- Port: `8085`  • Health: `/healthz`  • Metrics: `/metrics`
+- Topics: [security.mfa.activity](#securitymfaactivity), [audit.events](#auditevents)
 
 ### 4. Product and Inventory Services
 
@@ -193,6 +202,14 @@ Architecture is ready to offload to an analytical store or warehouse (e.g., BigQ
 - Shared money library for consistent rounding.
 - Emits events like `product.updated`, `inventory.low_stock`.
 - Supports multi-location inventory and a reservation TTL sweeper.
+- Product Service emits `product.created`; Prometheus metrics at `/internal/metrics`.
+- Inventory Service consumes `order.completed`, `order.voided`, `payment.completed`, `product.created`; emits `inventory.low_stock` and audit events.
+
+Quick links:
+
+- Product Service — Port: `8081` • Health: `/healthz` • Metrics: `/internal/metrics`
+- Inventory Service — Port: `8087` • Health: `/healthz` • Metrics: `/metrics`
+- Topics: [product.created](#productcreated), [inventory.low_stock](#inventorylow_stock), [inventory.reservation.expired](#inventoryreservationexpired)
 
 ### 5. Order and Transaction Service
 
@@ -207,11 +224,24 @@ Architecture is ready to offload to an analytical store or warehouse (e.g., BigQ
 - Consumes/publishes payment status via Kafka (e.g., `payment.completed`).
 - Emits events for Inventory and Loyalty.
 - Supports refunds/voids; automation via integrations is planned.
+- Also consumes `payment.failed`; supports settlement reporting and tax-rate overrides.
+
+Quick links:
+
+- Port: `8084` • Health: `/healthz` • Metrics: `/metrics`
+- Topics: [order.completed](#ordercompleted), [order.voided](#ordervoided), [payment.completed](#paymentcompleted), [payment.failed](#paymentfailed)
 
 ### 6. Payment Services
 
 - Payment Service (port `8086`): handles card transactions (currently stubbed).
 - Integration Gateway (port `8083`): manages crypto via Coinbase Commerce.
+- Payment Service is typically fronted by the Integration Gateway.
+
+Quick links:
+
+- Payment Service — Port: `8086` • Health: `/healthz` • Metrics: `/metrics`
+- Integration Gateway — Port: `8083` • Health: `/healthz` • Metrics: `/metrics`
+- Topics: [payment.completed](#paymentcompleted)
 
 Card payments:
 
@@ -231,10 +261,19 @@ Crypto payments:
 - Customer Service (port `8089`):
   - Stores encrypted PII (per-tenant keys).
   - CRUD and GDPR endpoints.
+  - Uses per-tenant data-encryption keys (DEKs) stored in DB, encrypted with a master key (`MasterKey`).
+  - Prometheus metrics at `/internal/metrics`.
 - Loyalty Service (port `8088`):
   - Tracks points earned/redeemed.
   - Consumes `order.completed` events.
   - Manual adjustments and redemption API (in progress).
+  - Emits `loyalty.events` for accrual/redemption.
+
+  Quick links:
+
+  - Customer Service — Port: `8089` • Health: `/healthz` • Metrics: `/internal/metrics`
+  - Loyalty Service — Port: `8088` • Health: `/healthz` • Metrics: `/metrics`
+  - Topics: [order.completed](#ordercompleted), [loyalty.events](#loyaltyevents)
 - Async by design: sales complete even if Loyalty is temporarily offline.
 - Planned: tiering, offline caching, CRM integration.
 
@@ -248,6 +287,116 @@ Crypto payments:
   - Structured JSON logs.
   - `trace_id` correlation across services.
 - Planned: dedicated reporting + immutable audit microservice.
+
+Quick links:
+
+- Analytics — Port: `8082` • Health: `/healthz` • Metrics: `/metrics`
+- Topics: [order.completed](#ordercompleted), [inventory.low_stock](#inventorylow_stock), [audit.events](#auditevents)
+
+## Infrastructure & runtime
+
+- Local development via Docker Compose provides Postgres (5432), Redis (6379), Zookeeper (2181), Kafka (9092), Vault (8200), plus all services on their listed ports.
+- Terraform definitions for AWS deployments under `infra/terraform/dev`.
+- Secrets management: Auth and Integration Gateway load secrets from Vault at startup; other services use environment variables in dev.
+
+## Service matrix (local dev defaults — see `.env`/compose)
+
+Ports shown reflect local development defaults sourced from `.env` and `docker-compose.yml`. In higher environments, ports may change (via env vars/ingress); prefer service discovery/ingress URLs over hard-coded ports.
+
+Note: This table is auto-generated by `scripts/generate-service-matrix.ps1`. A local pre-commit hook and a CI check ensure it stays up to date. See `scripts/README.md` for details.
+
+<!-- service-matrix:begin -->
+| Service | Folder | Port (dev) | Health | Metrics | Primary topics |
+|---|---|---:|---|---|---|
+| Order | `services/order-service` | 8084 | `/healthz` | `/metrics` | Pub: [order.completed](#ordercompleted); [order.voided](#ordervoided) ; Con: [payment.completed](#paymentcompleted), [payment.failed](#paymentfailed) |
+| Payment | `services/payment-service` | 8086 | `/healthz` | `/metrics` | Pub: [payment.completed](#paymentcompleted) |
+| Auth | `services/auth-service` | 8085 | `/healthz` | `/metrics` | Pub: [security.mfa.activity](#securitymfaactivity); [audit.events](#auditevents) |
+| Integration Gateway | `services/integration-gateway` | 8083 | `/healthz` | `/metrics` | Pub: [payment.completed](#paymentcompleted) |
+| Loyalty | `services/loyalty-service` | 8088 | `/healthz` | `/metrics` | Pub: [loyalty.events](#loyaltyevents) ; Con: [order.completed](#ordercompleted) |
+| Product | `services/product-service` | 8081 | `/healthz` | `/internal/metrics` | Pub: [product.created](#productcreated) |
+| Inventory | `services/inventory-service` | 8087 | `/healthz` | `/metrics` | Pub: [inventory.low_stock](#inventorylow_stock) ; Con: [order.completed](#ordercompleted), [order.voided](#ordervoided), [payment.completed](#paymentcompleted), [product.created](#productcreated) |
+| Customer | `services/customer-service` | 8089 | `/healthz` | `/internal/metrics` | Pub: [customer.created](#customercreated) ; Con: [order.completed](#ordercompleted) |
+| Analytics | `services/analytics-service` | 8082 | `/healthz` | `/metrics` | Pub: [analytics.events](#analyticsevents) ; Con: [order.completed](#ordercompleted), [payment.completed](#paymentcompleted) |
+<!-- service-matrix:end -->
+
+## Messaging (Kafka topics)
+
+### order.completed
+
+- Published by: Order Service
+- Consumed by: Inventory, Loyalty, Analytics
+
+### order.voided
+
+- Published by: Order Service
+- Consumed by: Inventory, Analytics
+
+### payment.completed
+
+- Published by: Payment Service or Integration Gateway
+- Consumed by: Order Service, Analytics
+
+### payment.failed
+
+- Consumed by: Order Service
+
+### product.created
+
+- Published by: Product Service
+- Consumed by: Inventory, Analytics
+
+### inventory.low_stock
+
+- Published by: Inventory Service
+- Consumed by: Analytics, alerting
+
+### inventory.reservation.expired
+
+- Published by: Inventory Service (audit)
+- Consumed by: Analytics/ops
+
+### customer.created
+
+- Published by: Customer Service
+- Consumed by: Analytics
+
+### analytics.events
+
+- Published by: Analytics Service
+- Consumed by: Dashboards/observability sinks
+
+### audit.events
+
+- Published by: Common audit library
+- Consumed by: Audit/ops
+
+### security.mfa.activity
+
+- Published by: Auth Service
+- Consumed by: Security/ops
+
+### security.alerts.v1
+
+- Published by: Security components
+- Consumed by: Ops
+
+### loyalty.events
+
+- Published by: Loyalty Service
+- Consumed by: Analytics/ops
+
+## Observability
+
+- Health endpoints: `/healthz` on most services.
+- Metrics: exposed at `/metrics` or `/internal/metrics` (standardization recommended).
+- Monitoring assets under `monitoring/` (Grafana/Prometheus dashboards and alert samples), with dashboards for Integration Gateway.
+
+## Security overview
+
+- Auth: JWT with role/capability checks (`common_security`) and a tenant guard validating `X-Tenant-ID` against JWT claims.
+- Data protection: per-tenant encryption for Customer PII (DEKs protected by a master key) and comprehensive audit logging across domain actions.
+- Rate limiting: Redis-backed limiter in Integration Gateway.
+- TLS: terminate at ingress/reverse proxy in production; local dev uses HTTP in Compose.
 
 ## Data flows
 
@@ -451,7 +600,51 @@ NovaPOS delivers a cloud-native, multi-tenant POS with offline resilience, modul
 - Automated refunds and reversals.
 - Advanced analytics and loyalty tiering.
 - Dedicated audit/reporting service.
+- Device authentication at the backend.
+- WebSocket order status (currently polling in POS; backend WS not implemented).
+- Broader Vault adoption across services (beyond Auth/Integration Gateway).
+- Metrics path standardization (`/metrics` vs `/internal/metrics`).
+- GraphQL (planned; REST-only today).
 
 ## Sources
 
 Derived from the current NovaPOS codebase, architecture proposals, MVP runbooks, and configuration files.
+
+References
+
+- Compose: `docker-compose.yml`
+- Terraform: `infra/terraform/dev/`
+- Frontends: `frontends/pos-app`, `frontends/admin-portal`
+- Services: `services/*`
+
+---
+
+## Appendix: Dev runbook (quick checks)
+
+Compose dev ports (from `docker-compose.yml`):
+
+- Product 8081, Analytics 8082, Integration Gateway 8083, Order 8084, Auth 8085, Payment 8086, Inventory 8087, Loyalty 8088, Customer 8089.
+- Platform: Postgres 5432, Redis 6379, Kafka 9092, Zookeeper 2181, Vault 8200.
+
+Health checks (PowerShell):
+
+```powershell
+curl http://localhost:8084/healthz
+curl http://localhost:8085/healthz
+curl http://localhost:8081/healthz
+```
+
+Metrics (PowerShell):
+
+```powershell
+curl http://localhost:8084/metrics
+curl http://localhost:8081/internal/metrics
+```
+
+Kafka topic smoke (if CLI available):
+
+```powershell
+# Example: list topics
+# kafka-topics --bootstrap-server localhost:9092 --list
+```
+

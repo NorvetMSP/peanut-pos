@@ -1,0 +1,34 @@
+name: Verify Service Matrix
+
+on:
+  pull_request:
+    branches: [ main ]
+  push:
+    branches: [ main ]
+
+jobs:
+  verify:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up PowerShell
+        shell: pwsh
+        run: |
+          $PSVersionTable.PSVersion
+
+      - name: Generate service matrix
+        shell: pwsh
+        run: |
+          ./scripts/generate-service-matrix.ps1
+
+      - name: Fail if matrix drift detected
+        shell: pwsh
+        run: |
+          git status --porcelain
+          if (git diff --quiet -- docs/Architecture/Architecture_10_7_2025.md) {
+            Write-Host 'Matrix up to date.'
+          } else {
+            Write-Error 'Service matrix drift detected. Run scripts/generate-service-matrix.ps1 and commit the changes.'
+          }
