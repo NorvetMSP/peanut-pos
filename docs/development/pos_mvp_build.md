@@ -25,7 +25,7 @@ Delivered early from “Should Have”:
 
 Still pending from “Should Have”:
 
-- [ ] CI running frontend E2Es in PRs (Playwright)
+- [x] CI running frontend E2Es in PRs (Playwright) (via .github/workflows/frontend.yml)
 
 ## 1. Functional Scope (MVP)
 
@@ -370,7 +370,7 @@ pushd .\frontends\admin-portal; npx playwright install; npx playwright test --wo
 pushd .\frontends\pos-app; npx playwright install; npx playwright test --workers=1; popd
 ```
 
-Prepared: 2025-10-02 | Updated: 2025-10-05
+Prepared: 2025-10-02 | Updated: 2025-10-07
 
 ## Summary of changes (this update)
 
