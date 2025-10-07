@@ -133,7 +133,7 @@ async fn main() -> anyhow::Result<()> {
     let consumer: StreamConsumer = rdkafka::ClientConfig::new()
         .set(
             "bootstrap.servers",
-            &env::var("KAFKA_BOOTSTRAP").unwrap_or("localhost:9092".into()),
+            env::var("KAFKA_BOOTSTRAP").unwrap_or("localhost:9092".into()),
         )
         .set("group.id", "inventory-service")
         .set("enable.auto.commit", "true")
@@ -151,7 +151,7 @@ async fn main() -> anyhow::Result<()> {
     let producer: FutureProducer = rdkafka::ClientConfig::new()
         .set(
             "bootstrap.servers",
-            &env::var("KAFKA_BOOTSTRAP").unwrap_or("localhost:9092".into()),
+            env::var("KAFKA_BOOTSTRAP").unwrap_or("localhost:9092".into()),
         )
         .create()
         .expect("failed to create kafka producer");
@@ -508,7 +508,7 @@ async fn handle_order_completed(text: &str, db: &PgPool, producer: &FutureProduc
                         let product_id: Uuid = r.get("product_id");
                         let sum_qty: Option<i64> = r.get("sum_qty");
                         if let Some(sum_qty) = sum_qty {
-                            if let Ok(legacy) = sqlx::query(
+                            if let Ok(Some(row)) = sqlx::query(
                                 "SELECT quantity FROM inventory WHERE tenant_id = $1 AND product_id = $2"
                             )
                             .bind(tenant_id)
@@ -516,11 +516,9 @@ async fn handle_order_completed(text: &str, db: &PgPool, producer: &FutureProduc
                             .fetch_optional(db)
                             .await
                             {
-                                if let Some(row) = legacy {
-                                    let legacy_qty: i32 = row.get("quantity");
-                                    if legacy_qty != sum_qty as i32 {
-                                        tracing::warn!(product_id = %product_id, tenant_id = %tenant_id, legacy = legacy_qty, agg = sum_qty, "Dual-write divergence detected");
-                                    }
+                                let legacy_qty: i32 = row.get("quantity");
+                                if legacy_qty != sum_qty as i32 {
+                                    tracing::warn!(product_id = %product_id, tenant_id = %tenant_id, legacy = legacy_qty, agg = sum_qty, "Dual-write divergence detected");
                                 }
                             }
                         }

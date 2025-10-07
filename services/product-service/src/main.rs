@@ -74,7 +74,7 @@ async fn metrics(State(state): State<AppState>) -> (StatusCode, String) {
     #[cfg(any(feature = "kafka", feature = "kafka-producer"))]
     if let Some(buf) = state.audit_buffer() {
         let snap = buf.snapshot();
-        update_buffer_metrics(snap.queued as u64, snap.emitted as u64, snap.dropped as u64);
+        update_buffer_metrics(snap.queued, snap.emitted, snap.dropped);
     }
     if let Ok(map) = VIEW_REDACTIONS_LABELS.lock() {
         use std::collections::HashMap;
@@ -110,7 +110,7 @@ async fn main() -> anyhow::Result<()> {
     let kafka_producer: FutureProducer = rdkafka::ClientConfig::new()
         .set(
             "bootstrap.servers",
-            &env::var("KAFKA_BOOTSTRAP").unwrap_or("localhost:9092".into()),
+            env::var("KAFKA_BOOTSTRAP").unwrap_or("localhost:9092".into()),
         )
         .create()
         .expect("failed to create kafka producer");

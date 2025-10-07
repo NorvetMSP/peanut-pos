@@ -157,7 +157,7 @@ async fn main() -> anyhow::Result<()> {
     let producer: FutureProducer = rdkafka::ClientConfig::new()
         .set(
             "bootstrap.servers",
-            &env::var("KAFKA_BOOTSTRAP").unwrap_or("localhost:9092".into()),
+            env::var("KAFKA_BOOTSTRAP").unwrap_or("localhost:9092".into()),
         )
         .create()
         .expect("failed to create kafka producer");

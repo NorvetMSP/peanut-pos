@@ -93,7 +93,7 @@ async fn audit_events_redaction_flow() {
 
     // Non-privileged (no Admin role) removal mode
     let req = Request::builder()
-        .uri(format!("/audit/events?limit=5"))
+        .uri("/audit/events?limit=5".to_string())
         .header("X-Tenant-ID", tenant_id.to_string())
         .header("X-User-ID", Uuid::new_v4().to_string())
         .header("X-Roles", "Support")
@@ -108,7 +108,7 @@ async fn audit_events_redaction_flow() {
 
     // Non-privileged masking mode include_redacted=true
     let req_mask = Request::builder()
-        .uri(format!("/audit/events?limit=5&include_redacted=true"))
+        .uri("/audit/events?limit=5&include_redacted=true".to_string())
         .header("X-Tenant-ID", tenant_id.to_string())
         .header("X-User-ID", Uuid::new_v4().to_string())
         .header("X-Roles", "Support")
@@ -121,7 +121,7 @@ async fn audit_events_redaction_flow() {
 
     // Privileged Admin view should retain raw field
     let req_admin = Request::builder()
-        .uri(format!("/audit/events?limit=5"))
+        .uri("/audit/events?limit=5".to_string())
         .header("X-Tenant-ID", tenant_id.to_string())
         .header("X-User-ID", Uuid::new_v4().to_string())
         .header("X-Roles", "Admin")

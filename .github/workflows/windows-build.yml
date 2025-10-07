@@ -49,7 +49,13 @@ jobs:
         shell: pwsh
         run: |
           $svc = "${{ matrix.service }}"
-          pwsh ./regenerate-sqlx-data.ps1 -Services $svc -SkipMigrations
+          $sqlxDir = Join-Path "services" $svc ".sqlx"
+          if (Test-Path $sqlxDir) {
+            Write-Host ".sqlx present for $svc; skipping prepare (using committed offline metadata)."
+          } else {
+            Write-Error ".sqlx not found for $svc. Run ./regenerate-sqlx-data.ps1 locally and commit the offline metadata."
+            exit 1
+          }
 
       - name: Build service
         shell: pwsh

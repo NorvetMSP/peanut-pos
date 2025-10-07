@@ -15,7 +15,7 @@ async fn build_app() -> Router {
     let verifier = Arc::new(JwtVerifier::new(JwtConfig::new("issuer","aud")));
     let state = AppState { db: pool, jwt_verifier: verifier, #[cfg(feature="kafka")] producer: {
         #[cfg(feature="kafka")] {
-            use rdkafka::producer::FutureProducer; use rdkafka::ClientConfig; ClientConfig::new().set("bootstrap.servers","localhost:9092").create().unwrap()
+            use rdkafka::producer::FutureProducer; use rdkafka::ClientConfig; ClientConfig::new().set("bootstrap.servers","localhost:9092").create::<FutureProducer>().unwrap()
         }
     }};
     Router::new().route("/points", get(get_points)).with_state(state)

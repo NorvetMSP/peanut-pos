@@ -80,8 +80,8 @@ async fn reservation_expires_and_restocks() {
     {
         use rdkafka::{consumer::{StreamConsumer, Consumer}, ClientConfig, Message};
         let consumer: StreamConsumer = ClientConfig::new()
-            .set("bootstrap.servers", &kafka_bootstrap)
-            .set("group.id", &format!("itest-{}", Uuid::new_v4()))
+            .set("bootstrap.servers", kafka_bootstrap)
+            .set("group.id", format!("itest-{}", Uuid::new_v4()))
             .set("enable.partition.eof", "false")
             .set("auto.offset.reset", "earliest")
             .create()
@@ -91,13 +91,11 @@ async fn reservation_expires_and_restocks() {
         let mut saw_audit = false;
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         while (!saw_reservation || !saw_audit) && std::time::Instant::now() < deadline {
-            if let Ok(result) = tokio::time::timeout(Duration::from_millis(500), consumer.recv()).await {
-                if let Ok(msg) = result {
-                    let topic = msg.topic();
-                    let payload = msg.payload().and_then(|b| std::str::from_utf8(b).ok()).unwrap_or("");
-                    if topic == "inventory.reservation.expired" && payload.contains(&product_id.to_string()) { saw_reservation = true; }
-                    if topic == "audit.events" && payload.contains("reservation.expired") { saw_audit = true; }
-                }
+            if let Ok(Ok(msg)) = tokio::time::timeout(Duration::from_millis(500), consumer.recv()).await {
+                let topic = msg.topic();
+                let payload = msg.payload().and_then(|b| std::str::from_utf8(b).ok()).unwrap_or("");
+                if topic == "inventory.reservation.expired" && payload.contains(&product_id.to_string()) { saw_reservation = true; }
+                if topic == "audit.events" && payload.contains("reservation.expired") { saw_audit = true; }
             }
         }
         assert!(saw_reservation, "expected inventory.reservation.expired event");

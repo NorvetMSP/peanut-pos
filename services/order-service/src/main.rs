@@ -49,7 +49,7 @@ async fn main() -> anyhow::Result<()> {
     let kafka_producer: FutureProducer = rdkafka::ClientConfig::new()
         .set(
             "bootstrap.servers",
-            &env::var("KAFKA_BOOTSTRAP").unwrap_or("localhost:9092".into()),
+            env::var("KAFKA_BOOTSTRAP").unwrap_or("localhost:9092".into()),
         )
         .create()
         .expect("failed to create kafka producer");
@@ -97,7 +97,7 @@ async fn main() -> anyhow::Result<()> {
             let consumer: StreamConsumer = rdkafka::ClientConfig::new()
                 .set(
                     "bootstrap.servers",
-                    &env::var("KAFKA_BOOTSTRAP").unwrap_or("localhost:9092".into()),
+                    env::var("KAFKA_BOOTSTRAP").unwrap_or("localhost:9092".into()),
                 )
                 .set("group.id", "order-service")
                 .create()

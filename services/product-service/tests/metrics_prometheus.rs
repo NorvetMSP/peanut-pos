@@ -81,13 +81,13 @@ async fn prometheus_metrics_exposed() {
         // replicate main.rs logic using exported functions
         if let Some(buf) = app_state.audit_buffer() {
             let snap = buf.snapshot();
-            product_service::metrics::update_buffer_metrics(snap.queued as u64, snap.emitted as u64, snap.dropped as u64);
+            product_service::metrics::update_buffer_metrics(snap.queued, snap.emitted, snap.dropped);
         }
         if let Ok(map) = product_service::audit_handlers::VIEW_REDACTIONS_LABELS.lock() {
             use std::collections::HashMap;
             let mut converted: HashMap<(String,String,String), u64> = HashMap::new();
             for ((tenant, role, field), count) in map.iter() { converted.insert((tenant.to_string(), role.clone(), field.clone()), *count); }
-            product_service::metrics::update_redaction_counters(product_service::audit_handlers::view_redactions_count() as u64, &converted);
+            product_service::metrics::update_redaction_counters(product_service::audit_handlers::view_redactions_count(), &converted);
         }
         let out = product_service::metrics::gather(true);
         (axum::http::StatusCode::OK, out)
@@ -99,7 +99,7 @@ async fn prometheus_metrics_exposed() {
         .with_state(state);
     // Trigger redaction (Support role, no include_redacted)
     let req = Request::builder()
-        .uri(format!("/audit/events?limit=1"))
+        .uri("/audit/events?limit=1".to_string())
         .header("X-Tenant-ID", tenant.to_string())
         .header("X-User-ID", Uuid::new_v4().to_string())
         .header("X-Roles", "Support")
