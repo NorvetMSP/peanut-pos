@@ -43,11 +43,11 @@ Must Have:
 
 Should Have (next sprint):
 
-- Returns / exchanges referencing original order (returns + partial refunds delivered; exchanges flow pending)
-- Inventory decrement + low-stock event stub (enforcement delivered; low-stock event pending)
-- Loyalty points accrue (delivered: simple earn on order.completed)
-- End-of-day settlement (Z-report by tender type) — delivered early
-- Partial refunds — delivered early
+- Returns / exchanges referencing original order — delivered (returns + partial refunds + exchanges endpoint/UI)
+- Inventory decrement + low-stock event stub — delivered (crossing-only alerts)
+- Loyalty points accrue — delivered (simple earn on order.completed)
+- End-of-day settlement (Z-report by tender type) — delivered
+- Partial refunds — delivered
 
 Status update (2025-10-05):
 
@@ -382,74 +382,59 @@ Prepared: 2025-10-02 | Updated: 2025-10-05
 
 Next documentation improvements (optional):
 
-- Add curl examples for compute, create (SKU), refund, and Z-report.
-- Link to runbook “Demo 3: inventory-on” section and scripts to create seed data.
-- Include a JSON example for a return record (`/returns`) and a sample receipt output for parity with tests.
+- [x] Add curl examples for compute, create (SKU), refund, and Z-report.
+- [x] Link to runbook “Demo 3: inventory-on” section and scripts to create seed data.
+- [x] Include a JSON example for a return record (`/returns`) and a sample receipt output for parity with tests.
 
----
-Prepared: 2025-10-02
+## Runbook
 
-## Quick curl examples (PowerShell)
+See: [Runbook: Demo 3 — Inventory ON](../runbook.md#demo-3-inventory-on)
 
-Prereqs: replace placeholders for $tenant, $token, and service URL. On Windows PowerShell, use backtick ` for line continuation if desired; below are single-line commands for copy/paste.
+## Appendix: JSON Examples
 
-Compute totals:
+Return record (from GET /returns):
 
-```powershell
-$tenant = "<tenant-uuid>"; $token = "<jwt>"; $body = '{"items":[{"sku":"SKU-ABC","quantity":2}],"discount_percent_bp":500,"tax_rate_bps":800}';
-curl -Method POST -Uri http://localhost:8080/orders/compute -Headers @{ 'Content-Type'='application/json'; 'X-Tenant-ID'=$tenant; 'X-Roles'='admin'; 'Authorization'="Bearer $token" } -Body $body
+```json
+{
+  "return_id": "9b4d9a2a-3c3e-4f2a-9c4c-7f273a0b3f7b",
+  "order_id": "e2e0d3e1-8e77-4f1f-9a9f-f5a0eb2d8f22",
+  "items": [
+    {
+      "product_id": "1b2c3d4e-5678-4a9b-8cde-111122223333",
+      "sku": "SKU-ABC",
+      "qty": 1,
+      "unit_price_cents": 1500,
+      "refund_cents": 1500
+    }
+  ],
+  "total_refund_cents": 1500,
+  "reason": "customer_return",
+  "status": "refunded",
+  "cashier_id": "55e2a71f-6f7d-4b1a-b6b7-9a2b3c4d5e6f",
+  "created_at": "2025-10-05T12:34:56Z"
+}
 ```
 
-Create order by SKUs:
+Receipt (JSON representation):
 
-```powershell
-$tenant = "<tenant-uuid>"; $token = "<jwt>"; $body = '{"items":[{"sku":"SKU-ABC","qty":2}],"discount_percent_bp":500,"payment":{"method":"cash","amount_cents":3250},"cashier_id":"<cashier-uuid>"}';
-curl -Method POST -Uri http://localhost:8080/orders/sku -Headers @{ 'Content-Type'='application/json'; 'X-Tenant-ID'=$tenant; 'X-Roles'='cashier'; 'Authorization'="Bearer $token" } -Body $body
-```
-
-Refund items from an order:
-
-```powershell
-$tenant = "<tenant-uuid>"; $token = "<jwt>"; $orderId = "<original-order-uuid>"; $body = '{"order_id":"'+$orderId+'","items":[{"product_id":"<product-uuid>","quantity":1}],"reason":"customer_return"}';
-curl -Method POST -Uri http://localhost:8080/orders/refund -Headers @{ 'Content-Type'='application/json'; 'X-Tenant-ID'=$tenant; 'X-Roles'='manager'; 'Authorization'="Bearer $token" } -Body $body
-```
-
-Settlement (Z-report) for a date:
-
-```powershell
-$tenant = "<tenant-uuid>"; $token = "<jwt>"; $date = (Get-Date).ToString('yyyy-MM-dd');
-curl -Method GET -Uri ("http://localhost:8080/reports/settlement?date="+$date) -Headers @{ 'X-Tenant-ID'=$tenant; 'X-Roles'='admin'; 'Authorization'="Bearer $token" }
-```
-
-Exchange (return + replacement order):
-
-```powershell
-$tenant = "<tenant-uuid>"; $token = "<jwt>"; $orig = "<original-order-uuid>";
-$body = '{"return_items":[{"product_id":"<product-uuid>","qty":1}],"new_items":[{"sku":"SKU-NEW","qty":1}],"payment":{"method":"cash","amount_cents":0}}';
-curl -Method POST -Uri ("http://localhost:8080/orders/"+$orig+"/exchange") -Headers @{ 'Content-Type'='application/json'; 'X-Tenant-ID'=$tenant; 'X-Roles'='manager'; 'Authorization'="Bearer $token" } -Body $body
-```
-
-Low stock behavior:
-
-- The inventory-service emits `inventory.low_stock` only when stock crosses from above threshold to at/below threshold; it won’t spam while remaining below.
-
-Create order from SKUs (cash):
-
-```powershell
-$tenant = "<tenant-uuid>"; $token = "<jwt>"; $body = '{"items":[{"sku":"SKU-ABC","quantity":1}],"payment_method":"cash","payment":{"method":"cash","amount_cents":1500}}';
-curl -Method POST -Uri http://localhost:8080/orders/sku -Headers @{ 'Content-Type'='application/json'; 'X-Tenant-ID'=$tenant; 'X-Roles'='cashier'; 'Authorization'="Bearer $token" } -Body $body
-```
-
-Refund items from an order (manager):
-
-```powershell
-$tenant = "<tenant-uuid>"; $token = "<jwt>"; $orderId = "<order-uuid>"; $body = '{"order_id":"'+$orderId+'","items":[{"product_id":"<product-uuid>","quantity":1}],"reason":"customer_return"}';
-curl -Method POST -Uri http://localhost:8080/orders/refund -Headers @{ 'Content-Type'='application/json'; 'X-Tenant-ID'=$tenant; 'X-Roles'='manager'; 'Authorization'="Bearer $token" } -Body $body
-```
-
-Z-report for a date:
-
-```powershell
-$tenant = "<tenant-uuid>"; $token = "<jwt>"; $date = (Get-Date).ToString('yyyy-MM-dd');
-curl -Method GET -Uri "http://localhost:8080/reports/settlement?date=$date" -Headers @{ 'X-Tenant-ID'=$tenant; 'X-Roles'='manager'; 'Authorization'="Bearer $token" }
+```json
+{
+  "order_id": "1234abcd-5678-90ef-1234-567890abcdef",
+  "created_at": "2025-10-02T12:34:56Z",
+  "items": [
+    { "sku": "ABC123", "name": "Sample", "qty": 2, "unit_price_cents": 1500, "line_subtotal_cents": 3000, "line_discount_cents": 150, "line_tax_cents": 285, "line_total_cents": 3135 }
+  ],
+  "totals": {
+    "subtotal_cents": 3000,
+    "discount_cents": 150,
+    "tax_cents": 285,
+    "total_cents": 3135
+  },
+  "payment": {
+    "method": "cash",
+    "amount_cents": 3250,
+    "change_cents": 115,
+    "status": "captured"
+  }
+}
 ```

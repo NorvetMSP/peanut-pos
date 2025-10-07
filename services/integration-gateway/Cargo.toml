@@ -8,6 +8,7 @@ common-auth = { path = "../common/auth" }
 common-money = { path = "../common/money" }
 common-http-errors = { path = "../common/http-errors" }
 common-security = { path = "../common/security" }
+common-audit = { path = "../common/audit" }
 axum = "0.7"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
