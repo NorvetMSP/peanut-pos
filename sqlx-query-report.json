@@ -1,5 +1,5 @@
 ﻿{
-    "generated_at":  "2025-10-05T18:59:11.6049478-04:00",
+    "generated_at":  "2025-10-06T20:24:13.7276133-04:00",
     "database_url":  "postgres://novapos:novapos@localhost:5432/novapos",
     "services":  {
                      "order-service":  {

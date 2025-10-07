@@ -54,7 +54,7 @@ struct PaymentServiceResponse {
     approval_code: String,
 }
 
-use common_security::SecurityCtxExtractor;
+use common_security::{SecurityCtxExtractor, ensure_capability, Capability};
 
 pub async fn process_payment(
     #[allow(unused_variables)] State(state): State<AppState>,
@@ -62,6 +62,10 @@ pub async fn process_payment(
     forwarded_auth: Option<Extension<ForwardedAuthHeader>>,
     Json(req): Json<PaymentRequest>,
 ) -> ApiResult<Json<PaymentResult>> {
+    // Enforce capability: only authorized roles (e.g., Cashier, Manager, Admin, SuperAdmin) may process payments.
+    ensure_capability(&sec, Capability::PaymentProcess)
+        .map_err(|_| ApiError::ForbiddenMissingRole { role: "payment_process", trace_id: sec.trace_id })?;
+
     let tenant_id = sec.tenant_id;
     let order_id = Uuid::parse_str(&req.order_id).map_err(|_| ApiError::BadRequest {
         code: "invalid_order_id",

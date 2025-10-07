@@ -265,7 +265,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   useEffect(() => {
     if (!isBrowser || !session) return;
 
-    let timeoutId: ReturnType<typeof window.setTimeout> | undefined;
+  // Use number for browser timer handle to avoid NodeJS.Timeout type issues in DOM builds
+  let timeoutId: number | undefined;
 
     const heartbeat = () => {
       if (!sessionRef.current) return;
@@ -276,7 +277,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     const handleActivity = () => {
       if (!sessionRef.current) return;
       if (timeoutId) {
-        window.clearTimeout(timeoutId);
+  window.clearTimeout(timeoutId);
       }
       heartbeat();
       timeoutId = window.setTimeout(() => {

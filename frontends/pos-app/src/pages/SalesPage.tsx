@@ -164,7 +164,8 @@ const SalesPage: React.FC = () => {
     let isMounted = true;
     const storage = getStorage();
     const cacheKey = `${STORAGE_PREFIX}:${tenantId}`;
-    let refreshTimer: ReturnType<typeof window.setInterval> | null = null;
+  // In browser builds, timer handles are numbers
+  let refreshTimer: number | null = null;
 
     const cacheToIndex = (list: ServiceProduct[]): CatalogIndex => Object.fromEntries(
       list.map(item => [item.id, { active: item.active, price: item.price }])
@@ -264,7 +265,7 @@ const SalesPage: React.FC = () => {
 
     return () => {
       isMounted = false;
-      if (refreshTimer) window.clearInterval(refreshTimer);
+  if (refreshTimer) window.clearInterval(refreshTimer);
     };
   }, [currentUser?.tenant_id, token, isOnline]);
 
