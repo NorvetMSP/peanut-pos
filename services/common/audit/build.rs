@@ -1,7 +1,9 @@
 use std::{env, fs, path::PathBuf};
 
 fn main() {
-    if cfg!(target_os = "windows") {
+    // Only emit zlib link hints when building on Windows AND the crate enables the kafka producer path.
+    let kafka_enabled = env::var_os("CARGO_FEATURE_KAFKA_PRODUCER").is_some() || env::var_os("CARGO_FEATURE_KAFKA").is_some();
+    if cfg!(target_os = "windows") && kafka_enabled {
         if let Some(dir) = find_rdkafka_vcpkg_zlib_dir() {
             println!("cargo:rustc-link-search=native={}", dir.display());
             if dir.join("zlibstatic.lib").is_file() { println!("cargo:rustc-link-lib=dylib=zlibstatic"); }
