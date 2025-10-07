@@ -45,15 +45,26 @@ jobs:
         shell: pwsh
         run: cargo install sqlx-cli --version 0.7.4 --no-default-features --features native-tls,postgres
 
-      - name: Prepare offline metadata (selected service)
+      - name: Verify offline metadata or skip for runtime-only
         shell: pwsh
         run: |
           $svc = "${{ matrix.service }}"
-          $sqlxDir = Join-Path "services" $svc ".sqlx"
+          $svcPath = Join-Path "services" $svc
+          $sqlxDir = Join-Path $svcPath ".sqlx"
+          # Detect SQLx macro usage in the service source
+          $patterns = @('query!','query_as!','query_scalar!')
+          $hasMacros = Get-ChildItem -Path $svcPath -Recurse -Filter '*.rs' | ForEach-Object {
+            $m = Select-String -Path $_.FullName -Pattern $patterns -AllMatches -ErrorAction SilentlyContinue
+            if ($m) { return $true }
+          } | Select-Object -First 1
+          if (-not $hasMacros) {
+            Write-Host "No SQLx macros found in $svc; skipping offline metadata check."
+            exit 0
+          }
           if (Test-Path $sqlxDir) {
-            Write-Host ".sqlx present for $svc; skipping prepare (using committed offline metadata)."
+            Write-Host ".sqlx present for $svc; proceeding to build with SQLX_OFFLINE."
           } else {
-            Write-Error ".sqlx not found for $svc. Run ./regenerate-sqlx-data.ps1 locally and commit the offline metadata."
+            Write-Error ".sqlx not found for $svc but SQLx macros are present. Run ./regenerate-sqlx-data.ps1 locally and commit the offline metadata."
             exit 1
           }
 

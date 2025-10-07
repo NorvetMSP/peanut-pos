@@ -16,6 +16,19 @@ on:
 jobs:
   regen-and-offline-build:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: novapos
+          POSTGRES_PASSWORD: novapos
+          POSTGRES_DB: novapos
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U novapos"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
     timeout-minutes: 30
     steps:
       - name: Checkout
@@ -33,16 +46,14 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
-      - name: Start Postgres
-        uses: ankane/setup-postgres@v1
-        with:
-          postgres-version: 16
-      - name: Create database
+      - name: Wait for Postgres
         run: |
-          psql -h localhost -U postgres -c "CREATE USER novapos WITH PASSWORD 'novapos';" || true
-          psql -h localhost -U postgres -c "CREATE DATABASE novapos OWNER novapos;" || true
-        env:
-          PGPASSWORD: postgres
+          for i in {1..30}; do
+            pg_isready -h localhost -U novapos && exit 0
+            sleep 2
+          done
+          echo 'Postgres not ready in time' >&2
+          exit 1
       - name: Install sqlx-cli
         run: cargo install sqlx-cli --version 0.7.4 --no-default-features --features native-tls,postgres
 
