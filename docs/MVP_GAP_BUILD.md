@@ -52,7 +52,7 @@ Legend: ✅ Done | 🌓 Partial | ⛔ Missing
 | E Inventory | Event dedupe semantics | ⛔ | — | Idempotent keys / hashes |
 | F Returns | Basic return initiation UI | 🌓 | `admin-portal/ReturnsPage.tsx` | Backend policies missing |
 | F Returns | Policy module (fees, conditions) | ⛔ | — | `return_policies` table |
-| F Returns | Exchange flow | ⛔ | — | Replacement order delta logic |
+| F Returns | Exchange flow | ✅ | Replacement order delta logic | Implemented in order-service exchange endpoint |
 | F Returns | Manager override + audit | ⛔ | — | Role check + audit event |
 | F Returns | Tender reversal passthrough | ⛔ | — | Gateway integration stub |
 | G Loyalty | Points read endpoint | ✅ | `loyalty-service/src/main.rs` | Redemption absent |
@@ -338,7 +338,6 @@ Risks / Considerations:
 | 2025-10-01 | SEC-AUD-5 | Audit retention job | ⛔→✅ | Added TTL purge task (env AUDIT_RETENTION_DAYS, dry-run mode, deletion & last-run metrics) |
 | 2025-10-01 | SEC-AUD-6 | Audit redaction layer | ⛔→✅ | Added configurable masking (env paths, modes off/log/enforce) + redaction metrics |
 | 2025-10-01 | SEC-AUD-7 | Role-based redacted audit view | ⛔→🌓 | Began TA-AUD-7: /audit/events now planning role privilege gating + response-time redaction overlay design (include_redacted param, metadata labels, view redactions metric) |
-
 
 | 2025-10-07 | POS-MVP | Exchange flow | ⛔→✅ | Implemented order-service exchange endpoint and POS E2E |
 | 2025-10-07 | POS-MVP | Settlement report (Z-report) | ⛔→✅ | order-service `/reports/settlement` endpoint + Admin Portal page |
