@@ -38,6 +38,7 @@ Legend: ✅ Done | 🌓 Partial | ⛔ Missing
 | C Admin | Inventory oversight UI | ⛔ | — | Low-stock list, adjustments history |
 | C Admin | Tenant onboarding workflow | 🌓 | `auth-service/src/tenant_handlers.rs` | Need provisioning hooks |
 | C Admin | Global audit views | ⛔ | — | Audit search API + UI |
+| C Admin | Settlement report (Z-report by tender) | ✅ | services/order-service (`/reports/settlement`), Admin Portal page | Aggregates captured payments by method for date; indexed; E2E passing |
 | D Security | Central tenancy middleware | 🌓 | Duplicate guards across services | Consolidate into shared crate |
 | D Security | Consistent RBAC enforcement | 🌓 | Product & Order services now on `common-security` | Migrate remaining services (inventory, loyalty, payment, auth refactor) |
 | D Security | Unified audit pipeline | 🌓 | `common-audit` producer in product & order services | Add remaining services + consumer/search API |
@@ -59,6 +60,7 @@ Legend: ✅ Done | 🌓 Partial | ⛔ Missing
 | G Loyalty | Tiering & promotions | ⛔ | — | Tier rules engine |
 | G Loyalty | Offline cache conflict handling | ⛔ | — | Snapshot + reconcile logic |
 | G Loyalty | POS customer 360 view | ⛔ | — | Unified composite endpoint/UI |
+| G Loyalty | Earn accrual on order.completed | ✅ | services/loyalty-service (order.completed handler) | Simple earn path implemented; redemption pending |
 | H POS Edge | Peripheral integrations | ⛔ | — | Scanner/printer abstractions |
 | H POS Edge | Large catalog virtualization | ⛔ | — | Introduce windowed list |
 | H POS Edge | Kiosk lockdown & session hardening | ⛔ | — | Idle timeout + focus traps |
@@ -336,6 +338,11 @@ Risks / Considerations:
 | 2025-10-01 | SEC-AUD-5 | Audit retention job | ⛔→✅ | Added TTL purge task (env AUDIT_RETENTION_DAYS, dry-run mode, deletion & last-run metrics) |
 | 2025-10-01 | SEC-AUD-6 | Audit redaction layer | ⛔→✅ | Added configurable masking (env paths, modes off/log/enforce) + redaction metrics |
 | 2025-10-01 | SEC-AUD-7 | Role-based redacted audit view | ⛔→🌓 | Began TA-AUD-7: /audit/events now planning role privilege gating + response-time redaction overlay design (include_redacted param, metadata labels, view redactions metric) |
+
+
+| 2025-10-07 | POS-MVP | Exchange flow | ⛔→✅ | Implemented order-service exchange endpoint and POS E2E |
+| 2025-10-07 | POS-MVP | Settlement report (Z-report) | ⛔→✅ | order-service `/reports/settlement` endpoint + Admin Portal page |
+| 2025-10-07 | POS-MVP | Loyalty earn accrual | ⛔→✅ | loyalty-service accrual on order.completed |
 
 ## 8. Open Questions / Decisions To Record
 
