@@ -2,7 +2,7 @@ use anyhow::Context;
 use axum::{
     http::{
         header::{ACCEPT, CONTENT_TYPE},
-        HeaderName, HeaderValue, Method,
+    HeaderName, HeaderValue, Method,
     },
     routing::{get, post},
     Router,
@@ -85,8 +85,15 @@ async fn main() -> anyhow::Result<()> {
         resp
     }
 
+    async fn metrics() -> (axum::http::StatusCode, String) {
+        // Minimal Prometheus text exposition to standardize endpoint; expand later
+        let body = "# HELP service_up 1 if the service is running\n# TYPE service_up gauge\nservice_up{service=\"payment-service\"} 1\n";
+        (axum::http::StatusCode::OK, body.to_string())
+    }
+
     let app = Router::new()
         .route("/healthz", get(|| async { "ok" }))
+        .route("/metrics", get(metrics))
         .route("/payments", post(process_card_payment))
         .route("/payments/void", post(void_card_payment))
         .with_state(state)

@@ -251,6 +251,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/customers/:id/gdpr/delete", post(gdpr_delete_customer))
         .route("/healthz", get(|| async { "ok" }))
         .route("/internal/metrics", get(render_metrics))
+        .route("/metrics", get(render_metrics))
         .with_state(state)
         .layer(axum::middleware::from_fn(track_http_errors))
         .layer(cors);

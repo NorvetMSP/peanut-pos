@@ -172,6 +172,7 @@ async fn main() -> anyhow::Result<()> {
 
     let app = Router::new()
         .route("/healthz", get(|| async { "ok" }))
+        .route("/metrics", get(|| async { (axum::http::StatusCode::OK, String::from("# HELP service_up 1 if the service is running\n# TYPE service_up gauge\nservice_up{service=\"loyalty-service\"} 1\n")) }))
         .route("/points", get(get_points))
         .with_state(state)
         .layer(middleware::from_fn(http_error_metrics))

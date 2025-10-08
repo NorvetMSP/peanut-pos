@@ -82,12 +82,12 @@ $topics = Get-TopicsMap $TopicsPath
 # Map of known services to folders and default health/metrics
 $serviceMeta = @{
     "auth-service" = @{ Folder = "services/auth-service"; Health = "/healthz"; Metrics = "/metrics" };
-    "product-service" = @{ Folder = "services/product-service"; Health = "/healthz"; Metrics = "/internal/metrics" };
+    "product-service" = @{ Folder = "services/product-service"; Health = "/healthz"; Metrics = "/metrics" };
     "inventory-service" = @{ Folder = "services/inventory-service"; Health = "/healthz"; Metrics = "/metrics" };
     "order-service" = @{ Folder = "services/order-service"; Health = "/healthz"; Metrics = "/metrics" };
     "payment-service" = @{ Folder = "services/payment-service"; Health = "/healthz"; Metrics = "/metrics" };
     "integration-gateway" = @{ Folder = "services/integration-gateway"; Health = "/healthz"; Metrics = "/metrics" };
-    "customer-service" = @{ Folder = "services/customer-service"; Health = "/healthz"; Metrics = "/internal/metrics" };
+    "customer-service" = @{ Folder = "services/customer-service"; Health = "/healthz"; Metrics = "/metrics" };
     "loyalty-service" = @{ Folder = "services/loyalty-service"; Health = "/healthz"; Metrics = "/metrics" };
     "analytics-service" = @{ Folder = "services/analytics-service"; Health = "/healthz"; Metrics = "/metrics" };
 }
@@ -218,7 +218,8 @@ ${displayNames} = @{
 }
 foreach ($r in $rows) {
     $svcName = if ($displayNames.ContainsKey($r.Service)) { $displayNames[$r.Service] } else { $r.Service }
-    $row = ('| {0} | {1}{2}{1} | {3} | {1}{4}{1} | {1}{5}{1} | {6} |' -f $svcName, $bt, $r.Folder, $r.Port, $r.Health, $r.Metrics, $r.Topics)
+    $metricsDisp = if ([string]::IsNullOrEmpty($r.Metrics)) { '—' } else { $r.Metrics }
+    $row = ('| {0} | {1}{2}{1} | {3} | {1}{4}{1} | {1}{5}{1} | {6} |' -f $svcName, $bt, $r.Folder, $r.Port, $r.Health, $metricsDisp, $r.Topics)
     $table += $row
 }
 

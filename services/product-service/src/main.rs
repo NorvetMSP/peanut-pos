@@ -180,6 +180,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/audit/events", get(audit_search))
         .route("/internal/audit_metrics", get(audit_metrics))
         .route("/internal/metrics", get(metrics))
+        .route("/metrics", get(metrics))
         .with_state(state)
         .layer(middleware::from_fn(error_metrics_mw))
         .layer(cors);

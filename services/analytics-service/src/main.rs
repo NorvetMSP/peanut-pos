@@ -282,6 +282,7 @@ async fn main() -> anyhow::Result<()> {
 
     let app = Router::new()
         .route("/healthz", get(health))
+        .route("/metrics", get(|| async { (axum::http::StatusCode::OK, String::from("# HELP service_up 1 if the service is running\n# TYPE service_up gauge\nservice_up{service=\"analytics-service\"} 1\n")) }))
         .route("/summary", get(get_summary))
         .route("/forecast", get(get_forecast))
         .route("/anomalies", get(get_anomalies))
