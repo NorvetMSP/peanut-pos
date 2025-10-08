@@ -12,9 +12,10 @@ Covers domains A–K spanning Orders, Payments, Admin, Security/Compliance, Inve
 
 Related docs:
 
-- `doc/analysis/MVP_Gaps.md` (original gap enumeration)
-- `doc/analysis/Implementation_Plan_for_Addressing_NovaPOS_MVP_Gaps.md` (earlier narrative plan)
+- `docs/analysis/MVP_Gaps.md` (original gap enumeration)
+- `docs/analysis/Implementation_Plan_for_Addressing_NovaPOS_MVP_Gaps.md` (earlier narrative plan)
 - `docs/security/security_plan.txt` (security + audit design drafts)
+- `docs/RoadMap_Execution_Checklist.md` (sequential execution plan / sprint driver)
 
 ## 3. Status Matrix (High-Level)
 
@@ -74,6 +75,8 @@ Legend: ✅ Done | 🌓 Partial | ⛔ Missing
 | K Cross-Cutting | Idempotency header contract | ⛔ | — | Spec + persistence |
 | K Cross-Cutting | Saga/compensation orchestration | ⛔ | — | Outbox or workflow engine |
 | K Cross-Cutting | Unified timezone/reporting boundary | ⛔ | — | Shared lib (dup with D) |
+| K Cross-Cutting | Metrics endpoint standardization (`/metrics`) | ✅ | `services/*` routes; `scripts/generate-service-matrix.ps1`; `docs/Architecture/Architecture_10_7_2025.md` | All services now expose `/metrics`; legacy `/internal/metrics` temporarily retained where it existed (deprecate later) |
+| K Cross-Cutting | Baseline Prometheus coverage | 🌓 | product/inventory/auth/gateway rich; order/customer error counters; payment/loyalty/analytics minimal `/metrics` | Expand metrics in payment/loyalty/analytics; align labels; add build_info and HTTP metrics |
 
 > NOTE: Evidence placeholders “—” indicate no code artifacts located via search; confirm before marking as Missing in production tracking.
 
@@ -128,13 +131,14 @@ Legend: Done = implemented & exercised, Partial = foundations exist but gaps / b
 
 - Returns initiation UI: Partial (`ReturnsPage.tsx` fetching returns, initiating basic return).
 - Policy module (restock fees, condition codes): Missing (no schema for return policies).
-- Exchange flow: Missing.
+- Exchange flow: Done (replacement order delta logic implemented in order-service exchange endpoint; E2E passing in POS/Admin).
 - Manager override & audit: Missing.
 - Gateway passthrough for original tender reversals: Missing.
 
 ### G. Loyalty & Customer Programs
 
 - Points accrual basic read: Done (loyalty-service `/points`, SQL query file).
+- Earn accrual on order.completed: Done (loyalty-service handler consumes order.completed and increments points; redemption pending).
 - Redemption engine (burn/partial/expiry): Missing.
 - Tiering rules & promotion hooks: Missing.
 - Offline loyalty balance caching/conflict resolution: Missing.
@@ -160,6 +164,7 @@ Legend: Done = implemented & exercised, Partial = foundations exist but gaps / b
 
 ### K. Cross-cutting Architecture
 
+- Metrics endpoint standardization: Done. All services expose `/metrics`; legacy `/internal/metrics` temporarily retained where it existed for backward compatibility. Deprecation window to be scheduled (see Section 8).
 - API versioning standard: Missing (no `/v1/` prefixes across all services consistently).
 - Standard idempotency header contract: Missing (client-side only, no server spec).
 - Saga / compensation orchestration: Missing (no orchestrator/outbox tables; fire-and-forget events).
@@ -342,8 +347,13 @@ Risks / Considerations:
 | 2025-10-07 | POS-MVP | Exchange flow | ⛔→✅ | Implemented order-service exchange endpoint and POS E2E |
 | 2025-10-07 | POS-MVP | Settlement report (Z-report) | ⛔→✅ | order-service `/reports/settlement` endpoint + Admin Portal page |
 | 2025-10-07 | POS-MVP | Loyalty earn accrual | ⛔→✅ | loyalty-service accrual on order.completed |
+| 2025-10-07 | OBS-METRICS-1 | Metrics endpoint standardization | ⛔→✅ | All services now expose `/metrics`; added aliases where needed; minimal endpoints added to payment, loyalty, analytics; docs and generator updated |
+| 2025-10-07 | OBS-METRICS-2 | Service matrix/doc sync | 🌓→✅ | `scripts/generate-service-matrix.ps1` updated to `/metrics` for all; architecture quick links/runbook and auto-generated matrix regenerated |
 
 ## 8. Open Questions / Decisions To Record
+
+- Decision: Standardize metrics on `/metrics` and deprecate `/internal/metrics` aliases.
+  - Proposed deprecation window: 1–2 sprints. Actions: update Prometheus scrape configs and dashboards to `/metrics`, announce in release notes, then remove alias routes.
 
 ## 9. Immediate Technical Dependencies / Sequencing Notes
 

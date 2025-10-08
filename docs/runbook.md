@@ -364,6 +364,7 @@ Common issues:
 ## Change Log & Roadmap
 
 - Monetary handling changes and roadmap: ../CHANGELOG.md and financial/money.md
+- MVP execution plan: RoadMap_Execution_Checklist.md
 
 ---
 
