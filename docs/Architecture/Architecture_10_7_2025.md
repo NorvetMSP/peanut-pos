@@ -157,7 +157,6 @@ The Analytics & AI Service (port `8082`) consumes transactional and inventory ev
 
 ### Current functionality
 
-
 - Aggregations: sales summaries, top sellers.
 - Early AI: anomaly detection (e.g., refund spikes) and trend forecasting.
 - Roadmap: demand forecasting, stock optimization, ML model integration.
@@ -657,4 +656,3 @@ Kafka topic smoke (if CLI available):
 # Example: list topics
 # kafka-topics --bootstrap-server localhost:9092 --list
 ```
-

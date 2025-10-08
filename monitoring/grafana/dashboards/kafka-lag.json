@@ -47,9 +47,26 @@
       }
     },
     {
+      "type": "stat",
+      "title": "Order Outbox Backlog",
+      "gridPos": {"x": 8, "y": 0, "w": 8, "h": 6},
+      "targets": [
+        { "expr": "outbox_backlog", "legendFormat": "backlog" }
+      ],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}},
+      "thresholds": {
+        "mode": "absolute",
+        "steps": [
+          {"color": "green", "value": null},
+          {"color": "yellow", "value": 50},
+          {"color": "red", "value": 100}
+        ]
+      }
+    },
+    {
       "type": "graph",
       "title": "Lag by Consumer Group",
-      "gridPos": {"x": 8, "y": 0, "w": 16, "h": 8},
+      "gridPos": {"x": 16, "y": 0, "w": 8, "h": 8},
       "targets": [
         {
           "expr": "sum by (consumergroup) (kafka_consumergroup_lag{topic=~\"$topic\",consumergroup=~\"$group\"})",
@@ -59,14 +76,108 @@
     },
     {
       "type": "graph",
-      "title": "Lag by Topic Partition",
+      "title": "Outbox Publish Results",
       "gridPos": {"x": 0, "y": 8, "w": 24, "h": 8},
+      "targets": [
+        {"expr": "sum(rate(outbox_published_total[5m])) by (topic)", "legendFormat": "published {{topic}}"},
+        {"expr": "sum(rate(outbox_publish_failures_total[5m])) by (topic)", "legendFormat": "failures {{topic}}"},
+        {"expr": "sum(rate(outbox_publish_retries_total[5m])) by (topic)", "legendFormat": "retries {{topic}}"}
+      ]
+    },
+    {
+      "type": "graph",
+      "title": "Lag by Topic Partition",
+      "gridPos": {"x": 0, "y": 16, "w": 24, "h": 8},
       "targets": [
         {
           "expr": "sum by (topic, partition) (kafka_consumergroup_lag{topic=~\"$topic\",consumergroup=~\"$group\"})",
           "legendFormat": "{{topic}} p{{partition}}"
         }
       ]
+    },
+    { "type": "row", "title": "Outbox Health", "gridPos": {"x": 0, "y": 24, "w": 24, "h": 1} },
+    {
+      "type": "stat",
+      "title": "Published/sec (all topics)",
+      "gridPos": {"x": 0, "y": 25, "w": 8, "h": 6},
+      "targets": [ {"expr": "sum(rate(outbox_published_total[5m]))", "legendFormat": "published/s"} ],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}}
+    },
+    {
+      "type": "stat",
+      "title": "Publish Failures/sec",
+      "gridPos": {"x": 8, "y": 25, "w": 8, "h": 6},
+      "targets": [ {"expr": "sum(rate(outbox_publish_failures_total[5m]))", "legendFormat": "failures/s"} ],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}},
+      "thresholds": {"mode": "absolute", "steps": [{"color": "green"},{"color": "red","value": 0.1}]}
+    },
+    {
+      "type": "stat",
+      "title": "Retries/sec",
+      "gridPos": {"x": 16, "y": 25, "w": 8, "h": 6},
+      "targets": [ {"expr": "sum(rate(outbox_publish_retries_total[5m]))", "legendFormat": "retries/s"} ],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}}
+    },
+    {
+      "type": "graph",
+      "title": "Outbox Backlog by Topic",
+      "gridPos": {"x": 0, "y": 31, "w": 24, "h": 8},
+      "targets": [
+        {"expr": "outbox_backlog_by_topic", "legendFormat": "{{topic}}"}
+      ]
+    },
+    { "type": "row", "title": "Consumer Inbox Health", "gridPos": {"x": 0, "y": 31, "w": 24, "h": 1} },
+    {
+      "type": "graph",
+      "title": "Inbox Inserts (rate)",
+      "gridPos": {"x": 0, "y": 39, "w": 12, "h": 8},
+      "targets": [
+        {"expr": "sum by (service,topic) (rate(inbox_inserts_total[5m]))", "legendFormat": "{{service}} {{topic}}"}
+      ]
+    },
+    {
+      "type": "graph",
+      "title": "Inbox Duplicates Skipped (rate)",
+      "gridPos": {"x": 12, "y": 39, "w": 12, "h": 8},
+      "targets": [
+        {"expr": "sum by (service,topic) (rate(inbox_duplicates_skipped_total[5m]))", "legendFormat": "{{service}} {{topic}}"}
+      ]
+    },
+    {
+      "type": "graph",
+      "title": "% Duplicates Skipped (by service/topic)",
+      "gridPos": {"x": 0, "y": 47, "w": 24, "h": 8},
+      "targets": [
+        {
+          "expr": "100 * (sum by (service,topic) (rate(inbox_duplicates_skipped_total[5m])) / (sum by (service,topic) (rate(inbox_duplicates_skipped_total[5m])) + sum by (service,topic) (rate(inbox_inserts_total[5m]))))",
+          "legendFormat": "{{service}} {{topic}}"
+        }
+      ]
     }
   ]
+  ,
+  "annotations": {
+    "list": [
+      {
+        "type": "dashboard",
+        "name": "Annotations & Alerts",
+        "enable": true,
+        "hide": false
+      },
+      {
+        "type": "prometheus",
+        "name": "Alerts: Kafka Lag High",
+        "datasource": "Prometheus",
+        "expr": "ALERTS{alertname=\"KafkaConsumerLagHigh\", alertstate=\"firing\"}",
+        "enable": true
+      },
+      {
+        "type": "prometheus",
+        "name": "Alerts: Outbox Backlog Growing",
+        "datasource": "Prometheus",
+        "expr": "ALERTS{alertname=\"OutboxBacklogGrowing\", alertstate=\"firing\"}",
+        "enable": true
+      }
+    ]
+  }
 }

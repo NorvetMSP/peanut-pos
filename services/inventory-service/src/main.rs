@@ -17,7 +17,7 @@ use common_money::log_rounding_mode_once;
 #[cfg(any(feature = "kafka", feature = "kafka-producer"))] use rdkafka::producer::FutureProducer;
 #[cfg(any(feature = "kafka", feature = "kafka-producer"))] use rdkafka::Message;
 use sqlx::{PgPool, Row};
-use prometheus::{Encoder, TextEncoder};
+use prometheus::{Encoder, TextEncoder, IntCounterVec, Opts};
 use common_observability::InventoryMetrics;
 use std::{env, net::SocketAddr, sync::Arc, time::Duration};
 #[cfg(any(feature = "kafka", feature = "kafka-producer"))] use serde::Deserialize; // needed for event struct derives when kafka/kafka-producer feature enabled
@@ -88,6 +88,9 @@ pub struct AppState {
     pub dual_write_enabled: bool,
     #[cfg(any(feature = "kafka", feature = "kafka-producer"))] pub kafka_producer: FutureProducer,
     pub metrics: Arc<InventoryMetrics>,
+    // Inbox metrics
+    pub inbox_inserts_total: IntCounterVec,
+    pub inbox_duplicates_skipped_total: IntCounterVec,
 }
 
 // Metrics implementation now provided by common-observability crate.
@@ -177,6 +180,17 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or(false);
 
     let metrics = Arc::new(InventoryMetrics::new());
+    // Register inbox metrics into the same registry used for /metrics
+    let inbox_inserts_total = IntCounterVec::new(
+        Opts::new("inbox_inserts_total", "Count of inbox insertions for idempotent consumption"),
+        &["service","topic"],
+    ).expect("create inbox_inserts_total");
+    metrics.registry.register(Box::new(inbox_inserts_total.clone())).ok();
+    let inbox_duplicates_skipped_total = IntCounterVec::new(
+        Opts::new("inbox_duplicates_skipped_total", "Count of duplicate messages skipped due to inbox de-dup"),
+        &["service","topic"],
+    ).expect("create inbox_duplicates_skipped_total");
+    metrics.registry.register(Box::new(inbox_duplicates_skipped_total.clone())).ok();
     let state = AppState {
         db: db_pool.clone(),
         jwt_verifier,
@@ -186,6 +200,8 @@ async fn main() -> anyhow::Result<()> {
         dual_write_enabled,
     #[cfg(any(feature = "kafka", feature = "kafka-producer"))] kafka_producer: producer.clone(),
         metrics: metrics.clone(),
+        inbox_inserts_total,
+        inbox_duplicates_skipped_total,
     };
 
     let allowed_origins = [
@@ -251,6 +267,8 @@ async fn main() -> anyhow::Result<()> {
         let multi_loc_for_consumer = state.multi_location_enabled;
         let producer = producer.clone();
         let inbox_enabled = env::var("INVENTORY_INBOX_DEDUP").ok().map(|v| v=="1" || v.eq_ignore_ascii_case("true")).unwrap_or(true);
+        let inbox_inserts = state.inbox_inserts_total.clone();
+        let inbox_dupes = state.inbox_duplicates_skipped_total.clone();
         tokio::spawn(async move {
             let mut stream = consumer.stream();
             while let Some(message) = stream.next().await {
@@ -278,6 +296,7 @@ async fn main() -> anyhow::Result<()> {
                                 .is_some();
                                 if already {
                                     debug!(topic, "Skipping duplicate message (inbox)");
+                                    inbox_dupes.with_label_values(&["inventory-service", topic]).inc();
                                     continue;
                                 } else {
                                     let _ = sqlx::query(
@@ -288,6 +307,7 @@ async fn main() -> anyhow::Result<()> {
                                     .bind(topic)
                                     .execute(&db_for_consumer)
                                     .await;
+                                    inbox_inserts.with_label_values(&["inventory-service", topic]).inc();
                                 }
                             }
                             if topic == "order.completed" {

@@ -31,6 +31,8 @@ use tokio::time::{interval, MissedTickBehavior};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
+use once_cell::sync::Lazy;
+use prometheus::{Registry, IntCounterVec, Opts, Encoder, TextEncoder};
 
 #[derive(Default, Clone, Copy, serde::Serialize)]
 pub struct Stats {
@@ -72,6 +74,24 @@ struct LowStockEvent {
 async fn health() -> &'static str {
     "ok"
 }
+
+static ANALYTICS_REGISTRY: Lazy<Registry> = Lazy::new(Registry::new);
+static INBOX_INSERTS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    let v = IntCounterVec::new(
+        Opts::new("inbox_inserts_total", "Count of inbox insertions for idempotent consumption"),
+        &["service","topic"],
+    ).unwrap();
+    ANALYTICS_REGISTRY.register(Box::new(v.clone())).ok();
+    v
+});
+static INBOX_DUPLICATES_SKIPPED_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    let v = IntCounterVec::new(
+        Opts::new("inbox_duplicates_skipped_total", "Count of duplicate messages skipped due to inbox de-dup"),
+        &["service","topic"],
+    ).unwrap();
+    ANALYTICS_REGISTRY.register(Box::new(v.clone())).ok();
+    v
+});
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -115,6 +135,39 @@ async fn main() -> anyhow::Result<()> {
             if let Ok(m) = message {
                 if let Some(Ok(text)) = m.payload_view::<str>() {
                     let topic = m.topic();
+                    // Inbox de-dup
+                    let inbox_enabled = std::env::var("ANALYTICS_INBOX_DEDUP").ok().map(|v| v=="1" || v.eq_ignore_ascii_case("true")).unwrap_or(true);
+                    if inbox_enabled {
+                        let key_str = m
+                            .key()
+                            .map(|k| String::from_utf8_lossy(k).to_string())
+                            .unwrap_or_else(|| format!("sha1:{}", hex::encode(sha1_smol::Sha1::from(text).digest().bytes())));
+                        let tenant_hint = serde_json::from_str::<serde_json::Value>(text)
+                            .ok()
+                            .and_then(|v| v.get("tenant_id").and_then(|t| t.as_str()).map(|s| s.to_string()))
+                            .unwrap_or_else(|| "unknown".to_string());
+                        let already = sqlx::query_scalar::<_, Option<i64>>(
+                            "SELECT 1 FROM inbox WHERE tenant_id = $1 AND message_key = $2 AND topic = $3"
+                        )
+                        .bind(&tenant_hint)
+                        .bind(&key_str)
+                        .bind(topic)
+                        .fetch_optional(&db_pool)
+                        .await
+                        .ok()
+                        .flatten()
+                        .is_some();
+                        if already { INBOX_DUPLICATES_SKIPPED_TOTAL.with_label_values(&["analytics-service", topic]).inc(); continue; }
+                        let _ = sqlx::query(
+                            "INSERT INTO inbox (tenant_id, message_key, topic) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING"
+                        )
+                        .bind(&tenant_hint)
+                        .bind(&key_str)
+                        .bind(topic)
+                        .execute(&db_pool)
+                        .await;
+                        INBOX_INSERTS_TOTAL.with_label_values(&["analytics-service", topic]).inc();
+                    }
                     if topic == "order.completed" {
                         if let Ok(val) = serde_json::from_str::<Value>(text) {
                             if let (Some(tid_str), Some(total_val)) =
@@ -280,9 +333,19 @@ async fn main() -> anyhow::Result<()> {
         jwt_verifier,
     };
 
+    async fn metrics() -> (axum::http::StatusCode, String) {
+        let encoder = TextEncoder::new();
+        let families = ANALYTICS_REGISTRY.gather();
+        let mut buf = Vec::new();
+        if let Err(e) = encoder.encode(&families, &mut buf) {
+            return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("metrics encode error: {e}"));
+        }
+        (axum::http::StatusCode::OK, String::from_utf8_lossy(&buf).to_string())
+    }
+
     let app = Router::new()
         .route("/healthz", get(health))
-        .route("/metrics", get(|| async { (axum::http::StatusCode::OK, String::from("# HELP service_up 1 if the service is running\n# TYPE service_up gauge\nservice_up{service=\"analytics-service\"} 1\n")) }))
+        .route("/metrics", get(metrics))
         .route("/summary", get(get_summary))
         .route("/forecast", get(get_forecast))
         .route("/anomalies", get(get_anomalies))

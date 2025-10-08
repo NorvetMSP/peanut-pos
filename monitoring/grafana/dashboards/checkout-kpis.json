@@ -48,6 +48,32 @@
     },
     {
       "type": "stat",
+      "title": "Outbox Backlog",
+      "gridPos": {"x": 0, "y": 14, "w": 6, "h": 6},
+      "targets": [
+        { "expr": "outbox_backlog", "legendFormat": "backlog" }
+      ],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}},
+      "thresholds": {
+        "mode": "absolute",
+        "steps": [
+          {"color": "green", "value": null},
+          {"color": "yellow", "value": 50},
+          {"color": "red", "value": 100}
+        ]
+      }
+    },
+    {
+      "type": "graph",
+      "title": "Outbox Publish Rate",
+      "gridPos": {"x": 6, "y": 14, "w": 18, "h": 6},
+      "targets": [
+        {"expr": "sum(rate(outbox_published_total[5m])) by (topic)", "legendFormat": "published {{topic}}"},
+        {"expr": "sum(rate(outbox_publish_failures_total[5m])) by (topic)", "legendFormat": "failures {{topic}}"}
+      ]
+    },
+    {
+      "type": "stat",
       "title": "p50 Checkout Latency (s)",
       "gridPos": {"x": 8, "y": 0, "w": 8, "h": 6},
       "targets": [

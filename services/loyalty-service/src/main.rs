@@ -27,6 +27,8 @@ use tokio::time::{interval, MissedTickBehavior};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tracing::{debug, info, warn};
 #[cfg(any(feature = "kafka", feature = "kafka-producer"))] use uuid::Uuid;
+use once_cell::sync::Lazy;
+use prometheus::{Registry, IntCounterVec, Opts, Encoder, TextEncoder};
 
 mod api; // expose library module for tests & reuse
 pub use crate::api::{AppState, get_points};
@@ -46,6 +48,7 @@ impl FromRef<AppState> for Arc<JwtVerifier> {
 
 #[cfg(any(feature = "kafka", feature = "kafka-producer"))]
 async fn handle_completed_event(evt: &CompletedEvent, customer_id: Uuid, pool: &PgPool, producer: &FutureProducer) {
+    // Prometheus registry and metrics (module scope)
     // Minimal upsert logic: grant points proportional to total (1 point per whole currency unit)
     let points = evt.total.floor() as i32;
     if points <= 0 { return; }
@@ -116,6 +119,40 @@ async fn main() -> anyhow::Result<()> {
             while let Some(message) = stream.next().await {
                 if let Ok(m) = message {
                     if let Some(Ok(text)) = m.payload_view::<str>() {
+                        // Inbox de-duplication (env-guarded; default enabled)
+                        let inbox_enabled = std::env::var("LOYALTY_INBOX_DEDUP").ok().map(|v| v=="1" || v.eq_ignore_ascii_case("true")).unwrap_or(true);
+                        if inbox_enabled {
+                            let key_str = m
+                                .key()
+                                .map(|k| String::from_utf8_lossy(k).to_string())
+                                .unwrap_or_else(|| format!("sha1:{}", hex::encode(sha1_smol::Sha1::from(text).digest().bytes())));
+                            // Extract tenant_id from payload (stringified UUID)
+                            let tenant_hint = serde_json::from_str::<serde_json::Value>(text)
+                                .ok()
+                                .and_then(|v| v.get("tenant_id").and_then(|t| t.as_str()).map(|s| s.to_string()))
+                                .unwrap_or_else(|| "unknown".to_string());
+                            let already = sqlx::query_scalar::<_, Option<i64>>(
+                                "SELECT 1 FROM inbox WHERE tenant_id = $1 AND message_key = $2 AND topic = $3"
+                            )
+                            .bind(&tenant_hint)
+                            .bind(&key_str)
+                            .bind("order.completed")
+                            .fetch_optional(&db)
+                            .await
+                            .ok()
+                            .flatten()
+                            .is_some();
+                            if already { INBOX_DUPLICATES_SKIPPED_TOTAL.with_label_values(&["loyalty-service","order.completed"]).inc(); continue; }
+                            let _ = sqlx::query(
+                                "INSERT INTO inbox (tenant_id, message_key, topic) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING"
+                            )
+                            .bind(&tenant_hint)
+                            .bind(&key_str)
+                            .bind("order.completed")
+                            .execute(&db)
+                            .await;
+                            INBOX_INSERTS_TOTAL.with_label_values(&["loyalty-service","order.completed"]).inc();
+                        }
                         if let Ok(evt) = serde_json::from_str::<CompletedEvent>(text) {
                             if let Some(cust_id) = evt.customer_id {
                                 handle_completed_event(&evt, cust_id, &db, &producer).await;
@@ -160,6 +197,22 @@ async fn main() -> anyhow::Result<()> {
         LOYALTY_REGISTRY.register(Box::new(v.clone())).ok();
         v
     });
+    static INBOX_INSERTS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+        let v = IntCounterVec::new(
+            Opts::new("inbox_inserts_total", "Count of inbox insertions for idempotent consumption"),
+            &["service","topic"],
+        ).unwrap();
+        LOYALTY_REGISTRY.register(Box::new(v.clone())).ok();
+        v
+    });
+    static INBOX_DUPLICATES_SKIPPED_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+        let v = IntCounterVec::new(
+            Opts::new("inbox_duplicates_skipped_total", "Count of duplicate messages skipped due to inbox de-dup"),
+            &["service","topic"],
+        ).unwrap();
+        LOYALTY_REGISTRY.register(Box::new(v.clone())).ok();
+        v
+    });
     async fn http_error_metrics(req: axum::http::Request<axum::body::Body>, next: axum::middleware::Next) -> axum::response::Response {
         let resp = next.run(req).await;
         let status = resp.status();
@@ -169,10 +222,19 @@ async fn main() -> anyhow::Result<()> {
         }
         resp
     }
+    async fn metrics() -> (axum::http::StatusCode, String) {
+        let encoder = TextEncoder::new();
+        let families = LOYALTY_REGISTRY.gather();
+        let mut buf = Vec::new();
+        if let Err(e) = encoder.encode(&families, &mut buf) {
+            return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("metrics encode error: {e}"));
+        }
+        (axum::http::StatusCode::OK, String::from_utf8_lossy(&buf).to_string())
+    }
 
     let app = Router::new()
         .route("/healthz", get(|| async { "ok" }))
-        .route("/metrics", get(|| async { (axum::http::StatusCode::OK, String::from("# HELP service_up 1 if the service is running\n# TYPE service_up gauge\nservice_up{service=\"loyalty-service\"} 1\n")) }))
+        .route("/metrics", get(metrics))
         .route("/points", get(get_points))
         .with_state(state)
         .layer(middleware::from_fn(http_error_metrics))

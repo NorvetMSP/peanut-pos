@@ -6,7 +6,7 @@ use anyhow::Context;
 use axum::{middleware, routing::{get, post}, Router};
 use axum::http::{header::{ACCEPT, CONTENT_TYPE}, HeaderName, HeaderValue, Method, StatusCode};
 use once_cell::sync::Lazy;
-use prometheus::{IntCounterVec, Opts, Registry};
+use prometheus::{Encoder, IntCounterVec, Opts, Registry, TextEncoder};
 use reqwest::Client;
 use sqlx::PgPool;
 use tokio::time::{interval, MissedTickBehavior};
@@ -22,7 +22,7 @@ use crate::order_handlers::{
 };
 
 // --- Error metrics (mirrors product/inventory services) ---
-static ORDER_REGISTRY: Lazy<Registry> = Lazy::new(Registry::new);
+pub static ORDER_REGISTRY: Lazy<Registry> = Lazy::new(Registry::new);
 static HTTP_ERRORS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
     let v = IntCounterVec::new(
         Opts::new("http_errors_total", "Count of HTTP error responses emitted (status >= 400)"),
@@ -130,8 +130,13 @@ pub fn build_router(state: AppState) -> Router {
         axum::Json(serde_json::json!({"queued":0,"emitted":0,"dropped":0}))
     }
     async fn metrics(axum::extract::State(_state): axum::extract::State<AppState>) -> (StatusCode, String) {
-        // Minimal metrics for tests
-        (StatusCode::OK, String::from("# HELP http_requests_total dummy\nhttp_requests_total 1\n"))
+        let encoder = TextEncoder::new();
+        let families = ORDER_REGISTRY.gather();
+        let mut buf = Vec::new();
+        if let Err(e) = encoder.encode(&families, &mut buf) {
+            return (StatusCode::INTERNAL_SERVER_ERROR, format!("metrics encode error: {e}"));
+        }
+        (StatusCode::OK, String::from_utf8_lossy(&buf).to_string())
     }
 
     Router::new()

@@ -32,3 +32,19 @@ Notes
 
 - KPI panels expect metrics like `checkout_latency_seconds_bucket`, `checkout_tap_count`, `checkout_errors_total`
 - Kafka lag panels expect `kafka_consumergroup_lag`
+
+Alerting
+
+- Add rule files from `monitoring/prometheus/alerts/novapos-rules.yaml` to your Prometheus `rule_files` and reload.
+
+Service flags and new metrics
+
+- order-service
+  - Metrics: `outbox_published_total{topic}`, `outbox_publish_failures_total{topic}`, `outbox_publish_retries_total{topic}`, `outbox_backlog`
+  - Flags: `OUTBOX_WORKER=1` to run publisher; `ORDER_OUTBOX_MODE=1` to enqueue to outbox instead of direct Kafka
+- inventory-service
+  - Inbox de-dup enabled by default; disable with `INVENTORY_INBOX_DEDUP=0`
+- loyalty-service
+  - Inbox de-dup enabled by default; disable with `LOYALTY_INBOX_DEDUP=0`
+- analytics-service
+  - Inbox de-dup enabled by default; disable with `ANALYTICS_INBOX_DEDUP=0`

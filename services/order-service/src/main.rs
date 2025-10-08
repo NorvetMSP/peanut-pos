@@ -12,6 +12,7 @@ use uuid::Uuid;
 
 // Reuse shared app builder and types from the library crate
 use order_service::{AppState, build_router, build_jwt_verifier_from_env, spawn_jwks_refresh};
+use order_service::app::ORDER_REGISTRY;
 #[cfg(any(feature = "kafka", feature = "kafka-producer"))] use futures_util::StreamExt;
 #[cfg(any(feature = "kafka", feature = "kafka-producer"))] use rdkafka::consumer::{Consumer, StreamConsumer};
 #[cfg(any(feature = "kafka", feature = "kafka-producer"))] use rdkafka::producer::{FutureProducer, FutureRecord};
@@ -45,6 +46,53 @@ struct OutboxRow {
     topic: String,
     payload: serde_json::Value,
 }
+
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))]
+static OUTBOX_PUBLISHED: once_cell::sync::Lazy<prometheus::IntCounterVec> = once_cell::sync::Lazy::new(|| {
+    let v = prometheus::IntCounterVec::new(
+        prometheus::Opts::new("outbox_published_total", "Total number of outbox events successfully published"),
+        &["topic"],
+    ).unwrap();
+    ORDER_REGISTRY.register(Box::new(v.clone())).ok();
+    v
+});
+
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))]
+static OUTBOX_FAILURES: once_cell::sync::Lazy<prometheus::IntCounterVec> = once_cell::sync::Lazy::new(|| {
+    let v = prometheus::IntCounterVec::new(
+        prometheus::Opts::new("outbox_publish_failures_total", "Total number of outbox publish failures"),
+        &["topic"],
+    ).unwrap();
+    ORDER_REGISTRY.register(Box::new(v.clone())).ok();
+    v
+});
+
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))]
+static OUTBOX_RETRIES: once_cell::sync::Lazy<prometheus::IntCounterVec> = once_cell::sync::Lazy::new(|| {
+    let v = prometheus::IntCounterVec::new(
+        prometheus::Opts::new("outbox_publish_retries_total", "Total number of outbox publish retries"),
+        &["topic"],
+    ).unwrap();
+    ORDER_REGISTRY.register(Box::new(v.clone())).ok();
+    v
+});
+
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))]
+static OUTBOX_BACKLOG: once_cell::sync::Lazy<prometheus::IntGauge> = once_cell::sync::Lazy::new(|| {
+    let v = prometheus::IntGauge::new("outbox_backlog", "Current number of unpublished outbox rows").unwrap();
+    ORDER_REGISTRY.register(Box::new(v.clone())).ok();
+    v
+});
+
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))]
+static OUTBOX_BACKLOG_BY_TOPIC: once_cell::sync::Lazy<prometheus::IntGaugeVec> = once_cell::sync::Lazy::new(|| {
+    let v = prometheus::IntGaugeVec::new(
+        prometheus::Opts::new("outbox_backlog_by_topic", "Current number of unpublished outbox rows, by topic"),
+        &["topic"],
+    ).unwrap();
+    ORDER_REGISTRY.register(Box::new(v.clone())).ok();
+    v
+});
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -114,6 +162,17 @@ async fn main() -> anyhow::Result<()> {
                         "SELECT id, tenant_id, topic, payload FROM outbox WHERE published_at IS NULL ORDER BY created_at ASC LIMIT 50"
                     ).fetch_all(&db_pool).await;
                     let Ok(batch) = rows else { continue };
+                    OUTBOX_BACKLOG.set(batch.len() as i64);
+                    // Refresh per-topic backlog from DB (full counts)
+                    if let Ok(topic_counts) = sqlx::query(
+                        "SELECT topic, COUNT(*)::BIGINT as cnt FROM outbox WHERE published_at IS NULL GROUP BY topic"
+                    ).fetch_all(&db_pool).await {
+                        for r in topic_counts {
+                            let topic: String = r.get::<String, _>("topic");
+                            let cnt: i64 = r.get::<i64, _>("cnt");
+                            OUTBOX_BACKLOG_BY_TOPIC.with_label_values(&[&topic]).set(cnt);
+                        }
+                    }
                     for row in batch {
                         let payload_str = row.payload.to_string();
                         let send_res = producer
@@ -134,6 +193,7 @@ async fn main() -> anyhow::Result<()> {
                                 {
                                     tracing::error!(?err, outbox_id = row.id, "Failed to mark outbox row published");
                                 }
+                                OUTBOX_PUBLISHED.with_label_values(&[&row.topic]).inc();
                             }
                             Err(err) => {
                                 tracing::warn!(?err, outbox_id = row.id, topic = %row.topic, "Failed to publish outbox event, will retry");
@@ -141,6 +201,8 @@ async fn main() -> anyhow::Result<()> {
                                     .bind(row.id)
                                     .execute(&db_pool)
                                     .await;
+                                OUTBOX_FAILURES.with_label_values(&[&row.topic]).inc();
+                                OUTBOX_RETRIES.with_label_values(&[&row.topic]).inc();
                             }
                         }
                     }
@@ -227,27 +289,43 @@ async fn main() -> anyhow::Result<()> {
                                                             "payment_method": order_row.payment_method,
                                                         });
 
-                                                        if let Err(err) = producer
-                                                            .send(
-                                                                FutureRecord::to("order.completed")
-                                                                    .payload(&event.to_string())
-                                                                    .key(&evt.tenant_id.to_string()),
-                                                                Duration::from_secs(0),
+                                                        let use_outbox = env::var("ORDER_OUTBOX_MODE").ok().map(|v| v=="1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
+                                                        if use_outbox {
+                                                            if let Err(err) = sqlx::query(
+                                                                "INSERT INTO outbox (tenant_id, topic, payload) VALUES ($1, $2, $3)"
                                                             )
-                                                            .await
-                                                        {
-                                                            tracing::error!(
-                                                                ?err,
-                                                                order_id = %evt.order_id,
-                                                                tenant_id = %evt.tenant_id,
-                                                                "Failed to publish order.completed after payment confirmation"
-                                                            );
+                                                            .bind(evt.tenant_id.to_string())
+                                                            .bind("order.completed")
+                                                            .bind(event)
+                                                            .execute(&db_pool)
+                                                            .await {
+                                                                tracing::error!(?err, "Failed to enqueue order.completed to outbox");
+                                                            } else {
+                                                                tracing::info!(order_id=%evt.order_id, tenant_id=%evt.tenant_id, "Enqueued order.completed to outbox");
+                                                            }
                                                         } else {
-                                                            tracing::info!(
-                                                                order_id = %evt.order_id,
-                                                                tenant_id = %evt.tenant_id,
-                                                                "Order marked COMPLETED after payment confirmation"
-                                                            );
+                                                            if let Err(err) = producer
+                                                                .send(
+                                                                    FutureRecord::to("order.completed")
+                                                                        .payload(&event.to_string())
+                                                                        .key(&evt.tenant_id.to_string()),
+                                                                    Duration::from_secs(0),
+                                                                )
+                                                                .await
+                                                            {
+                                                                tracing::error!(
+                                                                    ?err,
+                                                                    order_id = %evt.order_id,
+                                                                    tenant_id = %evt.tenant_id,
+                                                                    "Failed to publish order.completed after payment confirmation"
+                                                                );
+                                                            } else {
+                                                                tracing::info!(
+                                                                    order_id = %evt.order_id,
+                                                                    tenant_id = %evt.tenant_id,
+                                                                    "Order marked COMPLETED after payment confirmation"
+                                                                );
+                                                            }
                                                         }
                                                     }
                                                     Err(err) => {
@@ -362,21 +440,37 @@ async fn main() -> anyhow::Result<()> {
                                                                         "reason": void_reason,
                                                                     });
 
-                                                                    if let Err(err) = producer
-                                                                        .send(
-                                                                            FutureRecord::to("order.voided")
-                                                                                .payload(&void_event.to_string())
-                                                                                .key(&evt.tenant_id.to_string()),
-                                                                            Duration::from_secs(0),
+                                                                    let use_outbox = env::var("ORDER_OUTBOX_MODE").ok().map(|v| v=="1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
+                                                                    if use_outbox {
+                                                                        if let Err(err) = sqlx::query(
+                                                                            "INSERT INTO outbox (tenant_id, topic, payload) VALUES ($1, $2, $3)"
                                                                         )
-                                                                        .await
-                                                                    {
-                                                                        tracing::error!(
-                                                                            ?err,
-                                                                            order_id = %evt.order_id,
-                                                                            tenant_id = %evt.tenant_id,
-                                                                            "Failed to emit order.voided after payment failure"
-                                                                        );
+                                                                        .bind(evt.tenant_id.to_string())
+                                                                        .bind("order.voided")
+                                                                        .bind(void_event)
+                                                                        .execute(&db_pool)
+                                                                        .await {
+                                                                            tracing::error!(?err, "Failed to enqueue order.voided to outbox");
+                                                                        } else {
+                                                                            tracing::info!(order_id=%evt.order_id, tenant_id=%evt.tenant_id, "Enqueued order.voided to outbox");
+                                                                        }
+                                                                    } else {
+                                                                        if let Err(err) = producer
+                                                                            .send(
+                                                                                FutureRecord::to("order.voided")
+                                                                                    .payload(&void_event.to_string())
+                                                                                    .key(&evt.tenant_id.to_string()),
+                                                                                Duration::from_secs(0),
+                                                                            )
+                                                                            .await
+                                                                        {
+                                                                            tracing::error!(
+                                                                                ?err,
+                                                                                order_id = %evt.order_id,
+                                                                                tenant_id = %evt.tenant_id,
+                                                                                "Failed to emit order.voided after payment failure"
+                                                                            );
+                                                                        }
                                                                     }
                                                                 }
                                                                 Err(err) => {

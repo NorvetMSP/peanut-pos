@@ -1,0 +1,30 @@
+groups:
+  - name: novapos-service-alerts
+    rules:
+      - alert: CheckoutP95High
+        expr: histogram_quantile(0.95, sum(rate(checkout_latency_seconds_bucket[5m])) by (le)) > 2
+        for: 5m
+        labels:
+          severity: warning
+          team: pos
+        annotations:
+          summary: "Checkout latency p95 is high"
+          description: "p95 checkout latency > 2s for 5m"
+      - alert: KafkaConsumerLagHigh
+        expr: sum(kafka_consumergroup_lag) by (consumergroup) > 5000
+        for: 10m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "Kafka consumer lag high"
+          description: "Consumer group lag > 5k for 10m"
+      - alert: OutboxBacklogGrowing
+        expr: increase(outbox_backlog[10m]) > 0 and outbox_backlog > 100
+        for: 10m
+        labels:
+          severity: warning
+          team: pos
+        annotations:
+          summary: "Outbox backlog is growing"
+          description: "Unpublished outbox rows increasing and > 100"

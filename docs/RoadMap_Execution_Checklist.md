@@ -372,7 +372,6 @@ Scope map (current status)
   Acceptance: Migration executed in dev/staging; data integrity verified.
   Dependencies: P11-01.
 
-
 ## Phase 12 – Approvals & Mobility
 
 - [ ] P12-01 Approval service and mobile tokens
@@ -389,7 +388,6 @@ Scope map (current status)
   Actions: Link approvals immutably to orders/returns/payments.
   Acceptance: Audit view shows complete chain; integrity checks pass.
   Dependencies: P2-08.
-
 
 ## Phase 13 – Device & Peripherals Layer
 
@@ -413,7 +411,6 @@ Scope map (current status)
   Acceptance: CI coverage includes device flows without hardware.
   Dependencies: P13-01.
 
-
 ## Phase 14 – Promotions & Price Governance
 
 - [ ] P14-01 Promo engine and scheduling
@@ -430,7 +427,6 @@ Scope map (current status)
   Actions: Ensure promo enforcement in pricing/calculation paths.
   Acceptance: E2E checks show consistent pricing; tests cover edge cases.
   Dependencies: P14-01.
-
 
 ## Phase 15 – Data & Analytics Plumbing
 
@@ -449,7 +445,6 @@ Scope map (current status)
   Acceptance: Anomalies detected reliably in seeded scenarios; false positive rate acceptable.
   Dependencies: P15-02.
 
-
 ## Phase 16 – E‑receipts & Communications
 
 - [ ] P16-01 Notifications service and templates
@@ -467,7 +462,6 @@ Scope map (current status)
   Acceptance: Delivery status tracked; retries visible in metrics; DLQ monitored.
   Dependencies: P16-01, P0-05.
 
-
 ## Phase 17 – Tasking & Store Checklists
 
 - [ ] P17-01 Task service and API
@@ -479,7 +473,6 @@ Scope map (current status)
   Actions: Surfaces open/close procedures and directives in POS/Admin.
   Acceptance: Staff can complete tasks; manager views show progress.
   Dependencies: P17-01.
-
 
 ## Phase 18 – Identity at Scale
 
