@@ -2,6 +2,7 @@
 
 Note: See Architecture overview for system context and principles: [docs/Architecture/Architecture_10_7_2025.md](./Architecture/Architecture_10_7_2025.md)
 
+MVP Gap tracker (source-of-truth): [docs/MVP_Gaps.md]
 MVP Gap tracker (source-of-truth statuses): [docs/MVP_GAP_BUILD.md](./MVP_GAP_BUILD.md)
 Runbook companion (Change Log & Roadmap): [docs/runbook.md](./runbook.md#change-log--roadmap)
 
@@ -53,6 +54,25 @@ Scope map (current status)
 
 ---
 
+## Phase 0.1 – KPI & Messaging Observability
+
+- [ ] P0-04 End-to-end KPI instrumentation
+  Actions: Add distributed tracing across POS → Order → Inventory → Payment → Kafka; expose checkout latency histograms and tap-count metrics with stable labels by tenant/store.
+  Acceptance: Dashboards display p50/p95 checkout latency and tap counts per tenant/store; alerting wired to SLOs (<2s, <5 taps) with test alerts.
+  Dependencies: P0-01.
+
+- [ ] P0-05 Kafka lag and topic health
+  Actions: Export consumer lag for primary topics (`order.completed`, `payment.completed`, `order.voided`); add Grafana panels and alerts.
+  Acceptance: Lag panels present and green in steady state; alert triggers on configured thresholds; runbook linked.
+  Dependencies: P0-02.
+
+- [ ] P0-06 POS offline queue telemetry
+  Actions: Emit offline queue depth/failure metrics from POS; backend aggregates per-tenant; dashboards and alerts.
+  Acceptance: Dashboard shows offline queue depth by store; alert on prolonged backlog; synthetic tests validate ingestion.
+  Dependencies: P9-02.
+
+---
+
 ## Phase 1 – Inventory Multi-Location & Reservations
 
 - [x] P1-01 Multi-location inventory schema & queries
@@ -96,6 +116,30 @@ Scope map (current status)
 
 ---
 
+## Phase 2.1 – Security Hardening & Data Privacy
+
+- [ ] P2-05 mTLS between services
+  Actions: Enable mutual TLS for inter-service REST/Kafka where applicable (service mesh or app-level); implement cert rotation automation.
+  Acceptance: All intra-service calls use mTLS in non-dev profiles; rotation procedure validated in lower env; metrics for cert expiry exposed.
+  Dependencies: P0-01.
+
+- [ ] P2-06 Per-tenant key management across services
+  Actions: Adopt envelope encryption via Vault/KMS for services beyond Customer/Auth; unify key retrieval and caching patterns.
+  Acceptance: Keys managed per-tenant in at least three services; rotation-ready with minimal downtime; documentation updated.
+  Dependencies: P2-02.
+
+- [ ] P2-07 Automated key rotation and DSR orchestration
+  Actions: Implement rotation jobs; create a DSR coordinator API to orchestrate export/delete across services with auditing.
+  Acceptance: Rotation dry-run and execution tested; DSR requests produce consistent multi-service results with audit trail.
+  Dependencies: P2-06.
+
+- [ ] P2-08 Immutable audit store
+  Actions: Introduce append-only audit sink with tamper-evident hashing and retention; expose verification endpoint.
+  Acceptance: Audit writes are immutable; verification checks pass; retention metrics visible.
+  Dependencies: P2-03.
+
+---
+
 ## Phase 3 – Returns & Exchanges Foundations
 
 - [x] P3-01 Exchange flow
@@ -112,6 +156,25 @@ Scope map (current status)
   Actions: Role-gated override endpoint; audit events on override.
   Acceptance: Overrides recorded and visible in audit views.
   Dependencies: P2-04, P3-02.
+
+---
+
+## Phase 3.1 – Returns Policy & Fraud Controls
+
+- [ ] P3-04 Restock rules & compensation
+  Actions: Configurable restock policies (location-aware) + automatic inventory adjustments; audit events.
+  Acceptance: Returns adjust stock per policy; reports reconcile; audit entries emitted.
+  Dependencies: P1-02, P3-02.
+
+- [ ] P3-05 Link returns to original order lines
+  Actions: Schema/API linking returns to original lines (and serials where applicable); enforce eligibility.
+  Acceptance: API enforces linkage; E2E tests validate restock and accounting; analytics reflects linkage.
+  Dependencies: P3-02.
+
+- [ ] P3-06 Fraud flags & thresholds
+  Actions: Rules for thresholds (frequency/amount), flags on return requests, manager approval gates.
+  Acceptance: Threshold breaches require approval path; flags visible in admin; audit present.
+  Dependencies: P3-03.
 
 ---
 
@@ -134,6 +197,25 @@ Scope map (current status)
 
 ---
 
+## Phase 4.1 – Loyalty Offline & 360
+
+- [ ] P4-04 Offline cache & reconciliation
+  Actions: POS offline balance cache with reconciliation job to correct missed accruals; idempotent adjustments.
+  Acceptance: Offline accrual reconciles without double-counting; metrics for corrections exposed.
+  Dependencies: P4-01, P5-01.
+
+- [ ] P4-05 Accrual reversal & adjustments
+  Actions: Reverse points on void/refund; admin adjustments with audit and role checks.
+  Acceptance: Reversals consistent under concurrency; tests cover edge cases; audit logged.
+  Dependencies: P3-01, P3-02.
+
+- [ ] P4-06 Customer 360 aggregation API
+  Actions: Aggregated profile endpoint (points, recent orders, preferences) for POS/Admin.
+  Acceptance: Endpoint returns tenant-scoped 360 with p95 latency budget; basic UI surfacing.
+  Dependencies: P4-01.
+
+---
+
 ## Phase 5 – Offline Orders & Replay Validation
 
 - [ ] P5-01 Server-side replay validation
@@ -149,6 +231,20 @@ Scope map (current status)
 - [ ] P5-03 Offline conflict resolution UI
   Actions: POS modal with diff, adjust/override/cancel options.
   Acceptance: E2E flow exercised; audit events for overrides.
+  Dependencies: P5-01.
+
+---
+
+## Phase 5.1 – Order Integrity & Idempotency
+
+- [ ] P5-04 Idempotency storage + outbox/inbox
+  Actions: Persist idempotency keys; implement outbox pattern for event emission (Order/Payment/Inventory) and inbox de-duplication for consumers.
+  Acceptance: Duplicate submissions do not create duplicate orders; events delivered exactly-once to business logic; chaos test demonstrates durability.
+  Dependencies: P10-03.
+
+- [ ] P5-05 Price-lock snapshots on order lines
+  Actions: Capture unit price/tax rule snapshot per line at submission; validate on replay.
+  Acceptance: Replay diff can reconcile catalog changes deterministically; reporting consistent.
   Dependencies: P5-01.
 
 ---
@@ -169,6 +265,25 @@ Scope map (current status)
   Actions: Gateway abstraction and endpoints for reversal; mapping from orders.
   Acceptance: Reversal flows complete; linked to original tender.
   Dependencies: P6-01, P6-02.
+
+---
+
+## Phase 6.1 – Tender Orchestration & Reconciliation
+
+- [ ] P6-04 Split tender support
+  Actions: Payment intent sub-allocations with validation; POS/Admin updates; reconciliation and receipts.
+  Acceptance: Orders complete with ≥2 tenders; totals reconcile; tests and receipts verified.
+  Dependencies: P6-01.
+
+- [ ] P6-05 Auth/capture/void lifecycle
+  Actions: Payment state machine supporting auth→capture→refund/void; timers for auto-void; metrics.
+  Acceptance: State transitions enforced; auto-void works; observability present.
+  Dependencies: P6-01.
+
+- [ ] P6-06 Gateway references & nightly reconciliation
+  Actions: Persist provider transaction refs; implement reconciliation job and drift reports.
+  Acceptance: Drift report shows zero on happy path; alerts on mismatch; runbook documented.
+  Dependencies: P6-01, P0-05.
 
 ---
 
@@ -205,6 +320,15 @@ Scope map (current status)
 
 ---
 
+## Phase 8.1 – SLA & No‑show Management
+
+- [ ] P8-03 SLA dashboards & no-show auto-release
+  Actions: Timers and alerts for pickup SLAs; automatic release of expired reservations; dashboards.
+  Acceptance: Expired promises auto-released; SLA panels green under normal ops; audit present.
+  Dependencies: P8-01.
+
+---
+
 ## Phase 9 – Offline Sync Layer
 
 - [ ] P9-01 Conflict diff service
@@ -226,30 +350,272 @@ Scope map (current status)
 
 ## Phase 10 – Cross-Cutting Architecture
 
-- [ ] P10-01 API versioning standard
-  Actions: Adopt `/v1` routing pattern; deprecation policy.
-  Acceptance: Services expose versioned endpoints; docs updated.
+## Phase 11 – Catalog Variants & Serials
+
+- [ ] P11-01 Variant schema and CRUD
+  Actions: Add variants (e.g., size/color) to product domain; CRUD + validations.
+  Acceptance: Variant creation/edit flows tested; API and Admin UI updated.
   Dependencies: None.
 
-- [ ] P10-02 Idempotency header contract
-  Actions: Standardize header and persistence; align with orders and payments.
-  Acceptance: Contract documented; code in place; tests green.
-  Dependencies: P6-01.
+- [ ] P11-02 Per-variant inventory and barcode mapping
+  Actions: Track inventory at variant level; map barcodes to variants.
+  Acceptance: Sales decrement correct variant stock; barcode scans resolve to variant.
+  Dependencies: P11-01, P1-01.
 
-- [ ] P10-03 Saga orchestration skeleton
-  Actions: Introduce outbox or a lightweight orchestrator; start with returns & exchanges.
-  Acceptance: Initial sagas defined; metrics present; failure semantics documented.
-  Dependencies: P3-01, P6-01.
+- [ ] P11-03 Serial capture on sale/return
+  Actions: Serial number capture and validation for serialized goods.
+  Acceptance: POS enforces serial capture; returns validate original serial.
+  Dependencies: P11-02.
 
-- [ ] P10-04 Timezone/reporting boundary
-  Actions: Shared lib for timezones; reporting conversions.
-  Acceptance: Consistent usage across services; docs and tests added.
+- [ ] P11-04 Migration and backfill strategy
+  Actions: Safe migration plan and backfill scripts for existing products.
+  Acceptance: Migration executed in dev/staging; data integrity verified.
+  Dependencies: P11-01.
+
+
+## Phase 12 – Approvals & Mobility
+
+- [ ] P12-01 Approval service and mobile tokens
+  Actions: Central approval service; mobile approval tokens/links; integration with Admin/POS.
+  Acceptance: Remote approvals complete critical flows; audit end-to-end.
+  Dependencies: P2-01, P2-02.
+
+- [ ] P12-02 Policy DSL and routing
+  Actions: Define policy rules and routing for approvals by risk/amount.
+  Acceptance: Policies configurable per tenant; tests for routing outcomes.
+  Dependencies: P12-01.
+
+- [ ] P12-03 Transaction audit linkage
+  Actions: Link approvals immutably to orders/returns/payments.
+  Acceptance: Audit view shows complete chain; integrity checks pass.
+  Dependencies: P2-08.
+
+
+## Phase 13 – Device & Peripherals Layer
+
+- [ ] P13-01 Device abstraction SDK
+  Actions: Unified interfaces for printer, scanner, payment terminal with fallbacks.
+  Acceptance: POS uses SDK; mocks available for CI; errors surfaced gracefully.
   Dependencies: None.
+
+- [ ] P13-02 Hot-plug detection and retries
+  Actions: Detect device (dis)connect; retry queues/backoff; telemetry.
+  Acceptance: Hot-plug scenarios pass; retries visible in metrics.
+  Dependencies: P13-01.
+
+- [ ] P13-03 Device telemetry and health
+  Actions: Emit device health metrics and logs; dashboards.
+  Acceptance: Device panels show status per store; alerts on failures.
+  Dependencies: P0-04.
+
+- [ ] P13-04 Mock drivers for CI
+  Actions: Provide mock drivers for automated tests.
+  Acceptance: CI coverage includes device flows without hardware.
+  Dependencies: P13-01.
+
+
+## Phase 14 – Promotions & Price Governance
+
+- [ ] P14-01 Promo engine and scheduling
+  Actions: Rules engine for promos/markdowns; scheduling and scopes.
+  Acceptance: Promos applied deterministically; schedule honored; audit recorded.
+  Dependencies: P10-01.
+
+- [ ] P14-02 Approval workflows and simulation
+  Actions: Approval gates for high-impact promos; simulation tooling to predict impact.
+  Acceptance: Simulations match applied results; approvals audited.
+  Dependencies: P12-01.
+
+- [ ] P14-03 Backend enforcement across services
+  Actions: Ensure promo enforcement in pricing/calculation paths.
+  Acceptance: E2E checks show consistent pricing; tests cover edge cases.
+  Dependencies: P14-01.
+
+
+## Phase 15 – Data & Analytics Plumbing
+
+- [ ] P15-01 Event contracts & schema registry
+  Actions: Define versioned Kafka schemas and validation in CI.
+  Acceptance: Breaking changes blocked by CI; consumers validated.
+  Dependencies: P0-02.
+
+- [ ] P15-02 CDC/ETL to warehouse
+  Actions: Ship operational data to analytical store (e.g., BigQuery/Snowflake/Postgres replica) with transforms.
+  Acceptance: Core tables populated; freshness/latency SLOs met; lineage documented.
+  Dependencies: P15-01.
+
+- [ ] P15-03 Anomaly detection baseline
+  Actions: Implement basic anomaly detection over sales/returns/lag; alerting.
+  Acceptance: Anomalies detected reliably in seeded scenarios; false positive rate acceptable.
+  Dependencies: P15-02.
+
+
+## Phase 16 – E‑receipts & Communications
+
+- [ ] P16-01 Notifications service and templates
+  Actions: Multi-channel notifications (email/SMS/webhook) with templating and tenant branding.
+  Acceptance: E‑receipt sent on order completion; retries and provider failover verified.
+  Dependencies: P2-01.
+
+- [ ] P16-02 Locale and branding
+  Actions: Template localization and per-tenant branding assets.
+  Acceptance: E‑receipts reflect locale and branding; snapshot tests.
+  Dependencies: P16-01.
+
+- [ ] P16-03 Delivery receipts and retries
+  Actions: Store provider delivery receipts; retry policies; dead-letter handling.
+  Acceptance: Delivery status tracked; retries visible in metrics; DLQ monitored.
+  Dependencies: P16-01, P0-05.
+
+
+## Phase 17 – Tasking & Store Checklists
+
+- [ ] P17-01 Task service and API
+  Actions: CRUD for tasks/checklists; assignment to stores/users; schedules.
+  Acceptance: Tasks created/assigned/completed with audit; APIs tested.
+  Dependencies: P2-01.
+
+- [ ] P17-02 POS/Admin integration
+  Actions: Surfaces open/close procedures and directives in POS/Admin.
+  Acceptance: Staff can complete tasks; manager views show progress.
+  Dependencies: P17-01.
+
+
+## Phase 18 – Identity at Scale
+
+- [ ] P18-01 SSO (OIDC/SAML) integration
+  Actions: Integrate with external IdPs; configure per-tenant SSO.
+  Acceptance: Users authenticate via IdP; fallback local admin account maintained.
+  Dependencies: P2-01.
+
+- [ ] P18-02 SCIM provisioning
+  Actions: Automate user/group lifecycle via SCIM.
+  Acceptance: Creates/updates/deactivations sync correctly; audit present.
+  Dependencies: P18-01.
+
+- [ ] P18-03 ABAC and scoped access controls
+  Actions: Attribute-based access control and store scoping in RBAC layer.
+  Acceptance: Policies enforced across services; tests cover attribute conditions.
+  Dependencies: P2-01.
 
 ---
 
 ## Notes
 
-- This checklist mirrors the MVP_GAP_BUILD tracker, but sequences delivery to minimize churn and risk.
-- Use this doc alongside the Architecture overview and MVP Gap tracker; keep statuses in sync (CI lint can enforce).
-- When a task flips to [x], move any residual TODOs into the backlog section of MVP_GAP_BUILD.
+This checklist mirrors the MVP_GAP_BUILD tracker, but sequences delivery to minimize churn and risk.
+
+Use this doc alongside the Architecture overview and MVP Gap tracker; keep statuses in sync (CI lint can enforce).
+
+When a task flips to [x], move any residual TODOs into the backlog section of MVP_GAP_BUILD.
+
+---
+
+## Appendix — Implementation pointers for new items
+
+- P0-04 End-to-end KPI instrumentation
+  - Services: `frontends/pos-app`, `services/order-service`, `services/payment-service`, `services/inventory-service`, `services/integration-gateway`
+  - Files: add tracing in `src/main.rs` and HTTP handlers (`*_handlers.rs`); POS capture in `frontends/pos-app/src/OrderContext.tsx`
+  - Notes: OpenTelemetry tracing, histogram buckets for latency; label by `tenant_id`, `store_id`
+
+- P0-05 Kafka lag and topic health
+  - Services: all Kafka consumers (`inventory-service`, `loyalty-service`, `analytics-service`, `order-service`)
+  - Files: consumer init in `src/main.rs`; export lag via exporter or PromQL using Kafka exporter
+  - Notes: Topics: `order.completed`, `payment.completed`, `order.voided`
+
+- P0-06 POS offline queue telemetry
+  - Services: `frontends/pos-app`
+  - Files: `frontends/pos-app/src/OrderContext.tsx` — add gauge/counter emit; endpoint in `order-service` to ingest metrics if needed
+
+- P2-05 mTLS between services
+  - Services: all REST services; Kafka clients
+  - Files: service TLS config in `src/main.rs`; compose/k8s manifests under `docker-compose.yml`, `infra/terraform/*`
+
+- P2-06 Per-tenant key management across services
+  - Services: `customer-service` (reference), extend to `order-service`, `inventory-service`
+  - Files: key retrieval modules; env/Vault wiring in `src/main.rs`
+
+- P2-07 Key rotation and DSR orchestration
+  - Services: new coordinator under `services/` or extend `auth-service`
+  - Files: rotation job module; `/dsr/*` API handlers
+
+- P2-08 Immutable audit store
+  - Services: dedicated audit sink or extend `analytics-service`
+  - Files: append-only writer; hash chain; verification endpoint `/audit/verify`
+
+- P3-04 Restock rules & compensation
+  - Services: `inventory-service`
+  - Files: policy evaluation in `src/inventory_handlers.rs` and domain modules; migration under `services/inventory-service/migrations`
+
+- P3-05 Link returns to original order lines
+  - Services: `order-service`
+  - Files: schema migrations in `services/order-service/migrations`; handlers in `src/order_handlers.rs`
+
+- P3-06 Fraud flags & thresholds
+  - Services: `order-service`, `admin-portal`
+  - Files: flags in return models; admin UI form additions under `frontends/admin-portal/src/pages/*`
+
+- P4-04 Offline cache & reconciliation
+  - Services: `frontends/pos-app`, `loyalty-service`
+  - Files: POS cache in `OrderContext.tsx`; reconciliation job in `services/loyalty-service/src/main.rs`
+
+- P4-05 Accrual reversal & adjustments
+  - Services: `loyalty-service`, `order-service`
+  - Files: consume `order.voided` in loyalty; admin adjustments endpoint in loyalty handlers
+
+- P4-06 Customer 360 aggregation API
+  - Services: new aggregator route in `customer-service` or `analytics-service`
+  - Files: `/customer/360` handler; joins against orders/loyalty (read models)
+
+- P5-04 Idempotency storage + outbox/inbox
+  - Services: `order-service`, `payment-service`, `inventory-service`
+  - Files: add `idempotency_keys` and `outbox` tables; emit via outbox worker; consumer-side inbox de-dup
+
+- P5-05 Price-lock snapshots on order lines
+  - Services: `order-service`
+  - Files: extend order lines schema; write snapshot at submission; replay validation in `src/order_handlers.rs`
+
+- P6-04 Split tender support
+  - Services: `order-service`, `payment-service`, `frontends/pos-app`
+  - Files: model multiple tenders in `payment_intents`; POS UI to allocate amounts; receipt updates
+
+- P6-05 Auth/capture/void lifecycle
+  - Services: `payment-service`
+  - Files: state machine module; timers/auto-void worker; metrics
+
+- P6-06 Gateway references & nightly reconciliation
+  - Services: `payment-service`, `integration-gateway`
+  - Files: persist provider refs; recon job; drift report route
+
+- P8-03 SLA dashboards & no-show auto-release
+  - Services: `inventory-service`
+  - Files: scheduler for auto-release; metrics; admin visibility in `admin-portal`
+
+- Phase 11 Variants & Serials
+  - Services: `product-service`, `inventory-service`
+  - Files: migrations for variants; per-variant inventory; serial capture on sale/return
+
+- Phase 12 Approvals & Mobility
+  - Services: new `approval-service` or extend `auth-service`; hooks in orders/returns
+  - Files: approval endpoints; mobile token flows; audit linkage
+
+- Phase 13 Device & Peripherals
+  - Services: `frontends/pos-app`
+  - Files: device SDK under `frontends/pos-app/src/devices/*`; mocks in tests
+
+- Phase 14 Promotions
+  - Services: `product-service` (pricing), `order-service` (calculation)
+  - Files: promo rules engine modules; admin screens for promos
+
+- Phase 15 Data & Analytics Plumbing
+  - Services: schema registry in CI; ETL scripts under `monitoring/` or `scripts/`; consumer validation in services
+
+- Phase 16 E‑receipts & Communications
+  - Services: new `notifications-service` or extend `integration-gateway`
+  - Files: templates store; providers; retries/DLQ
+
+- Phase 17 Tasking & Checklists
+  - Services: new `task-service`; UI in `admin-portal` and POS
+
+- Phase 18 Identity at Scale
+  - Services: `auth-service`
+  - Files: OIDC/SAML config; SCIM endpoints; ABAC policies in common security crate

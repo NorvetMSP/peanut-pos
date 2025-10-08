@@ -1,0 +1,63 @@
+{
+  "title": "Kafka Topic Lag",
+  "uid": "novapos-kafka-lag",
+  "timezone": "browser",
+  "schemaVersion": 37,
+  "version": 1,
+  "tags": ["novapos", "kafka"],
+  "time": { "from": "now-6h", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "topic",
+        "type": "custom",
+        "query": "order.completed,payment.completed,order.voided",
+        "includeAll": true,
+        "multi": true
+      },
+      {
+        "name": "group",
+        "type": "query",
+        "datasource": "Prometheus",
+        "query": "label_values(kafka_consumergroup_lag, consumergroup)",
+        "includeAll": true,
+        "multi": true
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Total Lag",
+      "gridPos": {"x": 0, "y": 0, "w": 8, "h": 6},
+      "targets": [
+        {
+          "expr": "sum(kafka_consumergroup_lag{topic=~\"$topic\",consumergroup=~\"$group\"})",
+          "legendFormat": "lag"
+        }
+      ]
+    },
+    {
+      "type": "graph",
+      "title": "Lag by Consumer Group",
+      "gridPos": {"x": 8, "y": 0, "w": 16, "h": 8},
+      "targets": [
+        {
+          "expr": "sum by (consumergroup) (kafka_consumergroup_lag{topic=~\"$topic\",consumergroup=~\"$group\"})",
+          "legendFormat": "{{consumergroup}}"
+        }
+      ]
+    },
+    {
+      "type": "graph",
+      "title": "Lag by Topic Partition",
+      "gridPos": {"x": 0, "y": 8, "w": 24, "h": 8},
+      "targets": [
+        {
+          "expr": "sum by (topic, partition) (kafka_consumergroup_lag{topic=~\"$topic\",consumergroup=~\"$group\"})",
+          "legendFormat": "{{topic}} p{{partition}}"
+        }
+      ]
+    }
+  ]
+}

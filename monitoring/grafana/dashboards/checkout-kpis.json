@@ -1,0 +1,86 @@
+{
+  "title": "NovaPOS Checkout KPIs",
+  "uid": "novapos-checkout-kpis",
+  "timezone": "browser",
+  "schemaVersion": 37,
+  "version": 1,
+  "tags": ["novapos", "kpi"],
+  "time": { "from": "now-6h", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "tenant",
+        "type": "query",
+        "datasource": "Prometheus",
+        "query": "label_values(checkout_latency_seconds_bucket, tenant_id)",
+        "includeAll": true,
+        "multi": true
+      },
+      {
+        "name": "store",
+        "type": "query",
+        "datasource": "Prometheus",
+        "query": "label_values(checkout_latency_seconds_bucket{tenant_id=~\"$tenant\"}, store_id)",
+        "includeAll": true,
+        "multi": true
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "stat",
+      "title": "p95 Checkout Latency (s)",
+      "gridPos": {"x": 0, "y": 0, "w": 8, "h": 6},
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(checkout_latency_seconds_bucket{tenant_id=~\"$tenant\",store_id=~\"$store\"}[5m])))",
+          "legendFormat": "p95"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "p50 Checkout Latency (s)",
+      "gridPos": {"x": 8, "y": 0, "w": 8, "h": 6},
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(checkout_latency_seconds_bucket{tenant_id=~\"$tenant\",store_id=~\"$store\"}[5m])))",
+          "legendFormat": "p50"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Tap Count (avg)",
+      "gridPos": {"x": 16, "y": 0, "w": 8, "h": 6},
+      "targets": [
+        {
+          "expr": "avg_over_time(checkout_tap_count{tenant_id=~\"$tenant\",store_id=~\"$store\"}[5m])",
+          "legendFormat": "taps"
+        }
+      ]
+    },
+    {
+      "type": "graph",
+      "title": "Checkout Latency Histogram",
+      "gridPos": {"x": 0, "y": 6, "w": 12, "h": 8},
+      "targets": [
+        {
+          "expr": "sum by (le) (rate(checkout_latency_seconds_bucket{tenant_id=~\"$tenant\",store_id=~\"$store\"}[5m]))",
+          "legendFormat": "le {{le}}"
+        }
+      ]
+    },
+    {
+      "type": "graph",
+      "title": "Checkout Errors (rate)",
+      "gridPos": {"x": 12, "y": 6, "w": 12, "h": 8},
+      "targets": [
+        {
+          "expr": "sum by (code) (rate(checkout_errors_total{tenant_id=~\"$tenant\",store_id=~\"$store\"}[5m]))",
+          "legendFormat": "{{code}}"
+        }
+      ]
+    }
+  ]
+}
