@@ -250,6 +250,7 @@ async fn main() -> anyhow::Result<()> {
         let db_for_consumer = db_pool.clone();
         let multi_loc_for_consumer = state.multi_location_enabled;
         let producer = producer.clone();
+        let inbox_enabled = env::var("INVENTORY_INBOX_DEDUP").ok().map(|v| v=="1" || v.eq_ignore_ascii_case("true")).unwrap_or(true);
         tokio::spawn(async move {
             let mut stream = consumer.stream();
             while let Some(message) = stream.next().await {
@@ -257,6 +258,38 @@ async fn main() -> anyhow::Result<()> {
                     Ok(m) => {
                         let topic = m.topic();
                         if let Some(Ok(text)) = m.payload_view::<str>() {
+                            if inbox_enabled {
+                                // Prefer Kafka key; fallback to payload hash
+                                let key_str = m
+                                    .key()
+                                    .map(|k| String::from_utf8_lossy(k).to_string())
+                                    .unwrap_or_else(|| format!("sha1:{}", hex::encode(sha1_smol::Sha1::from(text).digest().bytes())));
+                                let tenant_hint = extract_tenant_from_payload(text).unwrap_or_else(|| "unknown".to_string());
+                                let already = sqlx::query_scalar::<_, Option<i64>>(
+                                    "SELECT 1 FROM inbox WHERE tenant_id = $1 AND message_key = $2 AND topic = $3"
+                                )
+                                .bind(&tenant_hint)
+                                .bind(&key_str)
+                                .bind(topic)
+                                .fetch_optional(&db_for_consumer)
+                                .await
+                                .ok()
+                                .flatten()
+                                .is_some();
+                                if already {
+                                    debug!(topic, "Skipping duplicate message (inbox)");
+                                    continue;
+                                } else {
+                                    let _ = sqlx::query(
+                                        "INSERT INTO inbox (tenant_id, message_key, topic) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING"
+                                    )
+                                    .bind(&tenant_hint)
+                                    .bind(&key_str)
+                                    .bind(topic)
+                                    .execute(&db_for_consumer)
+                                    .await;
+                                }
+                            }
                             if topic == "order.completed" {
                                 handle_order_completed(text, &db_for_consumer, &producer, multi_loc_for_consumer).await;
                             } else if topic == "order.voided" {
@@ -292,6 +325,13 @@ async fn main() -> anyhow::Result<()> {
     let listener = TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))]
+fn extract_tenant_from_payload(text: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(text)
+        .ok()
+        .and_then(|v| v.get("tenant_id").and_then(|t| t.as_str()).map(|s| s.to_string()))
 }
 
 #[cfg(any(feature = "kafka", feature = "kafka-producer"))]

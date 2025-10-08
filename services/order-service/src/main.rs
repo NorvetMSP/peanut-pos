@@ -37,6 +37,15 @@ struct OrderFinancialSummary { total: Option<BigDecimal>, customer_id: Option<Uu
 #[allow(dead_code)]
 struct OrderItemFinancialRow { product_id: Uuid, quantity: i32, unit_price: BigDecimal, line_total: BigDecimal }
 
+#[cfg(any(feature = "kafka", feature = "kafka-producer"))]
+#[derive(sqlx::FromRow, Debug)]
+struct OutboxRow {
+    id: i64,
+    tenant_id: String,
+    topic: String,
+    payload: serde_json::Value,
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().with_env_filter("info").init();
@@ -93,6 +102,54 @@ async fn main() -> anyhow::Result<()> {
     {
         let db_pool = db.clone();
         let producer = kafka_producer.clone();
+        // Outbox worker (feature-flagged via env var OUTBOX_WORKER)
+        let outbox_enabled = env::var("OUTBOX_WORKER").ok().map(|v| v=="1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
+        if outbox_enabled {
+            tokio::spawn(async move {
+                let mut ticker = tokio::time::interval(Duration::from_millis(750));
+                loop {
+                    ticker.tick().await;
+                    // Fetch a small batch of unpublished outbox rows
+                    let rows: Result<Vec<OutboxRow>, _> = sqlx::query_as::<_, OutboxRow>(
+                        "SELECT id, tenant_id, topic, payload FROM outbox WHERE published_at IS NULL ORDER BY created_at ASC LIMIT 50"
+                    ).fetch_all(&db_pool).await;
+                    let Ok(batch) = rows else { continue };
+                    for row in batch {
+                        let payload_str = row.payload.to_string();
+                        let send_res = producer
+                            .send(
+                                FutureRecord::to(&row.topic)
+                                    .payload(&payload_str)
+                                    .key(&row.tenant_id),
+                                Duration::from_secs(0),
+                            )
+                            .await;
+                        match send_res {
+                            Ok(_) => {
+                                // Mark as published
+                                if let Err(err) = sqlx::query("UPDATE outbox SET published_at = NOW() WHERE id = $1")
+                                    .bind(row.id)
+                                    .execute(&db_pool)
+                                    .await
+                                {
+                                    tracing::error!(?err, outbox_id = row.id, "Failed to mark outbox row published");
+                                }
+                            }
+                            Err(err) => {
+                                tracing::warn!(?err, outbox_id = row.id, topic = %row.topic, "Failed to publish outbox event, will retry");
+                                let _ = sqlx::query("UPDATE outbox SET retry_count = retry_count + 1 WHERE id = $1")
+                                    .bind(row.id)
+                                    .execute(&db_pool)
+                                    .await;
+                            }
+                        }
+                    }
+                }
+            });
+            tracing::info!("Outbox worker enabled");
+        } else {
+            tracing::info!("Outbox worker disabled (set OUTBOX_WORKER=1 to enable)");
+        }
         tokio::spawn(async move {
             let consumer: StreamConsumer = rdkafka::ClientConfig::new()
                 .set(

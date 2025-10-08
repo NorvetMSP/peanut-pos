@@ -36,7 +36,15 @@
           "expr": "histogram_quantile(0.95, sum by (le) (rate(checkout_latency_seconds_bucket{tenant_id=~\"$tenant\",store_id=~\"$store\"}[5m])))",
           "legendFormat": "p95"
         }
-      ]
+      ],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}},
+      "thresholds": {
+        "mode": "absolute",
+        "steps": [
+          {"color": "green", "value": null},
+          {"color": "red", "value": 2}
+        ]
+      }
     },
     {
       "type": "stat",
