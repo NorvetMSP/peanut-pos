@@ -44,6 +44,105 @@ pub struct VoidPaymentResponse {
     pub approval_code: String,
 }
 
+// --- Payment Intents MVP (stubs) ---
+#[derive(Deserialize, Serialize)]
+pub struct CreateIntentRequest {
+    pub id: String,
+    #[serde(rename = "orderId")] pub order_id: String,
+    #[serde(rename = "amountMinor")] pub amount_minor: i64,
+    pub currency: String,
+    #[serde(rename = "idempotencyKey")] pub idempotency_key: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct IntentResponse {
+    pub id: String,
+    pub state: String,
+}
+
+#[allow(unused_variables)]
+pub async fn create_intent(
+    State(state): State<AppState>,
+    SecurityCtxExtractor(sec): SecurityCtxExtractor,
+    _headers: HeaderMap,
+    Json(req): Json<CreateIntentRequest>,
+) -> Result<Json<IntentResponse>, ApiError> {
+    if ensure_capability(&sec, Capability::PaymentProcess).is_err() {
+    #[cfg(any(feature = "kafka", feature = "kafka-producer"))] emit_capability_denial_audit(state.audit_producer.as_deref(), &sec, Capability::PaymentProcess, "payment-service").await;
+        return Err(ApiError::ForbiddenMissingRole { role: "payment_access", trace_id: sec.trace_id });
+    }
+    // Stub: no DB write yet; returns created state
+    Ok(Json(IntentResponse { id: req.id, state: "created".into() }))
+}
+
+#[derive(Deserialize)]
+pub struct ConfirmIntentRequest { pub id: String }
+
+#[allow(unused_variables)]
+pub async fn confirm_intent(
+    State(state): State<AppState>,
+    SecurityCtxExtractor(sec): SecurityCtxExtractor,
+    _headers: HeaderMap,
+    Json(req): Json<ConfirmIntentRequest>,
+) -> Result<Json<IntentResponse>, ApiError> {
+    if ensure_capability(&sec, Capability::PaymentProcess).is_err() {
+    #[cfg(any(feature = "kafka", feature = "kafka-producer"))] emit_capability_denial_audit(state.audit_producer.as_deref(), &sec, Capability::PaymentProcess, "payment-service").await;
+        return Err(ApiError::ForbiddenMissingRole { role: "payment_access", trace_id: sec.trace_id });
+    }
+    Ok(Json(IntentResponse { id: req.id, state: "authorized".into() }))
+}
+
+#[derive(Deserialize)]
+pub struct CaptureIntentRequest { pub id: String }
+
+#[allow(unused_variables)]
+pub async fn capture_intent(
+    State(state): State<AppState>,
+    SecurityCtxExtractor(sec): SecurityCtxExtractor,
+    _headers: HeaderMap,
+    Json(req): Json<CaptureIntentRequest>,
+) -> Result<Json<IntentResponse>, ApiError> {
+    if ensure_capability(&sec, Capability::PaymentProcess).is_err() {
+    #[cfg(any(feature = "kafka", feature = "kafka-producer"))] emit_capability_denial_audit(state.audit_producer.as_deref(), &sec, Capability::PaymentProcess, "payment-service").await;
+        return Err(ApiError::ForbiddenMissingRole { role: "payment_access", trace_id: sec.trace_id });
+    }
+    Ok(Json(IntentResponse { id: req.id, state: "captured".into() }))
+}
+
+#[derive(Deserialize)]
+pub struct VoidIntentRequest { pub id: String }
+
+#[allow(unused_variables)]
+pub async fn void_intent(
+    State(state): State<AppState>,
+    SecurityCtxExtractor(sec): SecurityCtxExtractor,
+    _headers: HeaderMap,
+    Json(req): Json<VoidIntentRequest>,
+) -> Result<Json<IntentResponse>, ApiError> {
+    if ensure_capability(&sec, Capability::PaymentProcess).is_err() {
+    #[cfg(any(feature = "kafka", feature = "kafka-producer"))] emit_capability_denial_audit(state.audit_producer.as_deref(), &sec, Capability::PaymentProcess, "payment-service").await;
+        return Err(ApiError::ForbiddenMissingRole { role: "payment_access", trace_id: sec.trace_id });
+    }
+    Ok(Json(IntentResponse { id: req.id, state: "voided".into() }))
+}
+
+#[derive(Deserialize)]
+pub struct RefundIntentRequest { pub id: String }
+
+#[allow(unused_variables)]
+pub async fn refund_intent(
+    State(state): State<AppState>,
+    SecurityCtxExtractor(sec): SecurityCtxExtractor,
+    _headers: HeaderMap,
+    Json(req): Json<RefundIntentRequest>,
+) -> Result<Json<IntentResponse>, ApiError> {
+    if ensure_capability(&sec, Capability::PaymentProcess).is_err() {
+    #[cfg(any(feature = "kafka", feature = "kafka-producer"))] emit_capability_denial_audit(state.audit_producer.as_deref(), &sec, Capability::PaymentProcess, "payment-service").await;
+        return Err(ApiError::ForbiddenMissingRole { role: "payment_access", trace_id: sec.trace_id });
+    }
+    Ok(Json(IntentResponse { id: req.id, state: "refunded".into() }))
+}
+
 #[allow(unused_variables)]
 pub async fn process_card_payment(
     State(state): State<AppState>,

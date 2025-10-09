@@ -10,6 +10,8 @@ Legend: [ ] Not Started · [~] In Progress · [x] Done
 
 Each task: Goal (implicit in title), Actions, Acceptance, Dependencies.
 
+Quick index: [Cashier MVP Addendum](#addendum--cashier-mvp-critical-path--proposed-additions)
+
 ## Program Overview — NovaPOS MVP (observability-first, tenant-aware)
 
 What we’re building
@@ -56,7 +58,7 @@ Scope map (current status)
 
 ## Phase 0.1 – KPI & Messaging Observability
 
-- [ ] P0-04 End-to-end KPI instrumentation
+- [ ] P0-04 End-to-end KPI instrumentation [cashier-mvp]
   Actions: Add distributed tracing across POS → Order → Inventory → Payment → Kafka; expose checkout latency histograms and tap-count metrics with stable labels by tenant/store.
   Acceptance: Dashboards display p50/p95 checkout latency and tap counts per tenant/store; alerting wired to SLOs (<2s, <5 taps) with test alerts.
   Dependencies: P0-01.
@@ -66,7 +68,7 @@ Scope map (current status)
   Acceptance: Lag panels present and green in steady state; alert triggers on configured thresholds; runbook linked.
   Dependencies: P0-02.
 
-- [ ] P0-06 POS offline queue telemetry
+- [ ] P0-06 POS offline queue telemetry [cashier-mvp]
   Actions: Emit offline queue depth/failure metrics from POS; backend aggregates per-tenant; dashboards and alerts.
   Acceptance: Dashboard shows offline queue depth by store; alert on prolonged backlog; synthetic tests validate ingestion.
   Dependencies: P9-02.
@@ -75,17 +77,17 @@ Scope map (current status)
 
 ## Phase 1 – Inventory Multi-Location & Reservations
 
-- [x] P1-01 Multi-location inventory schema & queries
+- [x] P1-01 Multi-location inventory schema & queries [cashier-mvp]
   Actions: Add `locations`, augment `inventory_items(location_id)`, backfill, aggregate queries.
   Acceptance: Migrations 4003–4005 applied; queries return per-location and aggregated views; tests pass.
   Dependencies: None.
 
-- [x] P1-02 Reservation lifecycle with expiration
+- [x] P1-02 Reservation lifecycle with expiration [cashier-mvp]
   Actions: Create/release endpoints; sweeper job to expire; emit audit and domain events; restock on expire.
   Acceptance: Integration test validates restock + events; metrics emitted.
   Dependencies: P1-01.
 
-- [~] P1-03 Low-stock alerts and UI surfacing
+- [~] P1-03 Low-stock alerts and UI surfacing [cashier-mvp]
   Actions: Emit `inventory.low_stock` on threshold; add admin UI listing and threshold management.
   Acceptance: Events present; admin page shows low-stock list; thresholds configurable.
   Dependencies: P1-02.
@@ -94,22 +96,22 @@ Scope map (current status)
 
 ## Phase 2 – Tenancy, RBAC, and Audit Foundations
 
-- [~] P2-01 Shared tenancy + RBAC middleware rollout
+- [~] P2-01 Shared tenancy + RBAC middleware rollout [cashier-mvp]
   Actions: Migrate remaining services to common security crate; remove per-service duplicates.
   Acceptance: All mutating endpoints enforce role checks; duplication eliminated.
   Dependencies: None.
 
-- [x] P2-02 Audit schema, sink, and producer in core services
+- [x] P2-02 Audit schema, sink, and producer in core services [cashier-mvp]
   Actions: Common audit schema v1; sink abstraction; integrate in product & order services.
   Acceptance: Audit events emitted for CRUD and order lifecycle; tests/metrics present.
   Dependencies: None.
 
-- [x] P2-03 Audit consumer, retention, and redaction
+- [x] P2-03 Audit consumer, retention, and redaction [cashier-mvp]
   Actions: Consumer service persists and exposes metrics; retention TTL job; redaction layer with modes.
   Acceptance: Consumer running; retention job metrics; redaction configurable; change log entries present.
   Dependencies: P2-02.
 
-- [~] P2-04 Audit query API and admin views
+- [~] P2-04 Audit query API and admin views [cashier-mvp]
   Actions: `/audit/events` read API (filters, pagination); admin portal search UI.
   Acceptance: API returns filtered, paginated results; basic admin UI browses events.
   Dependencies: P2-03.
@@ -142,17 +144,17 @@ Scope map (current status)
 
 ## Phase 3 – Returns & Exchanges Foundations
 
-- [x] P3-01 Exchange flow
+- [x] P3-01 Exchange flow [cashier-mvp]
   Actions: Implement exchange endpoint in order-service with delta/adjustments; E2E in POS/Admin.
   Acceptance: E2E happy path passes; inventory adjustments correct.
   Dependencies: P1-02.
 
-- [ ] P3-02 Return policy module
+- [ ] P3-02 Return policy module [cashier-mvp]
   Actions: `return_policies` schema; apply to calculations and UI; audit events on changes.
   Acceptance: Policy applied in return calculation endpoint; UI displays fees/conditions; audit persisted.
   Dependencies: P3-01.
 
-- [ ] P3-03 Manager override + audit
+- [ ] P3-03 Manager override + audit [cashier-mvp]
   Actions: Role-gated override endpoint; audit events on override.
   Acceptance: Overrides recorded and visible in audit views.
   Dependencies: P2-04, P3-02.
@@ -180,12 +182,12 @@ Scope map (current status)
 
 ## Phase 4 – Loyalty Program
 
-- [x] P4-01 Points read + earn accrual
+- [x] P4-01 Points read + earn accrual [cashier-mvp]
   Actions: `/points` read; consume `order.completed` to earn; persist balances.
   Acceptance: Read and accrual paths tested; metrics present.
   Dependencies: P1-02.
 
-- [ ] P4-02 Redemption / burn / expiry
+- [ ] P4-02 Redemption / burn / expiry [cashier-mvp]
   Actions: Transactional decrement; expiry model; safeguards.
   Acceptance: Redemption endpoints tested; consistency maintained under concurrency.
   Dependencies: P4-01.
@@ -199,7 +201,7 @@ Scope map (current status)
 
 ## Phase 4.1 – Loyalty Offline & 360
 
-- [ ] P4-04 Offline cache & reconciliation
+- [ ] P4-04 Offline cache & reconciliation [cashier-mvp]
   Actions: POS offline balance cache with reconciliation job to correct missed accruals; idempotent adjustments.
   Acceptance: Offline accrual reconciles without double-counting; metrics for corrections exposed.
   Dependencies: P4-01, P5-01.
@@ -218,17 +220,17 @@ Scope map (current status)
 
 ## Phase 5 – Offline Orders & Replay Validation
 
-- [ ] P5-01 Server-side replay validation
+- [ ] P5-01 Server-side replay validation [cashier-mvp]
   Actions: Order-service validation endpoint referencing inventory and price; diff contract.
   Acceptance: Replay detects conflicts and returns deterministic diff response.
   Dependencies: P1-01.
 
-- [ ] P5-02 Pending watchdog + reconciliation
+- [ ] P5-02 Pending watchdog + reconciliation [cashier-mvp]
   Actions: Background job for stalled PENDING orders; metrics and reconciliation.
   Acceptance: Watchdog metrics; stalled orders resolved or surfaced.
   Dependencies: P5-01.
 
-- [ ] P5-03 Offline conflict resolution UI
+- [ ] P5-03 Offline conflict resolution UI [cashier-mvp]
   Actions: POS modal with diff, adjust/override/cancel options.
   Acceptance: E2E flow exercised; audit events for overrides.
   Dependencies: P5-01.
@@ -242,7 +244,7 @@ Scope map (current status)
   Acceptance: Duplicate submissions do not create duplicate orders; events delivered exactly-once to business logic; chaos test demonstrates durability.
   Dependencies: P10-03.
 
-- [ ] P5-05 Price-lock snapshots on order lines
+- [ ] P5-05 Price-lock snapshots on order lines [cashier-mvp]
   Actions: Capture unit price/tax rule snapshot per line at submission; validate on replay.
   Acceptance: Replay diff can reconcile catalog changes deterministically; reporting consistent.
   Dependencies: P5-01.
@@ -251,17 +253,17 @@ Scope map (current status)
 
 ## Phase 6 – Payments & Gateway Foundations
 
-- [ ] P6-01 Payment intent model
+- [ ] P6-01 Payment intent model [cashier-mvp]
   Actions: `payment_intents` table; idempotent create; state transitions; reversal link.
   Acceptance: Idempotency enforced; transitions tested; persistence stable.
   Dependencies: P2-01.
 
-- [ ] P6-02 Webhook hardening
+- [ ] P6-02 Webhook hardening [cashier-mvp]
   Actions: HMAC signature verification; nonce storage; replay detection.
   Acceptance: Valid signatures accepted; replays rejected; audit events recorded.
   Dependencies: P6-01.
 
-- [ ] P6-03 Refund/reversal passthrough
+- [ ] P6-03 Refund/reversal passthrough [cashier-mvp]
   Actions: Gateway abstraction and endpoints for reversal; mapping from orders.
   Acceptance: Reversal flows complete; linked to original tender.
   Dependencies: P6-01, P6-02.
@@ -270,12 +272,12 @@ Scope map (current status)
 
 ## Phase 6.1 – Tender Orchestration & Reconciliation
 
-- [ ] P6-04 Split tender support
+- [ ] P6-04 Split tender support [cashier-mvp]
   Actions: Payment intent sub-allocations with validation; POS/Admin updates; reconciliation and receipts.
   Acceptance: Orders complete with ≥2 tenders; totals reconcile; tests and receipts verified.
   Dependencies: P6-01.
 
-- [ ] P6-05 Auth/capture/void lifecycle
+- [ ] P6-05 Auth/capture/void lifecycle [cashier-mvp]
   Actions: Payment state machine supporting auth→capture→refund/void; timers for auto-void; metrics.
   Acceptance: State transitions enforced; auto-void works; observability present.
   Dependencies: P6-01.
@@ -289,7 +291,7 @@ Scope map (current status)
 
 ## Phase 7 – Admin & Management
 
-- [~] P7-01 User management CRUD & roles
+- [~] P7-01 User management CRUD & roles [cashier-mvp]
   Actions: Full lifecycle (create/edit/deactivate/role changes) with audit events.
   Acceptance: Admin UI actions persist; audit recorded; role enforcement consistent.
   Dependencies: P2-01, P2-02.
@@ -308,12 +310,12 @@ Scope map (current status)
 
 ## Phase 8 – BOPIS / Fulfillment
 
-- [~] P8-01 Promise/reservation layer
+- [~] P8-01 Promise/reservation layer [cashier-mvp]
   Actions: Extend reservations with statuses/expirations and SLAs.
   Acceptance: Promises visible; expirations enforced; audit present.
   Dependencies: P1-02.
 
-- [ ] P8-02 Pickup workflow states
+- [ ] P8-02 Pickup workflow states [cashier-mvp]
   Actions: Domain model and APIs (ready, picked_up, expired, cancelled).
   Acceptance: State transitions recorded; inventory reconciled.
   Dependencies: P8-01.
@@ -331,17 +333,17 @@ Scope map (current status)
 
 ## Phase 9 – Offline Sync Layer
 
-- [ ] P9-01 Conflict diff service
+- [ ] P9-01 Conflict diff service [cashier-mvp]
   Actions: Endpoint compares submitted vs authoritative values; structured diff.
   Acceptance: Returns deterministic diff format; used by POS.
   Dependencies: P5-01.
 
-- [ ] P9-02 Retry telemetry & dashboards
+- [ ] P9-02 Retry telemetry & dashboards [cashier-mvp]
   Actions: Metrics endpoint for queue depth/failure counts; dashboards.
   Acceptance: Metrics scraped; dashboard panel green.
   Dependencies: P9-01.
 
-- [ ] P9-03 Duplicate prevention beyond idempotency
+- [ ] P9-03 Duplicate prevention beyond idempotency [cashier-mvp]
   Actions: Hashing/content-based suppression.
   Acceptance: Duplicate rate reduced; metrics demonstrate effect.
   Dependencies: P9-01.
@@ -357,7 +359,7 @@ Scope map (current status)
   Acceptance: Variant creation/edit flows tested; API and Admin UI updated.
   Dependencies: None.
 
-- [ ] P11-02 Per-variant inventory and barcode mapping
+- [ ] P11-02 Per-variant inventory and barcode mapping [cashier-mvp]
   Actions: Track inventory at variant level; map barcodes to variants.
   Acceptance: Sales decrement correct variant stock; barcode scans resolve to variant.
   Dependencies: P11-01, P1-01.
@@ -391,17 +393,17 @@ Scope map (current status)
 
 ## Phase 13 – Device & Peripherals Layer
 
-- [ ] P13-01 Device abstraction SDK
+- [ ] P13-01 Device abstraction SDK [cashier-mvp]
   Actions: Unified interfaces for printer, scanner, payment terminal with fallbacks.
   Acceptance: POS uses SDK; mocks available for CI; errors surfaced gracefully.
   Dependencies: None.
 
-- [ ] P13-02 Hot-plug detection and retries
+- [ ] P13-02 Hot-plug detection and retries [cashier-mvp]
   Actions: Detect device (dis)connect; retry queues/backoff; telemetry.
   Acceptance: Hot-plug scenarios pass; retries visible in metrics.
   Dependencies: P13-01.
 
-- [ ] P13-03 Device telemetry and health
+- [ ] P13-03 Device telemetry and health [cashier-mvp]
   Actions: Emit device health metrics and logs; dashboards.
   Acceptance: Device panels show status per store; alerts on failures.
   Dependencies: P0-04.
@@ -413,7 +415,7 @@ Scope map (current status)
 
 ## Phase 14 – Promotions & Price Governance
 
-- [ ] P14-01 Promo engine and scheduling
+- [ ] P14-01 Promo engine and scheduling [cashier-mvp]
   Actions: Rules engine for promos/markdowns; scheduling and scopes.
   Acceptance: Promos applied deterministically; schedule honored; audit recorded.
   Dependencies: P10-01.
@@ -447,7 +449,7 @@ Scope map (current status)
 
 ## Phase 16 – E‑receipts & Communications
 
-- [ ] P16-01 Notifications service and templates
+- [ ] P16-01 Notifications service and templates [cashier-mvp]
   Actions: Multi-channel notifications (email/SMS/webhook) with templating and tenant branding.
   Acceptance: E‑receipt sent on order completion; retries and provider failover verified.
   Dependencies: P2-01.
@@ -464,12 +466,12 @@ Scope map (current status)
 
 ## Phase 17 – Tasking & Store Checklists
 
-- [ ] P17-01 Task service and API
+- [ ] P17-01 Task service and API [cashier-mvp]
   Actions: CRUD for tasks/checklists; assignment to stores/users; schedules.
   Acceptance: Tasks created/assigned/completed with audit; APIs tested.
   Dependencies: P2-01.
 
-- [ ] P17-02 POS/Admin integration
+- [ ] P17-02 POS/Admin integration [cashier-mvp]
   Actions: Surfaces open/close procedures and directives in POS/Admin.
   Acceptance: Staff can complete tasks; manager views show progress.
   Dependencies: P17-01.
@@ -612,3 +614,85 @@ When a task flips to [x], move any residual TODOs into the backlog section of MV
 - Phase 18 Identity at Scale
   - Services: `auth-service`
   - Files: OIDC/SAML config; SCIM endpoints; ABAC policies in common security crate
+
+---
+
+## Addendum — Cashier MVP: Critical Path & Proposed Additions
+
+scope: cashier-mvp
+
+This addendum aggregates the cashier journey items into a single reference without altering existing phases. It maps “already in place”, “in progress”, known gaps, and a recommended sequence for MVP, referencing IDs from this checklist.
+
+### Already in Place (references)
+
+- Inventory basics: multi-location and reservations — P1-01, P1-02 (scanning/building carts with stock control)
+- Exchange flow (baseline exceptions) — P3-01
+- Loyalty accrual on order complete (read + earn) — P4-01
+- Audit foundations (emit + consume/retention/redaction) — P2-02, P2-03
+- Program overview mirrors the above status — see Program Overview section
+
+### In Progress (impacts cashier)
+
+- RBAC middleware rollout — P2-01
+- Audit query API + admin views — P2-04
+- User management CRUD & roles — P7-01
+- Low stock alerts (UI surfacing) — P1-03
+- BOPIS promise/reservation layer — P8-01
+
+### Gaps to Enable End-to-End Cashier
+
+- Opening & setup
+  - Device/peripherals: abstraction + hot plug + telemetry — P13-01, P13-02, P13-03
+  - Offline login/grace mode for POS — Proposed (see below)
+- Active sales & checkout
+  - Payments foundation (intents, webhook hardening, refunds, auth/capture/void) — P6-01, P6-02, P6-03, P6-05
+  - Split tender — P6-04
+  - Printed/e‑receipts — P16-01 (or print-only receipts via devices)
+  - Promotions/discounts engine — P14-01
+  - Variant barcode mapping (scan → correct variant) — P11-02
+  - Price/tax snapshot for replay integrity — P5-05
+  - Crypto/QR tender — Proposed (via Integration Gateway)
+- Special cases
+  - Returns policy + manager override (with payment refund passthrough) — P3-02, P3-03, P6-03
+  - Loyalty redemption + offline cache — P4-02, P4-04
+  - BOPIS pickup workflow states — P8-02
+- Closing / after sales
+  - Offline orders/replay + sync layer (queue, diff, duplicate prevention) — P5-01, P5-02, P9-01, P9-02, P9-03
+  - Cash drawer open/close, counting, and EOD settlement — Proposed
+  - Tasking & store checklists for opening/closing — P17-01, P17-02
+  - KPI/perf telemetry and POS offline queue metrics — P0-04, P0-06
+
+### Critical Path (Cashier MVP Recommendation)
+
+1) P13-01 Device SDK (printer/scanner/terminal) [cashier-addendum]
+2) P6-01 Payment intents (+ P6-02 webhook hardening) [cashier-addendum]
+3) P6-03 Refund passthrough (to support returns/exchanges refunds) [cashier-addendum]
+4) P13-02 Hot plug detection and retries [cashier-addendum]
+5) P16-01 E‑receipt templates OR ensure print-only receipts via P13-01 [cashier-addendum]
+6) P11-02 Variant barcode mapping (or accept base SKU scans initially) [cashier-addendum]
+7) P3-02 Return policy and P3-03 manager override (with audit) [cashier-addendum]
+8) P4-02 Loyalty redemption (optional for MVP; accrual already live) [cashier-addendum]
+9) P5-01 Replay validation (+ P5-03 POS UI) if offline is day 1 [cashier-addendum]
+10) P0-04 KPI instrumentation for checkout latency/taps [cashier-addendum]
+
+### Proposed Additions (New Items — Append-only)
+
+- Offline login grace window with cached credentials/claims
+  - Actions: POS caches encrypted credentials/claims; configurable grace TTL; offline mode banner; audit offline enter/exit; tenant toggle.
+  - Acceptance: Login and transact during outage within TTL; resync on reconnect without data loss; security review completed.
+  - Dependencies: P2-01, P5-01 (if offline orders are day 1), P0-04.
+
+- Cash tender + drawer lifecycle (open/close, counts, over/short, Z report)
+  - Actions: Model cash tender; drawer sessions and counts; change calc; EOD Z report; audit; minimal report export.
+  - Acceptance: Cash sales complete with change; drawer discrepancies tracked; EOD report available; audit/metrics present.
+  - Dependencies: P13-01 (device SDK), P7-01 (roles), P6-01 (linkages), P16-01 or print pipeline.
+
+- Crypto/QR tender integration
+  - Actions: QR initiation in POS; Integration Gateway route; webhook confirmation in payment-service; refund passthrough.
+  - Acceptance: Sandbox E2E settles; refunds supported; audit/telemetry captured; tenant opt-in.
+  - Dependencies: P6-01, P6-02, P6-03, Integration Gateway.
+
+- Training mode and guided workflows (returns/crypto)
+  - Actions: Training toggle (no external side-effects) and guided overlays; link to KB; role-based enablement.
+  - Acceptance: Reduced error rate in usability tests; clear visual separation; audit unaffected.
+  - Dependencies: P2-01, related feature phases above.

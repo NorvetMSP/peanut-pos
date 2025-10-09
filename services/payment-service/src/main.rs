@@ -18,7 +18,7 @@ use tokio::time::{interval, MissedTickBehavior};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tracing::{debug, info, warn};
 
-use payment_service::{payment_handlers::{process_card_payment, void_card_payment}, AppState};
+use payment_service::{payment_handlers::{process_card_payment, void_card_payment, create_intent, confirm_intent, capture_intent, void_intent, refund_intent}, AppState};
 #[cfg(any(feature = "kafka", feature = "kafka-producer"))] use common_audit::{KafkaAuditSink, AuditProducer, AuditProducerConfig, BufferedAuditProducer};
 #[cfg(any(feature = "kafka", feature = "kafka-producer"))] use rdkafka::producer::FutureProducer;
 
@@ -96,6 +96,12 @@ async fn main() -> anyhow::Result<()> {
         .route("/metrics", get(metrics))
         .route("/payments", post(process_card_payment))
         .route("/payments/void", post(void_card_payment))
+        // Payment intents MVP (HTTP JSON stubs)
+        .route("/payment_intents", post(create_intent))
+        .route("/payment_intents/confirm", post(confirm_intent))
+        .route("/payment_intents/capture", post(capture_intent))
+        .route("/payment_intents/void", post(void_intent))
+        .route("/payment_intents/refund", post(refund_intent))
         .with_state(state)
         .layer(middleware::from_fn(http_error_metrics))
         .layer(cors);
