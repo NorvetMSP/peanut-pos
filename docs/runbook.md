@@ -138,6 +138,36 @@ Behavior:
 - With `DATABASE_URL`, state transitions are enforced. Invalid transitions return HTTP 409 with code `invalid_state_transition`.
 - Idempotency: unique constraint on `idempotency_key` when provided.
 
+### Webhook verification
+
+Incoming webhooks are protected by an HMAC signature with timestamp skew and nonce replay checks. Enforcement is applied by middleware to any route under the path prefix `/webhooks/`.
+
+- Required headers:
+  - X-Signature: `sha256=<hex>` HMAC over the canonical string below
+  - X-Timestamp: Unix epoch seconds
+  - X-Nonce: Unique, single-use nonce per delivery
+  - X-Provider: Optional provider tag, stored with the nonce for audit
+
+- Canonical string to sign:
+  - `ts:<X-Timestamp>\nnonce:<X-Nonce>\nbody_sha256:<sha256(body)>`
+
+- Environment configuration:
+  - WEBHOOK_ACTIVE_SECRET: HMAC secret used to validate signatures
+  - WEBHOOK_MAX_SKEW_SECS: Max allowed clock skew in seconds (default 300)
+
+- Behavior:
+  - Missing or mismatched signature → 401 with `X-Error-Code: sig_missing|sig_mismatch`
+  - Invalid timestamp or excessive skew → 401 with `X-Error-Code: sig_ts_invalid|sig_skew`
+  - Nonce replay (seen before) → 401 with `X-Error-Code: sig_replay`
+  - When no database is configured, signature and timestamp checks still apply; nonce replay protection is skipped.
+
+- Storage:
+  - Nonces are persisted in `webhook_nonces (nonce TEXT PRIMARY KEY, ts TIMESTAMPTZ DEFAULT now(), provider TEXT)`
+
+Notes:
+
+- The middleware is enabled; add webhook routes under `/webhooks/` to activate protection on those endpoints.
+
 ### DB-backed tax rate overrides
 
 We support per-tenant, per-location, and per-POS-instance tax rate overrides. The resolver applies precedence:

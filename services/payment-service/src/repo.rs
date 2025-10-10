@@ -117,3 +117,31 @@ pub async fn transition_state(db: &PgPool, id: &str, new_state: IntentState) -> 
     .await?;
     Ok(rec)
 }
+
+pub async fn transition_with_provider(
+    db: &PgPool,
+    id: &str,
+    new_state: IntentState,
+    provider: Option<&str>,
+    provider_ref: Option<&str>,
+    metadata_json: Option<&serde_json::Value>,
+) -> Result<Option<PaymentIntent>> {
+    let rec = sqlx::query_as::<_, PaymentIntent>(
+        r#"UPDATE payment_intents
+           SET state = $2,
+               provider = COALESCE($3, provider),
+               provider_ref = COALESCE($4, provider_ref),
+               metadata_json = COALESCE($5, metadata_json),
+               updated_at = now()
+           WHERE id = $1
+           RETURNING id, order_id, amount_minor, currency, state, provider, provider_ref, idempotency_key, metadata_json, created_at, updated_at"#,
+    )
+    .bind(id)
+    .bind(new_state.as_str())
+    .bind(provider)
+    .bind(provider_ref)
+    .bind(metadata_json)
+    .fetch_optional(db)
+    .await?;
+    Ok(rec)
+}

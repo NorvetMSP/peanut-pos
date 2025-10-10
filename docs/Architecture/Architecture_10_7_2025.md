@@ -272,6 +272,10 @@ Payment intents (MVP):
 - Without DB, handlers return stubbed nominal states to enable local workflows without persistence.
 - Order Service can optionally initiate a payment intent during card checkout when `ENABLE_PAYMENT_INTENTS=1` is set; failures are non-blocking for order creation.
 
+Webhook verification:
+
+- Payment Service includes a middleware that protects routes under `/webhooks/*` with HMAC signatures (header `X-Signature`), timestamp skew validation (config `WEBHOOK_MAX_SKEW_SECS`, default 300s), and nonce replay protection persisted in `webhook_nonces`. When no DB is configured, signature and skew checks still apply; nonce replay enforcement is skipped.
+
 
 - Integrates with Coinbase Commerce.
 - Creates charge, receives webhook, publishes `payment.completed` to Kafka.

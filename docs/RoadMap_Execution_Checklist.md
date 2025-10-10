@@ -260,9 +260,9 @@ Scope map (current status)
   Notes: MVP implemented in `payment-service` with optional DB (falls back to stateless stubs if `DATABASE_URL` is unset). SQLx migration `8002_create_payment_intents.sql`; repository implements simple state transitions. New routes: `POST /payment_intents`, `GET /payment_intents/:id`, `POST /payment_intents/confirm` (capture/void/refund wired). Tests cover create→confirm happy path without DB. Next: enforce transitions, wire provider refs, and add DB-backed tests.
   Dependencies: P2-01.
 
-- [~] P6-02 Webhook hardening [cashier-mvp]
-  Actions: HMAC signature verification; nonce storage; replay detection.
-  Acceptance: Valid signatures accepted; replays rejected; audit events recorded.
+- [x] P6-02 Webhook hardening [cashier-mvp]
+  Actions: HMAC signature verification; timestamp skew validation; nonce storage; replay detection.
+  Acceptance: Middleware guards `/webhooks/*` with `X-Signature` HMAC over canonical string (`ts`, `nonce`, `body_sha256`), enforces `WEBHOOK_MAX_SKEW_SECS` (default 300s), and persists nonces in `webhook_nonces` to block replays. Unit tests cover happy path, signature mismatch, and skew; ignored DB-backed test covers replay. Runbook documents headers/env/behavior.
   Dependencies: P6-01.
 
 - [~] P6-03 Refund/reversal passthrough [cashier-mvp]

@@ -73,8 +73,8 @@ async fn db_backed_transitions_and_conflicts() {
     let resp = app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status().as_u16(), 409);
 
-    // Confirm (created -> authorized)
-    let body = json!({"id":"pi_db_1"}).to_string();
+    // Confirm (created -> authorized) with provider refs
+    let body = json!({"id":"pi_db_1","provider":"valor","providerRef":"auth_123","metadata": {"term":"T1"}}).to_string();
     let mut req = Request::builder().uri("/payment_intents/confirm").method("POST")
         .header("content-type","application/json")
         .body(axum::body::Body::from(body)).unwrap();
@@ -84,8 +84,8 @@ async fn db_backed_transitions_and_conflicts() {
     let resp = app.clone().oneshot(req).await.unwrap();
     assert!(resp.status().is_success());
 
-    // Now capture is valid
-    let body = json!({"id":"pi_db_1"}).to_string();
+    // Now capture is valid and can update provider_ref
+    let body = json!({"id":"pi_db_1","providerRef":"cap_456"}).to_string();
     let mut req = Request::builder().uri("/payment_intents/capture").method("POST")
         .header("content-type","application/json")
         .body(axum::body::Body::from(body)).unwrap();
@@ -94,6 +94,16 @@ async fn db_backed_transitions_and_conflicts() {
     headers.insert("X-Roles", "cashier".parse().unwrap());
     let resp = app.clone().oneshot(req).await.unwrap();
     assert!(resp.status().is_success());
+
+    // Verify provider_ref persisted as cap_456 after capture
+    let mut req = Request::builder().uri("/payment_intents/pi_db_1").method("GET")
+        .body(axum::body::Body::empty()).unwrap();
+    let headers = req.headers_mut();
+    headers.insert("X-Tenant-ID", "00000000-0000-0000-0000-000000000000".parse().unwrap());
+    headers.insert("X-Roles", "cashier".parse().unwrap());
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert!(resp.status().is_success());
+    // We can't see provider_ref via current GET response shape; for now only ensure success.
 
     // Invalid: capture again after captured -> 409
     let body = json!({"id":"pi_db_1"}).to_string();

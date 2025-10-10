@@ -81,7 +81,12 @@ pub async fn create_intent(
 }
 
 #[derive(Deserialize)]
-pub struct ConfirmIntentRequest { pub id: String }
+pub struct ConfirmIntentRequest {
+    pub id: String,
+    pub provider: Option<String>,
+    #[serde(rename = "providerRef")] pub provider_ref: Option<String>,
+    #[serde(rename = "metadata")] pub metadata_json: Option<serde_json::Value>,
+}
 
 #[allow(unused_variables)]
 pub async fn confirm_intent(
@@ -102,7 +107,7 @@ pub async fn confirm_intent(
         if !repo::is_valid_transition(&cur.state, repo::IntentState::Authorized) {
             return Err(ApiError::Conflict { code: "invalid_state_transition", trace_id: sec.trace_id, message: Some(format!("from={} to=authorized", cur.state)) });
         }
-        let rec = repo::transition_state(db, &req.id, repo::IntentState::Authorized).await
+        let rec = repo::transition_with_provider(db, &req.id, repo::IntentState::Authorized, req.provider.as_deref(), req.provider_ref.as_deref(), req.metadata_json.as_ref()).await
             .map_err(|e| ApiError::Internal { trace_id: sec.trace_id, message: Some(format!("db_error: {e}")) })?;
         if let Some(pi) = rec { return Ok(Json(IntentResponse { id: pi.id, state: pi.state })); }
         return Err(ApiError::NotFound { code: "payment_intent_not_found", trace_id: sec.trace_id });
@@ -111,7 +116,12 @@ pub async fn confirm_intent(
 }
 
 #[derive(Deserialize)]
-pub struct CaptureIntentRequest { pub id: String }
+pub struct CaptureIntentRequest {
+    pub id: String,
+    pub provider: Option<String>,
+    #[serde(rename = "providerRef")] pub provider_ref: Option<String>,
+    #[serde(rename = "metadata")] pub metadata_json: Option<serde_json::Value>,
+}
 
 #[allow(unused_variables)]
 pub async fn capture_intent(
@@ -131,7 +141,7 @@ pub async fn capture_intent(
         if !repo::is_valid_transition(&cur.state, repo::IntentState::Captured) {
             return Err(ApiError::Conflict { code: "invalid_state_transition", trace_id: sec.trace_id, message: Some(format!("from={} to=captured", cur.state)) });
         }
-        let rec = repo::transition_state(db, &req.id, repo::IntentState::Captured).await
+        let rec = repo::transition_with_provider(db, &req.id, repo::IntentState::Captured, req.provider.as_deref(), req.provider_ref.as_deref(), req.metadata_json.as_ref()).await
             .map_err(|e| ApiError::Internal { trace_id: sec.trace_id, message: Some(format!("db_error: {e}")) })?;
         if let Some(pi) = rec { return Ok(Json(IntentResponse { id: pi.id, state: pi.state })); }
         return Err(ApiError::NotFound { code: "payment_intent_not_found", trace_id: sec.trace_id });
