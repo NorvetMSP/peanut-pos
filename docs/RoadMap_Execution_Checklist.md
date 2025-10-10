@@ -403,6 +403,7 @@ Scope map (current status)
   Actions: Detect device (dis)connect; retry queues/backoff; telemetry.
   Acceptance: Hot-plug scenarios pass; retries visible in metrics.
   Dependencies: P13-01.
+  Notes: Event-driven device status added to the POS Device SDK; printer hot-plug detection surfaces status changes in the UI. Print jobs are queued when the device is unavailable and automatically retried on reconnect with backoff. Unit tests cover device status events and retry queue success paths. Telemetry counters (attempts/success/fail) and offline queue depth metrics are pending and will be addressed alongside P0-06/P9-02. A "queued for retry" toast in POS will be added next.
 
 - [ ] P13-03 Device telemetry and health [cashier-mvp]
   Actions: Emit device health metrics and logs; dashboards.

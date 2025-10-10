@@ -173,6 +173,14 @@ Architecture is ready to offload to an analytical store or warehouse (e.g., BigQ
 - Prints receipts; payment terminal integration planned.
 - Idempotency prevents duplicate orders during resync.
 
+Device & peripherals (MVP status):
+
+- Unified Device SDK interfaces for printer/scanner/terminal with mock drivers for dev/tests.
+- Event-driven device status: printers emit `status` events; UI shows a proactive banner when disconnected/busy/error.
+- Hot-plug detection and retry: print jobs queue when the printer is unavailable and auto-retry with backoff once the device reports ready; failure and success toasts guide the cashier. A "queued for retry" toast is planned.
+- Branding on receipts resolved via tenant-config when available with environment fallback.
+- Telemetry for retry attempts/success/fail and offline queue depth is planned; dashboards will be wired under P0-06/P9-02.
+
 ### 2. Back-office Admin Portal
 
 - React web app (port `3001`) for management tasks.
