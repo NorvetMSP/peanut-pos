@@ -276,6 +276,8 @@ services:
     image: prom/prometheus:v2.54.0
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--web.enable-lifecycle'
+      - '--alertmanager.url=http://alertmanager:9093'
     ports:
       - '9090:9090'
     volumes:
@@ -295,6 +297,20 @@ services:
       - '3002:3000'
     volumes:
       - ./monitoring/grafana/provisioning:/etc/grafana/provisioning
+    restart: 'no'
+    networks: [novanet]
+
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    command:
+      - '--config.file=/etc/alertmanager/alertmanager.yml'
+    ports:
+      - '9093:9093'
+    environment:
+      - SLACK_WEBHOOK_URL=${SLACK_WEBHOOK_URL:-}
+      - PAGERDUTY_ROUTING_KEY=${PAGERDUTY_ROUTING_KEY:-}
+    volumes:
+      - ./monitoring/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
     restart: 'no'
     networks: [novanet]
   # Frontends (optional in dev)

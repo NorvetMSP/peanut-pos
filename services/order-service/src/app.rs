@@ -173,29 +173,50 @@ pub fn build_router(state: AppState) -> Router {
     }
     async fn ingest_pos_telemetry(
         axum::extract::State(_state): axum::extract::State<AppState>,
-        axum::extract::TypedHeader(axum::headers::HeaderMap): axum::extract::TypedHeader<axum::headers::HeaderMap>,
+        headers: axum::http::HeaderMap,
         axum::extract::Json(payload): axum::extract::Json<PosTelemetryPayload>,
-        axum::http::HeaderMap: axum::http::HeaderMap,
     ) -> (StatusCode, &'static str) {
         // Extract tenant_id/store_id labels from request headers or payload.labels
         // Expect X-Tenant-ID header and optional X-Store-ID
         // Fallback to labels.tenant_id/store_id in payload
-        let mut tenant_id = "unknown".to_string();
-        let mut store_id = "unknown".to_string();
-        // Note: due to type constraints above, re-extract from axum::http::HeaderMap in this scope
-        // Simplify by reading from payload.labels first
-        if let Some(tid) = payload.labels.get("tenant_id").and_then(|v| v.as_str()) {
-            tenant_id = tid.to_string();
-        }
-        if let Some(sid) = payload.labels.get("store_id").and_then(|v| v.as_str()) {
-            store_id = sid.to_string();
-        }
+        let mut tenant_id = headers
+            .get("x-tenant-id")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| {
+                payload
+                    .labels
+                    .get("tenant_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown")
+                    .to_string()
+            });
+
+        let mut store_id = headers
+            .get("x-store-id")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| {
+                payload
+                    .labels
+                    .get("store_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown")
+                    .to_string()
+            });
+
+        // Normalize: trim to avoid accidental whitespace
+        tenant_id = tenant_id.trim().to_string();
+        store_id = store_id.trim().to_string();
 
         for c in payload.counters {
             match c.name.as_str() {
-                n if n.contains("pos.print.retry.queued") => POS_PRINT_RETRY_COUNTER.with_label_values(&[&tenant_id, &store_id, "queued"]).inc_by(c.value as u64),
-                n if n.contains("pos.print.retry.success") => POS_PRINT_RETRY_COUNTER.with_label_values(&[&tenant_id, &store_id, "success"]).inc_by(c.value as u64),
-                n if n.contains("pos.print.retry.failed") => POS_PRINT_RETRY_COUNTER.with_label_values(&[&tenant_id, &store_id, "failed"]).inc_by(c.value as u64),
+                n if n.contains("pos.print.retry.queued") => POS_PRINT_RETRY_COUNTER
+                    .with_label_values(&[&tenant_id, &store_id, "queued"]).inc_by(c.value as u64),
+                n if n.contains("pos.print.retry.success") => POS_PRINT_RETRY_COUNTER
+                    .with_label_values(&[&tenant_id, &store_id, "success"]).inc_by(c.value as u64),
+                n if n.contains("pos.print.retry.failed") => POS_PRINT_RETRY_COUNTER
+                    .with_label_values(&[&tenant_id, &store_id, "failed"]).inc_by(c.value as u64),
                 _ => {}
             }
         }
