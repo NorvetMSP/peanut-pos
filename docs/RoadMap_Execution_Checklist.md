@@ -397,7 +397,7 @@ Scope map (current status)
   Actions: Unified interfaces for printer, scanner, payment terminal with fallbacks.
   Acceptance: POS uses SDK; mocks available for CI; errors surfaced gracefully.
   Dependencies: None.
-  Notes: Print-only receipts wired for MVP via Device SDK printer interface; e‑receipt templates deferred (see P16-01). Print failure toast with Retry implemented; success toast confirms print. Optional branding supported via env (see docs/development/pos-receipts.md). Snapshot tests added for receipt formatter.
+  Notes: Print-only receipts wired for MVP via Device SDK printer interface; e‑receipt templates deferred (see P16-01). Print failure toast with Retry implemented; success toast confirms print. Branding resolved via tenant-config when available with env fallback (see docs/development/pos-receipts.md). Proactive printer status banner surfaces disconnected/error states. Snapshot tests added for receipt formatter.
 
 - [ ] P13-02 Hot-plug detection and retries [cashier-mvp]
   Actions: Detect device (dis)connect; retry queues/backoff; telemetry.

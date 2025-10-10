@@ -3,24 +3,26 @@ export type BrandingConfig = {
   brandHeaderLines?: string[];
 };
 
-function readEnvBranding(): BrandingConfig {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const env: any = (import.meta as any).env ?? {};
-  const brandName = typeof env.VITE_BRAND_NAME === 'string' && env.VITE_BRAND_NAME.trim().length > 0
-    ? env.VITE_BRAND_NAME.trim()
-    : undefined;
-  const brandHeaderLines = typeof env.VITE_BRAND_HEADER_LINES === 'string' && env.VITE_BRAND_HEADER_LINES.trim().length > 0
-    ? env.VITE_BRAND_HEADER_LINES.split('|').map((s: string) => s.trim()).filter((s: string) => s.length > 0)
+export function parseBrandingFromEnv(env: Record<string, unknown>): BrandingConfig {
+  const nameRaw = env.VITE_BRAND_NAME;
+  const linesRaw = env.VITE_BRAND_HEADER_LINES;
+  const brandName = typeof nameRaw === 'string' && nameRaw.trim().length > 0 ? nameRaw.trim() : undefined;
+  const brandHeaderLines = typeof linesRaw === 'string' && linesRaw.trim().length > 0
+    ? linesRaw.split('|').map((s: string) => s.trim()).filter((s: string) => s.length > 0)
     : undefined;
   return { brandName, brandHeaderLines };
 }
 
 export function getEnvBranding(): BrandingConfig {
-  return readEnvBranding();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const env: any = (import.meta as any).env ?? {};
+  return parseBrandingFromEnv(env);
 }
 
 export async function resolveBranding(tenantId?: string | null, token?: string | null): Promise<BrandingConfig> {
-  const fallback = readEnvBranding();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const env: any = (import.meta as any).env ?? {};
+  const fallback = parseBrandingFromEnv(env);
   if (!tenantId) return fallback;
 
   const base = (import.meta as any).env?.VITE_AUTH_SERVICE_URL ?? 'http://localhost:8085';
