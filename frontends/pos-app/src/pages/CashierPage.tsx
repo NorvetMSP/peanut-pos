@@ -20,6 +20,9 @@ import './CashierPageModern.css';
 import { printSaleReceipt } from '../receipts/printService';
 import Toast from '../components/Toast';
 import type { SaleReceipt } from '../receipts/format';
+import { resolveBranding } from '../services/branding';
+import { usePrinterStatus } from '../hooks/usePrinterStatus';
+import PrinterStatusBanner from '../components/pos/PrinterStatusBanner';
 
 const PRODUCT_SERVICE_URL = (import.meta.env.VITE_PRODUCT_SERVICE_URL ?? 'http://localhost:8081').replace(/\/$/, '');
 const IDLE_EVENTS: Array<keyof WindowEventMap> = ['mousemove', 'mousedown', 'keypress', 'touchstart', 'focus'];
@@ -120,17 +123,24 @@ const CashierPage: React.FC = () => {
     return 'Unassigned Store';
   }, [currentUser]);
 
-  // Branding from env (can be replaced later with tenant-config fetch)
-  const brandName = useMemo(() => {
-    const v = (import.meta as any).env?.VITE_BRAND_NAME;
-    return typeof v === 'string' && v.trim().length > 0 ? v.trim() : undefined;
-  }, []);
-  const brandHeaderLines = useMemo(() => {
-    const raw = (import.meta as any).env?.VITE_BRAND_HEADER_LINES;
-    if (typeof raw !== 'string' || raw.trim().length === 0) return undefined;
-    // Split on | and trim
-    return raw.split('|').map(s => s.trim()).filter(s => s.length > 0);
-  }, []);
+  // Branding: fetch from tenant config with env fallback
+  const [brandName, setBrandName] = useState<string | undefined>(undefined);
+  const [brandHeaderLines, setBrandHeaderLines] = useState<string[] | undefined>(undefined);
+  useEffect(() => {
+    let cancelled = false;
+    resolveBranding(tenantId, token)
+      .then(b => {
+        if (cancelled) return;
+        setBrandName(b.brandName);
+        setBrandHeaderLines(b.brandHeaderLines);
+      })
+      .catch(() => {
+        // ignore; env fallback already applied in resolver
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [tenantId, token]);
 
   const cashierLabel = useMemo(() => {
     const record = currentUser as Record<string, unknown> | null | undefined;
@@ -361,6 +371,8 @@ const CashierPage: React.FC = () => {
 
   return (
     <div className="cashier-root">
+      {/* Proactive printer status banner */}
+      <PrinterStatusBanner status={usePrinterStatus(7000)} />
       <header className="cashier-header">
         <div className="cashier-header__inner">
           <div className="cashier-header__top">
