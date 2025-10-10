@@ -72,6 +72,7 @@ Scope map (current status)
   Actions: Emit offline queue depth/failure metrics from POS; backend aggregates per-tenant; dashboards and alerts.
   Acceptance: Dashboard shows offline queue depth by store; alert on prolonged backlog; synthetic tests validate ingestion.
   Dependencies: P9-02.
+  Notes: POS now emits local counters/gauges for print retries and queue depth (see `pos-receipts.md`). Console logging is toggled via `VITE_ENABLE_CONSOLE_TELEMETRY`; ingestion can POST snapshots to a backend when `VITE_TELEMETRY_INGEST_URL` is set. Next: define ingestion schema/labels and wire order-service or a dedicated endpoint.
 
 ---
 
@@ -342,6 +343,7 @@ Scope map (current status)
   Actions: Metrics endpoint for queue depth/failure counts; dashboards.
   Acceptance: Metrics scraped; dashboard panel green.
   Dependencies: P9-01.
+  Notes: POS-side metrics are generated (queue depth, retry counters). Plan to aggregate via ingestion endpoint and expose Prometheus metrics for scraping. Align naming with `pos.print.*` counters/gauges.
 
 - [ ] P9-03 Duplicate prevention beyond idempotency [cashier-mvp]
   Actions: Hashing/content-based suppression.

@@ -17,12 +17,13 @@ import RecentOrdersDrawer from '../components/pos/RecentOrdersDrawer';
 import ReplaceItemModal from '../components/pos/ReplaceItemModal';
 import logoTransparent from '../assets/logo_transparent.png';
 import './CashierPageModern.css';
-import { printSaleReceipt, printSaleReceiptWithRetry } from '../receipts/printService';
+import { printSaleReceipt, printSaleReceiptWithRetry, getPrinter } from '../receipts/printService';
 import Toast from '../components/Toast';
 import type { SaleReceipt } from '../receipts/format';
 import { resolveBranding } from '../services/branding';
 import { usePrinterStatus } from '../hooks/usePrinterStatus';
 import PrinterStatusBanner from '../components/pos/PrinterStatusBanner';
+import DeviceDiagnostics from '../components/pos/DeviceDiagnostics';
 
 const PRODUCT_SERVICE_URL = (import.meta.env.VITE_PRODUCT_SERVICE_URL ?? 'http://localhost:8081').replace(/\/$/, '');
 const IDLE_EVENTS: Array<keyof WindowEventMap> = ['mousemove', 'mousedown', 'keypress', 'touchstart', 'focus'];
@@ -82,6 +83,8 @@ const CashierPage: React.FC = () => {
   const [printError, setPrintError] = useState<string | null>(null);
   const [lastReceipt, setLastReceipt] = useState<SaleReceipt | null>(null);
   const [printSuccess, setPrintSuccess] = useState<string | null>(null);
+  const [printQueued, setPrintQueued] = useState<boolean>(false);
+  const [queuedToastDetails, setQueuedToastDetails] = useState<string>('');
   const tenantId = useMemo(() => {
     const raw = currentUser?.tenant_id;
     if (raw === undefined || raw === null) return null;
@@ -256,13 +259,24 @@ const CashierPage: React.FC = () => {
         createdAt: new Date(),
       };
       setLastReceipt(receipt);
-  const printRes = await printSaleReceiptWithRetry(receipt);
+  const printRes = await printSaleReceiptWithRetry(receipt, { onQueued: async () => {
+        try {
+          const printer = await getPrinter();
+          const info = await printer.info();
+          const label = `${info.vendor} ${info.model ?? ''}`.trim();
+          setQueuedToastDetails(`${label || 'Printer'} offline`);
+        } catch {
+          setQueuedToastDetails('Printer offline');
+        }
+        setPrintQueued(true);
+      } });
       if (!printRes.ok) {
         setPrintError(printRes.message ?? 'Printer error');
       } else {
         setPrintError(null);
         setPrintSuccess('Printed');
       }
+      setPrintQueued(false);
       clearCart();
       setInactiveItems([]);
       openPaymentLink(result);
@@ -411,6 +425,9 @@ const CashierPage: React.FC = () => {
               >
                 Logout
               </button>
+              <div style={{ marginLeft: 12 }}>
+                <DeviceDiagnostics />
+              </div>
             </div>
           </div>
           <div className="cashier-header__controls">
@@ -550,13 +567,24 @@ const CashierPage: React.FC = () => {
                   footerNote: 'Duplicate copy',
                 };
                 setLastReceipt(receipt);
-                printSaleReceiptWithRetry(receipt).then(r => {
+                printSaleReceiptWithRetry(receipt, { onQueued: async () => {
+                  try {
+                    const printer = await getPrinter();
+                    const info = await printer.info();
+                    const label = `${info.vendor} ${info.model ?? ''}`.trim();
+                    setQueuedToastDetails(`${label || 'Printer'} offline`);
+                  } catch {
+                    setQueuedToastDetails('Printer offline');
+                  }
+                  setPrintQueued(true);
+                } }).then(r => {
                   if (!r.ok) {
                     setPrintError(r.message ?? 'Printer error');
                   } else {
                     setPrintError(null);
                     setPrintSuccess('Printed');
                   }
+                  setPrintQueued(false);
                 });
               }}
               disabled={cart.length === 0}
@@ -604,6 +632,14 @@ const CashierPage: React.FC = () => {
           durationMs={2000}
           onClose={() => setPrintSuccess(null)}
           variant="success"
+        />
+      )}
+      {printQueued && !printError && !printSuccess && (
+        <Toast
+          message={`${queuedToastDetails || 'Printer offline'} — receipt queued for retry`}
+          durationMs={3000}
+          onClose={() => setPrintQueued(false)}
+          variant="default"
         />
       )}
     </div>

@@ -1,6 +1,7 @@
 import { MockPrinter } from "../devices/mocks/mockPrinter";
 import type { PrinterDevice } from "../devices/printer";
 import { buildSaleReceiptJob, type SaleReceipt } from "./format";
+import { incCounter, setGauge, setTimestamp } from "../services/telemetry";
 
 let cached: PrinterDevice | null = null;
 
@@ -30,7 +31,10 @@ type QueueItem = { job: ReturnType<typeof buildSaleReceiptJob>; resolve: (r: { o
 const queue: QueueItem[] = [];
 let unsubscribe: (() => void) | null = null;
 
-export async function printSaleReceiptWithRetry(data: SaleReceipt, opts?: { maxAttempts?: number; intervalMs?: number }): Promise<{ ok: boolean; message?: string }> {
+export async function printSaleReceiptWithRetry(
+  data: SaleReceipt,
+  opts?: { maxAttempts?: number; intervalMs?: number; onQueued?: () => void }
+): Promise<{ ok: boolean; message?: string }> {
   const maxAttempts = Math.max(1, opts?.maxAttempts ?? 3);
   const intervalMs = Math.max(500, opts?.intervalMs ?? 1500);
 
@@ -48,20 +52,29 @@ export async function printSaleReceiptWithRetry(data: SaleReceipt, opts?: { maxA
   // Device unavailable: queue and subscribe for status changes
   return new Promise<{ ok: boolean; message?: string }>(resolve => {
     queue.push({ job, resolve, attempts: 1 });
+    // Telemetry + UI hint
+    setGauge('pos.print.queue_depth', queue.length);
+    incCounter('pos.print.retry.queued');
+    opts?.onQueued?.();
 
     const tryDequeue = async () => {
       if (queue.length === 0) return;
       const head = queue[0];
+      setTimestamp('pos.print.retry.last_attempt');
       const res = await printer.print(head.job);
       if (res.ok) {
+        incCounter('pos.print.retry.success');
         head.resolve({ ok: true });
         queue.shift();
+        setGauge('pos.print.queue_depth', queue.length);
         return;
       }
       head.attempts += 1;
       if (head.attempts > maxAttempts) {
+        incCounter('pos.print.retry.failed');
         head.resolve({ ok: false, message: res.error.message ?? res.error.code });
         queue.shift();
+        setGauge('pos.print.queue_depth', queue.length);
         return;
       }
       // Backoff and re-attempt later
