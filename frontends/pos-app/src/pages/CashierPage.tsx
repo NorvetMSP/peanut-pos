@@ -18,6 +18,8 @@ import ReplaceItemModal from '../components/pos/ReplaceItemModal';
 import logoTransparent from '../assets/logo_transparent.png';
 import './CashierPageModern.css';
 import { printSaleReceipt } from '../receipts/printService';
+import Toast from '../components/Toast';
+import type { SaleReceipt } from '../receipts/format';
 
 const PRODUCT_SERVICE_URL = (import.meta.env.VITE_PRODUCT_SERVICE_URL ?? 'http://localhost:8081').replace(/\/$/, '');
 const IDLE_EVENTS: Array<keyof WindowEventMap> = ['mousemove', 'mousedown', 'keypress', 'touchstart', 'focus'];
@@ -57,6 +59,7 @@ const extractUserField = (user: Record<string, unknown> | null | undefined, keys
 };
 
 const CashierPage: React.FC = () => {
+  useSyncOnReconnect();
   const navigate = useNavigate();
   const { isLoggedIn, logout, currentUser, token } = useAuth();
   const { cart, addItem, removeItem, incrementItemQuantity, decrementItemQuantity, clearCart, totalAmount } = useCart();
@@ -73,8 +76,13 @@ const CashierPage: React.FC = () => {
   const [idleSeconds, setIdleSeconds] = useState(0);
   const [paymentError, setPaymentError] = useState<string | null>(null);
   const [scanNotice, setScanNotice] = useState<string | null>(null);
-
-  useSyncOnReconnect();
+  const [printError, setPrintError] = useState<string | null>(null);
+  const [lastReceipt, setLastReceipt] = useState<SaleReceipt | null>(null);
+  const tenantId = useMemo(() => {
+    const raw = currentUser?.tenant_id;
+    if (raw === undefined || raw === null) return null;
+    return String(raw);
+  }, [currentUser?.tenant_id]);
 
   useEffect(() => {
     if (typeof window === 'undefined') return undefined;
@@ -88,12 +96,6 @@ const CashierPage: React.FC = () => {
       IDLE_EVENTS.forEach(event => window.removeEventListener(event, reset));
     };
   }, []);
-
-  const tenantId = useMemo(() => {
-    const raw = currentUser?.tenant_id;
-    if (raw === undefined || raw === null) return null;
-    return String(raw);
-  }, [currentUser?.tenant_id]);
 
   useEffect(() => {
     if (!isLoggedIn) {
@@ -215,22 +217,25 @@ const CashierPage: React.FC = () => {
       }
       // Success path: attempt print, clear cart, and proceed
       setPaymentError(null);
-      try {
-        // Build receipt payload from current cart snapshot
-        const subtotal = cart.reduce((sum, it) => sum + it.price * it.quantity, 0);
-        const total = Number(totalAmount.toFixed(2));
-        await printSaleReceipt({
-          orderId: result.status === 'submitted' ? String((result.order as any)?.id ?? '') : undefined,
-          storeLabel,
-          cashierLabel,
-          items: cart,
-          subtotal,
-          total,
-          paidMethod: paymentMethod,
-          createdAt: new Date(),
-        });
-      } catch (e) {
-        console.warn('Receipt print failed', e);
+      // Build receipt payload from current cart snapshot and attempt print
+      const subtotal = cart.reduce((sum, it) => sum + it.price * it.quantity, 0);
+      const total = Number(totalAmount.toFixed(2));
+      const receipt: SaleReceipt = {
+        orderId: result.status === 'submitted' ? String((result.order as any)?.id ?? '') : undefined,
+        storeLabel,
+        cashierLabel,
+        items: cart,
+        subtotal,
+        total,
+        paidMethod: paymentMethod,
+        createdAt: new Date(),
+      };
+      setLastReceipt(receipt);
+      const printRes = await printSaleReceipt(receipt);
+      if (!printRes.ok) {
+        setPrintError(printRes.message ?? 'Printer error');
+      } else {
+        setPrintError(null);
       }
       clearCart();
       setInactiveItems([]);
@@ -504,7 +509,7 @@ const CashierPage: React.FC = () => {
                 if (cart.length === 0) return;
                 const subtotal = cart.reduce((sum, it) => sum + it.price * it.quantity, 0);
                 const total = Number(totalAmount.toFixed(2));
-                printSaleReceipt({
+                const receipt: SaleReceipt = {
                   storeLabel,
                   cashierLabel,
                   items: cart,
@@ -513,8 +518,14 @@ const CashierPage: React.FC = () => {
                   paidMethod: paymentMethod,
                   createdAt: new Date(),
                   footerNote: 'Duplicate copy',
-                }).then(r => {
-                  if (!r.ok) console.warn('Print failed:', r.message);
+                };
+                setLastReceipt(receipt);
+                printSaleReceipt(receipt).then(r => {
+                  if (!r.ok) {
+                    setPrintError(r.message ?? 'Printer error');
+                  } else {
+                    setPrintError(null);
+                  }
                 });
               }}
               disabled={cart.length === 0}
@@ -534,6 +545,24 @@ const CashierPage: React.FC = () => {
           onReplace={replacementId => handleReplaceItem(currentInactiveItem.id, replacementId)}
           onRemove={() => handleRemoveInactiveItem(currentInactiveItem.id)}
           onCancel={handleCancelReplace}
+        />
+      )}
+      {printError && (
+        <Toast
+          message={`Receipt printing failed: ${printError}`}
+          actionLabel="Retry"
+          onAction={() => {
+            const payload = lastReceipt;
+            if (!payload) return;
+            printSaleReceipt(payload).then(r => {
+              if (!r.ok) {
+                setPrintError(r.message ?? 'Printer error');
+              } else {
+                setPrintError(null);
+              }
+            });
+          }}
+          onClose={() => setPrintError(null)}
         />
       )}
     </div>

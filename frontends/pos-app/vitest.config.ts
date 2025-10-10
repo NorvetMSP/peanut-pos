@@ -5,5 +5,10 @@ export default mergeConfig(viteConfig, defineConfig({
   test: {
     environment: 'jsdom',
     clearMocks: true,
+    exclude: [
+      'e2e/**',
+      'node_modules/**',
+      'dist/**'
+    ]
   },
 }))

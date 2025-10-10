@@ -3,6 +3,8 @@ import type { CartItem } from "../CartContext";
 
 export type SaleReceipt = {
   orderId?: string;
+  brandName?: string;
+  brandHeaderLines?: string[];
   storeLabel: string;
   cashierLabel: string;
   items: CartItem[];
@@ -29,7 +31,13 @@ export function buildSaleReceiptJob(data: SaleReceipt, width = 42): PrintJob {
   const blocks: PrintBlock[] = [];
 
   // Header
-  blocks.push({ type: "text", content: "NovaPOS", align: "center", bold: true, size: "m" });
+  const brand = data.brandName ?? "NovaPOS";
+  blocks.push({ type: "text", content: brand, align: "center", bold: true, size: "m" });
+  if (data.brandHeaderLines && data.brandHeaderLines.length > 0) {
+    for (const l of data.brandHeaderLines) {
+      blocks.push(line(l, width, "center"));
+    }
+  }
   blocks.push(line(data.storeLabel, width, "center"));
   blocks.push(line(`Cashier: ${data.cashierLabel}`, width, "center"));
   const ts = data.createdAt.toLocaleString();

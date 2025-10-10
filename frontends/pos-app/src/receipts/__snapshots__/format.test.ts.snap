@@ -1,0 +1,203 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`buildSaleReceiptJob > builds a job at width 32 1`] = `
+{
+  "blocks": [
+    {
+      "align": "center",
+      "bold": true,
+      "content": "NovaPOS",
+      "size": "m",
+      "type": "text",
+    },
+    {
+      "align": "center",
+      "content": "Flagship Store",
+      "type": "text",
+    },
+    {
+      "align": "center",
+      "content": "Cashier: Casey Cashier",
+      "type": "text",
+    },
+    {
+      "align": "center",
+      "content": "2025-01-02 03:04:05 UTC",
+      "type": "text",
+    },
+    {
+      "align": "center",
+      "content": "Order # 11111111-1111-1111-1111-",
+      "type": "text",
+    },
+    {
+      "align": "left",
+      "content": "--------------------------------",
+      "type": "text",
+    },
+    {
+      "align": "left",
+      "content": "Premium Coffee Beans 1kg",
+      "type": "text",
+    },
+    {
+      "align": "left",
+      "content": "x1 @ $14.99               $14.99",
+      "type": "text",
+    },
+    {
+      "align": "left",
+      "content": "Reusable Cup",
+      "type": "text",
+    },
+    {
+      "align": "left",
+      "content": "x2 @ $9.50                $19.00",
+      "type": "text",
+    },
+    {
+      "align": "left",
+      "content": "--------------------------------",
+      "type": "text",
+    },
+    {
+      "align": "left",
+      "content": "Subtotal                  $33.99",
+      "type": "text",
+    },
+    {
+      "align": "left",
+      "content": "Tax                        $2.34",
+      "type": "text",
+    },
+    {
+      "align": "left",
+      "content": "Total                     $36.33",
+      "type": "text",
+    },
+    {
+      "align": "left",
+      "content": "Paid: CARD",
+      "type": "text",
+    },
+    {
+      "align": "left",
+      "content": "--------------------------------",
+      "type": "text",
+    },
+    {
+      "align": "center",
+      "content": "Thank you!",
+      "type": "text",
+    },
+    {
+      "align": "center",
+      "content": "Thanks for shopping!",
+      "type": "text",
+    },
+  ],
+  "cut": true,
+  "widthChars": 32,
+}
+`;
+
+exports[`buildSaleReceiptJob > builds a job at width 42 1`] = `
+{
+  "blocks": [
+    {
+      "align": "center",
+      "bold": true,
+      "content": "NovaPOS",
+      "size": "m",
+      "type": "text",
+    },
+    {
+      "align": "center",
+      "content": "Flagship Store",
+      "type": "text",
+    },
+    {
+      "align": "center",
+      "content": "Cashier: Casey Cashier",
+      "type": "text",
+    },
+    {
+      "align": "center",
+      "content": "2025-01-02 03:04:05 UTC",
+      "type": "text",
+    },
+    {
+      "align": "center",
+      "content": "Order # 11111111-1111-1111-1111-1111111111",
+      "type": "text",
+    },
+    {
+      "align": "left",
+      "content": "------------------------------------------",
+      "type": "text",
+    },
+    {
+      "align": "left",
+      "content": "Premium Coffee Beans 1kg",
+      "type": "text",
+    },
+    {
+      "align": "left",
+      "content": "x1 @ $14.99                         $14.99",
+      "type": "text",
+    },
+    {
+      "align": "left",
+      "content": "Reusable Cup",
+      "type": "text",
+    },
+    {
+      "align": "left",
+      "content": "x2 @ $9.50                          $19.00",
+      "type": "text",
+    },
+    {
+      "align": "left",
+      "content": "------------------------------------------",
+      "type": "text",
+    },
+    {
+      "align": "left",
+      "content": "Subtotal                            $33.99",
+      "type": "text",
+    },
+    {
+      "align": "left",
+      "content": "Tax                                  $2.34",
+      "type": "text",
+    },
+    {
+      "align": "left",
+      "content": "Total                               $36.33",
+      "type": "text",
+    },
+    {
+      "align": "left",
+      "content": "Paid: CARD",
+      "type": "text",
+    },
+    {
+      "align": "left",
+      "content": "------------------------------------------",
+      "type": "text",
+    },
+    {
+      "align": "center",
+      "content": "Thank you!",
+      "type": "text",
+    },
+    {
+      "align": "center",
+      "content": "Thanks for shopping!",
+      "type": "text",
+    },
+  ],
+  "cut": true,
+  "widthChars": 42,
+}
+`;
