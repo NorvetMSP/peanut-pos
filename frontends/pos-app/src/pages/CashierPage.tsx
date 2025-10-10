@@ -17,7 +17,7 @@ import RecentOrdersDrawer from '../components/pos/RecentOrdersDrawer';
 import ReplaceItemModal from '../components/pos/ReplaceItemModal';
 import logoTransparent from '../assets/logo_transparent.png';
 import './CashierPageModern.css';
-import { printSaleReceipt } from '../receipts/printService';
+import { printSaleReceipt, printSaleReceiptWithRetry } from '../receipts/printService';
 import Toast from '../components/Toast';
 import type { SaleReceipt } from '../receipts/format';
 import { resolveBranding } from '../services/branding';
@@ -256,7 +256,7 @@ const CashierPage: React.FC = () => {
         createdAt: new Date(),
       };
       setLastReceipt(receipt);
-      const printRes = await printSaleReceipt(receipt);
+  const printRes = await printSaleReceiptWithRetry(receipt);
       if (!printRes.ok) {
         setPrintError(printRes.message ?? 'Printer error');
       } else {
@@ -550,7 +550,7 @@ const CashierPage: React.FC = () => {
                   footerNote: 'Duplicate copy',
                 };
                 setLastReceipt(receipt);
-                printSaleReceipt(receipt).then(r => {
+                printSaleReceiptWithRetry(receipt).then(r => {
                   if (!r.ok) {
                     setPrintError(r.message ?? 'Printer error');
                   } else {

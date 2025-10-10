@@ -27,10 +27,13 @@ export interface PrinterCapabilities {
   supportsQr?: boolean;
 }
 
+export type PrinterEvent = 'status';
+
 export interface PrinterDevice {
   kind: "printer";
   info(): Promise<DeviceInfo>;
   status(): Promise<DeviceStatus>;
   capabilities(): Promise<PrinterCapabilities>;
   print(job: PrintJob): Promise<Result<void, "io_error" | "invalid_payload" | "device_unavailable" | "timeout">>;
+  on?(event: PrinterEvent, handler: (status: DeviceStatus) => void): () => void;
 }
