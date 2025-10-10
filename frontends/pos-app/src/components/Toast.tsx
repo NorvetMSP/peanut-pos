@@ -6,9 +6,10 @@ type ToastProps = {
   onAction?: () => void;
   durationMs?: number;
   onClose?: () => void;
+  variant?: 'default' | 'success' | 'error';
 };
 
-export default function Toast({ message, actionLabel, onAction, durationMs = 4000, onClose }: ToastProps) {
+export default function Toast({ message, actionLabel, onAction, durationMs = 4000, onClose, variant = 'default' }: ToastProps) {
   const [visible, setVisible] = useState(true);
 
   useEffect(() => {
@@ -21,6 +22,10 @@ export default function Toast({ message, actionLabel, onAction, durationMs = 400
 
   if (!visible) return null;
 
+  const bg = variant === 'success' ? '#065f46' : variant === 'error' ? '#7f1d1d' : '#1f2937';
+  const border = variant === 'success' ? '#10b981' : variant === 'error' ? '#f87171' : '#374151';
+  const actionColor = variant === 'success' ? '#a7f3d0' : variant === 'error' ? '#fecaca' : '#60a5fa';
+
   return (
     <div
       role="status"
@@ -29,10 +34,11 @@ export default function Toast({ message, actionLabel, onAction, durationMs = 400
         position: 'fixed',
         bottom: '16px',
         right: '16px',
-        background: '#1f2937',
+        background: bg,
         color: 'white',
         padding: '12px 16px',
         borderRadius: 6,
+        border: `1px solid ${border}`,
         boxShadow: '0 4px 10px rgba(0,0,0,0.3)',
         display: 'flex',
         gap: 12,
@@ -47,8 +53,8 @@ export default function Toast({ message, actionLabel, onAction, durationMs = 400
           onClick={onAction}
           style={{
             background: 'transparent',
-            color: '#60a5fa',
-            border: '1px solid #60a5fa',
+            color: actionColor,
+            border: `1px solid ${actionColor}`,
             padding: '6px 10px',
             borderRadius: 4,
             cursor: 'pointer',
