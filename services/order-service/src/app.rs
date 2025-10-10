@@ -6,7 +6,7 @@ use anyhow::Context;
 use axum::{middleware, routing::{get, post}, Router};
 use axum::http::{header::{ACCEPT, CONTENT_TYPE}, HeaderName, HeaderValue, Method, StatusCode};
 use once_cell::sync::Lazy;
-use prometheus::{Encoder, IntCounterVec, Opts, Registry, TextEncoder};
+use prometheus::{Encoder, IntCounterVec, IntGaugeVec, Opts, Registry, TextEncoder};
 use reqwest::Client;
 use sqlx::PgPool;
 use tokio::time::{interval, MissedTickBehavior};
@@ -27,6 +27,25 @@ static HTTP_ERRORS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
     let v = IntCounterVec::new(
         Opts::new("http_errors_total", "Count of HTTP error responses emitted (status >= 400)"),
         &["service", "code", "status"],
+    ).unwrap();
+    ORDER_REGISTRY.register(Box::new(v.clone())).ok();
+    v
+});
+
+// POS telemetry metrics (from POS ingestion)
+static POS_PRINT_RETRY_COUNTER: Lazy<IntCounterVec> = Lazy::new(|| {
+    let v = IntCounterVec::new(
+        Opts::new("pos_print_retry_total", "POS print retry events (queued/success/failed)"),
+        &["tenant_id", "store_id", "kind"],
+    ).unwrap();
+    ORDER_REGISTRY.register(Box::new(v.clone())).ok();
+    v
+});
+
+static POS_PRINT_GAUGES: Lazy<IntGaugeVec> = Lazy::new(|| {
+    let v = IntGaugeVec::new(
+        Opts::new("pos_print_gauge", "POS print gauges (queue_depth, last_attempt_ms)"),
+        &["tenant_id", "store_id", "name"],
     ).unwrap();
     ORDER_REGISTRY.register(Box::new(v.clone())).ok();
     v
@@ -139,6 +158,57 @@ pub fn build_router(state: AppState) -> Router {
         (StatusCode::OK, String::from_utf8_lossy(&buf).to_string())
     }
 
+    // POS telemetry ingestion
+    #[derive(serde::Deserialize)]
+    struct PosMetricEntry { name: String, value: i64 }
+    #[derive(serde::Deserialize)]
+    struct PosTelemetryPayload {
+        ts: i64,
+        #[serde(default)]
+        labels: serde_json::Value,
+        #[serde(default)]
+        counters: Vec<PosMetricEntry>,
+        #[serde(default)]
+        gauges: Vec<PosMetricEntry>,
+    }
+    async fn ingest_pos_telemetry(
+        axum::extract::State(_state): axum::extract::State<AppState>,
+        axum::extract::TypedHeader(axum::headers::HeaderMap): axum::extract::TypedHeader<axum::headers::HeaderMap>,
+        axum::extract::Json(payload): axum::extract::Json<PosTelemetryPayload>,
+        axum::http::HeaderMap: axum::http::HeaderMap,
+    ) -> (StatusCode, &'static str) {
+        // Extract tenant_id/store_id labels from request headers or payload.labels
+        // Expect X-Tenant-ID header and optional X-Store-ID
+        // Fallback to labels.tenant_id/store_id in payload
+        let mut tenant_id = "unknown".to_string();
+        let mut store_id = "unknown".to_string();
+        // Note: due to type constraints above, re-extract from axum::http::HeaderMap in this scope
+        // Simplify by reading from payload.labels first
+        if let Some(tid) = payload.labels.get("tenant_id").and_then(|v| v.as_str()) {
+            tenant_id = tid.to_string();
+        }
+        if let Some(sid) = payload.labels.get("store_id").and_then(|v| v.as_str()) {
+            store_id = sid.to_string();
+        }
+
+        for c in payload.counters {
+            match c.name.as_str() {
+                n if n.contains("pos.print.retry.queued") => POS_PRINT_RETRY_COUNTER.with_label_values(&[&tenant_id, &store_id, "queued"]).inc_by(c.value as u64),
+                n if n.contains("pos.print.retry.success") => POS_PRINT_RETRY_COUNTER.with_label_values(&[&tenant_id, &store_id, "success"]).inc_by(c.value as u64),
+                n if n.contains("pos.print.retry.failed") => POS_PRINT_RETRY_COUNTER.with_label_values(&[&tenant_id, &store_id, "failed"]).inc_by(c.value as u64),
+                _ => {}
+            }
+        }
+        for g in payload.gauges {
+            if g.name.contains("pos.print.queue_depth") {
+                POS_PRINT_GAUGES.with_label_values(&[&tenant_id, &store_id, "queue_depth"]).set(g.value);
+            } else if g.name.contains("pos.print.retry.last_attempt") {
+                POS_PRINT_GAUGES.with_label_values(&[&tenant_id, &store_id, "last_attempt_ms"]).set(g.value);
+            }
+        }
+        (StatusCode::ACCEPTED, "ok")
+    }
+
     Router::new()
         .route("/healthz", get(health))
         .route("/orders", post(create_order).get(list_orders))
@@ -160,6 +230,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/internal/audit_metrics", get(audit_metrics))
     .route("/internal/metrics", get(metrics))
     .route("/metrics", get(metrics))
+    .route("/pos/telemetry", post(ingest_pos_telemetry))
         .with_state(state)
         .layer(cors)
         .layer(middleware::from_fn(http_error_metrics))

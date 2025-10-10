@@ -1,0 +1,37 @@
+{
+  "title": "POS Print Telemetry",
+  "schemaVersion": 39,
+  "version": 1,
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Queue Depth",
+      "gridPos": { "x": 0, "y": 0, "w": 6, "h": 3 },
+      "targets": [
+        {
+          "expr": "pos_print_gauge{name=\"queue_depth\"}",
+          "legendFormat": "{{tenant_id}}/{{store_id}}"
+        }
+      ]
+    },
+    {
+      "type": "graph",
+      "title": "Print Retries by Kind",
+      "gridPos": { "x": 6, "y": 0, "w": 18, "h": 8 },
+      "targets": [
+        { "expr": "sum by (tenant_id,store_id,kind) (increase(pos_print_retry_total[5m]))", "legendFormat": "{{kind}} {{tenant_id}}/{{store_id}}" }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Last Attempt (ms)",
+      "gridPos": { "x": 0, "y": 3, "w": 6, "h": 3 },
+      "targets": [
+        {
+          "expr": "pos_print_gauge{name=\"last_attempt_ms\"}",
+          "legendFormat": "{{tenant_id}}/{{store_id}}"
+        }
+      ]
+    }
+  ]
+}
