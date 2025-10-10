@@ -68,11 +68,11 @@ Scope map (current status)
   Acceptance: Lag panels present and green in steady state; alert triggers on configured thresholds; runbook linked.
   Dependencies: P0-02.
 
-- [ ] P0-06 POS offline queue telemetry [cashier-mvp]
+- [~] P0-06 POS offline queue telemetry [cashier-mvp]
   Actions: Emit offline queue depth/failure metrics from POS; backend aggregates per-tenant; dashboards and alerts.
   Acceptance: Dashboard shows offline queue depth by store; alert on prolonged backlog; synthetic tests validate ingestion.
   Dependencies: P9-02.
-  Notes: POS now emits local counters/gauges for print retries and queue depth (see `pos-receipts.md`). Console logging is toggled via `VITE_ENABLE_CONSOLE_TELEMETRY`; ingestion can POST snapshots to a backend when `VITE_TELEMETRY_INGEST_URL` is set. Next: define ingestion schema/labels and wire order-service or a dedicated endpoint.
+  Notes: POS emits local counters/gauges for print retries and queue depth (see `pos-receipts.md`). A scheduler batches and POSTs snapshots when `VITE_TELEMETRY_INGEST_URL` is set, labeled by `tenant_id`/`store_id`. Backend ingestion endpoint added in `order-service` maps POS payloads to Prometheus metrics; a Grafana dashboard visualizes queue depth and retry counters. Remaining: wire alert rules and add synthetic/backfill tests for ingestion.
 
 ---
 
@@ -339,11 +339,11 @@ Scope map (current status)
   Acceptance: Returns deterministic diff format; used by POS.
   Dependencies: P5-01.
 
-- [ ] P9-02 Retry telemetry & dashboards [cashier-mvp]
+- [~] P9-02 Retry telemetry & dashboards [cashier-mvp]
   Actions: Metrics endpoint for queue depth/failure counts; dashboards.
   Acceptance: Metrics scraped; dashboard panel green.
   Dependencies: P9-01.
-  Notes: POS-side metrics are generated (queue depth, retry counters). Plan to aggregate via ingestion endpoint and expose Prometheus metrics for scraping. Align naming with `pos.print.*` counters/gauges.
+  Notes: Implemented aggregation via `order-service` ingestion of POS snapshots; Prometheus metrics exported with stable names/labels (e.g., `pos_print_retry_total` with kind labels; `pos_print_gauge` for queue depth). Grafana dashboard added for queue depth and retry trends. Remaining: finalize alerting thresholds and reconcile dependency with P9-01 sequencing.
 
 - [ ] P9-03 Duplicate prevention beyond idempotency [cashier-mvp]
   Actions: Hashing/content-based suppression.
@@ -401,11 +401,11 @@ Scope map (current status)
   Dependencies: None.
   Notes: Print-only receipts wired for MVP via Device SDK printer interface; e‑receipt templates deferred (see P16-01). Print failure toast with Retry implemented; success toast confirms print. Branding resolved via tenant-config when available with env fallback (see docs/development/pos-receipts.md). Proactive printer status banner surfaces disconnected/error states. Snapshot tests added for receipt formatter.
 
-- [ ] P13-02 Hot-plug detection and retries [cashier-mvp]
+- [~] P13-02 Hot-plug detection and retries [cashier-mvp]
   Actions: Detect device (dis)connect; retry queues/backoff; telemetry.
   Acceptance: Hot-plug scenarios pass; retries visible in metrics.
   Dependencies: P13-01.
-  Notes: Event-driven device status added to the POS Device SDK; printer hot-plug detection surfaces status changes in the UI. Print jobs are queued when the device is unavailable and automatically retried on reconnect with backoff. Unit tests cover device status events and retry queue success paths. Telemetry counters (attempts/success/fail) and offline queue depth metrics are pending and will be addressed alongside P0-06/P9-02. A "queued for retry" toast in POS will be added next.
+  Notes: Event-driven device status added to the POS Device SDK; printer hot-plug detection surfaces status changes in the UI. Print jobs queue when the device is unavailable and auto-retry on reconnect with backoff. A "queued for retry" toast and proactive status banner are in place. Unit tests cover device status events and retry queue success paths. POS telemetry counters/gauges for print retries and queue depth emit locally and via a scheduler to a backend ingestion endpoint in `order-service`, which exposes Prometheus metrics consumed by a Grafana dashboard. Remaining: validate service build/deploy, wire alerting, and add synthetic tests.
 
 - [ ] P13-03 Device telemetry and health [cashier-mvp]
   Actions: Emit device health metrics and logs; dashboards.
