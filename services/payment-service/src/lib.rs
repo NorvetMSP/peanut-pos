@@ -15,4 +15,5 @@ pub struct AppState {
 pub mod payment_handlers;
 pub mod repo;
 pub mod webhook;
+pub mod gateway;
 impl FromRef<AppState> for Arc<JwtVerifier> { fn from_ref(state:&AppState)->Self { state.jwt_verifier.clone() } }

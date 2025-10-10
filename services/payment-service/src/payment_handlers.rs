@@ -12,6 +12,7 @@ use bigdecimal::BigDecimal;
 use common_money::Money; // normalize_scale not needed here
 use std::time::Duration;
 use tokio::time::sleep;
+use crate::gateway::{PaymentGateway, StubGateway};
 
 #[derive(Deserialize)]
 pub struct PaymentRequest {
@@ -170,8 +171,22 @@ pub async fn void_intent(
         if !repo::is_valid_transition(&cur.state, repo::IntentState::Voided) {
             return Err(ApiError::Conflict { code: "invalid_state_transition", trace_id: sec.trace_id, message: Some(format!("from={} to=voided", cur.state)) });
         }
-        let rec = repo::transition_state(db, &req.id, repo::IntentState::Voided).await
-            .map_err(|e| ApiError::Internal { trace_id: sec.trace_id, message: Some(format!("db_error: {e}")) })?;
+        // Passthrough to gateway if provider/provider_ref present
+        let mut new_provider_ref: Option<String> = None;
+        if let (Some(provider), Some(provider_ref)) = (cur.provider.as_deref(), cur.provider_ref.as_deref()) {
+            let gw = StubGateway::new();
+            match gw.void(provider, provider_ref).await {
+                Ok(ref_opt) => new_provider_ref = ref_opt,
+                Err(err) => return Err(ApiError::Internal { trace_id: sec.trace_id, message: Some(format!("gateway_error: {err}")) }),
+            }
+        }
+        let rec = if new_provider_ref.is_some() {
+            repo::transition_with_provider(db, &req.id, repo::IntentState::Voided, cur.provider.as_deref(), new_provider_ref.as_deref(), None).await
+                .map_err(|e| ApiError::Internal { trace_id: sec.trace_id, message: Some(format!("db_error: {e}")) })?
+        } else {
+            repo::transition_state(db, &req.id, repo::IntentState::Voided).await
+                .map_err(|e| ApiError::Internal { trace_id: sec.trace_id, message: Some(format!("db_error: {e}")) })?
+        };
         if let Some(pi) = rec { return Ok(Json(IntentResponse { id: pi.id, state: pi.state })); }
         return Err(ApiError::NotFound { code: "payment_intent_not_found", trace_id: sec.trace_id });
     }
@@ -199,8 +214,22 @@ pub async fn refund_intent(
         if !repo::is_valid_transition(&cur.state, repo::IntentState::Refunded) {
             return Err(ApiError::Conflict { code: "invalid_state_transition", trace_id: sec.trace_id, message: Some(format!("from={} to=refunded", cur.state)) });
         }
-        let rec = repo::transition_state(db, &req.id, repo::IntentState::Refunded).await
-            .map_err(|e| ApiError::Internal { trace_id: sec.trace_id, message: Some(format!("db_error: {e}")) })?;
+        // Passthrough to gateway if provider/provider_ref present
+        let mut new_provider_ref: Option<String> = None;
+        if let (Some(provider), Some(provider_ref)) = (cur.provider.as_deref(), cur.provider_ref.as_deref()) {
+            let gw = StubGateway::new();
+            match gw.refund(provider, provider_ref).await {
+                Ok(ref_opt) => new_provider_ref = ref_opt,
+                Err(err) => return Err(ApiError::Internal { trace_id: sec.trace_id, message: Some(format!("gateway_error: {err}")) }),
+            }
+        }
+        let rec = if new_provider_ref.is_some() {
+            repo::transition_with_provider(db, &req.id, repo::IntentState::Refunded, cur.provider.as_deref(), new_provider_ref.as_deref(), None).await
+                .map_err(|e| ApiError::Internal { trace_id: sec.trace_id, message: Some(format!("db_error: {e}")) })?
+        } else {
+            repo::transition_state(db, &req.id, repo::IntentState::Refunded).await
+                .map_err(|e| ApiError::Internal { trace_id: sec.trace_id, message: Some(format!("db_error: {e}")) })?
+        };
         if let Some(pi) = rec { return Ok(Json(IntentResponse { id: pi.id, state: pi.state })); }
         return Err(ApiError::NotFound { code: "payment_intent_not_found", trace_id: sec.trace_id });
     }
