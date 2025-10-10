@@ -277,6 +277,55 @@ Useful docs:
 - Grafana provisioning: ../monitoring/grafana/provisioning/* (datasource + dashboards)
 - Security dashboard and alert rules: security/prometheus-grafana-bootstrap.md
 
+### POS telemetry smoke test (print retries and queue depth)
+
+Use this to verify the POS → order-service telemetry ingestion and Prometheus metrics exposure.
+
+Prereqs:
+
+- order-service running and reachable on <http://localhost:8084>
+- A dev JWT (see scripts/mint-dev-jwt.js or run-payment-demo.ps1) and a tenant UUID
+
+PowerShell (POST a sample snapshot):
+
+```powershell
+$headers = @{ 'Content-Type' = 'application/json'; 'X-Tenant-ID' = '<tenant-uuid>'; 'Authorization' = 'Bearer <dev-jwt>' }
+$body = @{
+  ts = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+  labels = @{ tenant_id = '<tenant-uuid>'; store_id = 'store-001' }
+  counters = @{
+    'pos.print.retry.queued' = 3
+    'pos.print.retry.failed' = 1
+    'pos.print.retry.success' = 0
+  }
+  gauges = @{
+    'pos.print.queue_depth' = 4
+  }
+} | ConvertTo-Json -Depth 5
+Invoke-RestMethod -Method Post -Uri http://localhost:8084/pos/telemetry -Headers $headers -Body $body | Format-List
+```
+
+Verify metrics are exposed:
+
+```powershell
+curl http://localhost:8084/metrics | Select-String -Pattern 'pos_print_retry_total|pos_print_gauge'
+```
+
+Expected to see lines like:
+
+```text
+pos_print_retry_total{tenant_id="<tenant-uuid>",store_id="store-001",kind="queued"} 3
+pos_print_retry_total{tenant_id="<tenant-uuid>",store_id="store-001",kind="failed"} 1
+pos_print_gauge{tenant_id="<tenant-uuid>",store_id="store-001",name="queue_depth"} 4
+```
+
+Optional: check Prometheus UI at <http://localhost:9090> for the expressions used by alerts, e.g.:
+
+```promql
+increase(pos_print_retry_total{kind="failed"}[10m])
+max_over_time(pos_print_gauge{name="queue_depth"}[5m])
+```
+
 ## Security & Environment Promotion
 
 - Runbooks (auth telemetry, rate limit checks, PagerDuty wiring): security/README.md
