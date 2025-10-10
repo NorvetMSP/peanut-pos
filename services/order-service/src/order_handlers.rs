@@ -110,6 +110,32 @@ struct InventoryReservationRequestPayload {
     items: Vec<InventoryReservationItemPayload>,
 }
 
+// --- Refund passthrough mapping (stub) ---
+#[allow(dead_code)]
+async fn request_refund_via_payment_service(
+    client: &Client,
+    payment_base_url: &str,
+    tenant_id: Uuid,
+    intent_id: Option<String>,
+    provider_ref: Option<String>,
+    amount_minor: Option<i64>,
+    currency: Option<&str>,
+) -> Result<(), String> {
+    // TODO: Wire to payment-service /payment_intents/refund once contracts are finalized
+    let url = format!("{}/payment_intents/refund", payment_base_url.trim_end_matches('/'));
+    let mut body = serde_json::json!({});
+    if let Some(id) = intent_id { body["id"] = serde_json::Value::String(id); }
+    if let Some(pref) = provider_ref { body["providerRef"] = serde_json::Value::String(pref); }
+    if let Some(amt) = amount_minor { body["amountMinor"] = serde_json::Value::Number(serde_json::Number::from(amt)); }
+    if let Some(cur) = currency { body["currency"] = serde_json::Value::String(cur.to_string()); }
+    let resp = client.post(url)
+        .header("Content-Type", "application/json")
+        .header("X-Tenant-ID", tenant_id.to_string())
+        .json(&body)
+        .send().await.map_err(|e| e.to_string())?;
+    if resp.status().is_success() { Ok(()) } else { Err(format!("refund request failed: {}", resp.status())) }
+}
+
 // Compute subtotal, discount, and tax for a set of items using product tax_code and DEFAULT_TAX_RATE_BPS.
 #[allow(dead_code)]
 async fn compute_financials_for_items(
