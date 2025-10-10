@@ -78,6 +78,7 @@ const CashierPage: React.FC = () => {
   const [scanNotice, setScanNotice] = useState<string | null>(null);
   const [printError, setPrintError] = useState<string | null>(null);
   const [lastReceipt, setLastReceipt] = useState<SaleReceipt | null>(null);
+  const [printSuccess, setPrintSuccess] = useState<string | null>(null);
   const tenantId = useMemo(() => {
     const raw = currentUser?.tenant_id;
     if (raw === undefined || raw === null) return null;
@@ -118,6 +119,18 @@ const CashierPage: React.FC = () => {
     }
     return 'Unassigned Store';
   }, [currentUser]);
+
+  // Branding from env (can be replaced later with tenant-config fetch)
+  const brandName = useMemo(() => {
+    const v = (import.meta as any).env?.VITE_BRAND_NAME;
+    return typeof v === 'string' && v.trim().length > 0 ? v.trim() : undefined;
+  }, []);
+  const brandHeaderLines = useMemo(() => {
+    const raw = (import.meta as any).env?.VITE_BRAND_HEADER_LINES;
+    if (typeof raw !== 'string' || raw.trim().length === 0) return undefined;
+    // Split on | and trim
+    return raw.split('|').map(s => s.trim()).filter(s => s.length > 0);
+  }, []);
 
   const cashierLabel = useMemo(() => {
     const record = currentUser as Record<string, unknown> | null | undefined;
@@ -222,6 +235,8 @@ const CashierPage: React.FC = () => {
       const total = Number(totalAmount.toFixed(2));
       const receipt: SaleReceipt = {
         orderId: result.status === 'submitted' ? String((result.order as any)?.id ?? '') : undefined,
+        brandName,
+        brandHeaderLines,
         storeLabel,
         cashierLabel,
         items: cart,
@@ -236,6 +251,7 @@ const CashierPage: React.FC = () => {
         setPrintError(printRes.message ?? 'Printer error');
       } else {
         setPrintError(null);
+        setPrintSuccess('Printed');
       }
       clearCart();
       setInactiveItems([]);
@@ -510,6 +526,8 @@ const CashierPage: React.FC = () => {
                 const subtotal = cart.reduce((sum, it) => sum + it.price * it.quantity, 0);
                 const total = Number(totalAmount.toFixed(2));
                 const receipt: SaleReceipt = {
+                  brandName,
+                  brandHeaderLines,
                   storeLabel,
                   cashierLabel,
                   items: cart,
@@ -525,6 +543,7 @@ const CashierPage: React.FC = () => {
                     setPrintError(r.message ?? 'Printer error');
                   } else {
                     setPrintError(null);
+                    setPrintSuccess('Printed');
                   }
                 });
               }}
@@ -559,10 +578,20 @@ const CashierPage: React.FC = () => {
                 setPrintError(r.message ?? 'Printer error');
               } else {
                 setPrintError(null);
+                setPrintSuccess('Printed');
               }
             });
           }}
           onClose={() => setPrintError(null)}
+          variant="error"
+        />
+      )}
+      {printSuccess && (
+        <Toast
+          message={printSuccess}
+          durationMs={2000}
+          onClose={() => setPrintSuccess(null)}
+          variant="success"
         />
       )}
     </div>
