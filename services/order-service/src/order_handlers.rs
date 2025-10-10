@@ -1251,6 +1251,7 @@ pub async fn void_order(
 pub async fn refund_order(
     State(state): State<AppState>,
     SecurityCtxExtractor(sec): SecurityCtxExtractor,
+    headers: HeaderMap,
     Json(req): Json<RefundRequest>,
 ) -> Result<Json<Order>, ApiError> {
     if !sec.roles.iter().any(|r| matches!(r, Role::Admin | Role::Manager)) {
@@ -1327,7 +1328,10 @@ pub async fn refund_order(
     };
 
     // Manager override token handling (optional)
-    let override_token: Option<Uuid> = None; // TODO: read from header when plumbing headers in handler signature
+    let override_token: Option<Uuid> = headers
+        .get("X-Return-Override")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| Uuid::parse_str(s).ok());
     let mut override_valid = false;
     if let Some(token) = override_token {
         let conn = tx
