@@ -35,6 +35,10 @@ once_cell = "1.19"
 prometheus = "0.13"
 tower = "0.5"
 rdkafka = { version = "0.29", optional = true, features=["cmake-build","libz"] }
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
+subtle = "2"
 
 [build-dependencies]
 
