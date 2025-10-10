@@ -58,7 +58,7 @@ Scope map (current status)
 
 ## Phase 0.1 – KPI & Messaging Observability
 
-- [ ] P0-04 End-to-end KPI instrumentation [cashier-mvp]
+- [~] P0-04 End-to-end KPI instrumentation [cashier-mvp]
   Actions: Add distributed tracing across POS → Order → Inventory → Payment → Kafka; expose checkout latency histograms and tap-count metrics with stable labels by tenant/store.
   Acceptance: Dashboards display p50/p95 checkout latency and tap counts per tenant/store; alerting wired to SLOs (<2s, <5 taps) with test alerts.
   Dependencies: P0-01.
@@ -149,12 +149,12 @@ Scope map (current status)
   Acceptance: E2E happy path passes; inventory adjustments correct.
   Dependencies: P1-02.
 
-- [ ] P3-02 Return policy module [cashier-mvp]
+- [~] P3-02 Return policy module [cashier-mvp]
   Actions: `return_policies` schema; apply to calculations and UI; audit events on changes.
   Acceptance: Policy applied in return calculation endpoint; UI displays fees/conditions; audit persisted.
   Dependencies: P3-01.
 
-- [ ] P3-03 Manager override + audit [cashier-mvp]
+- [~] P3-03 Manager override + audit [cashier-mvp]
   Actions: Role-gated override endpoint; audit events on override.
   Acceptance: Overrides recorded and visible in audit views.
   Dependencies: P2-04, P3-02.
@@ -253,17 +253,17 @@ Scope map (current status)
 
 ## Phase 6 – Payments & Gateway Foundations
 
-- [ ] P6-01 Payment intent model [cashier-mvp]
+- [~] P6-01 Payment intent model [cashier-mvp]
   Actions: `payment_intents` table; idempotent create; state transitions; reversal link.
   Acceptance: Idempotency enforced; transitions tested; persistence stable.
   Dependencies: P2-01.
 
-- [ ] P6-02 Webhook hardening [cashier-mvp]
+- [~] P6-02 Webhook hardening [cashier-mvp]
   Actions: HMAC signature verification; nonce storage; replay detection.
   Acceptance: Valid signatures accepted; replays rejected; audit events recorded.
   Dependencies: P6-01.
 
-- [ ] P6-03 Refund/reversal passthrough [cashier-mvp]
+- [~] P6-03 Refund/reversal passthrough [cashier-mvp]
   Actions: Gateway abstraction and endpoints for reversal; mapping from orders.
   Acceptance: Reversal flows complete; linked to original tender.
   Dependencies: P6-01, P6-02.
@@ -393,10 +393,11 @@ Scope map (current status)
 
 ## Phase 13 – Device & Peripherals Layer
 
-- [ ] P13-01 Device abstraction SDK [cashier-mvp]
+- [~] P13-01 Device abstraction SDK [cashier-mvp]
   Actions: Unified interfaces for printer, scanner, payment terminal with fallbacks.
   Acceptance: POS uses SDK; mocks available for CI; errors surfaced gracefully.
   Dependencies: None.
+  Notes: Print-only receipts wired for MVP via Device SDK printer interface; e‑receipt templates deferred (see P16-01).
 
 - [ ] P13-02 Hot-plug detection and retries [cashier-mvp]
   Actions: Detect device (dis)connect; retry queues/backoff; telemetry.
@@ -669,6 +670,7 @@ This addendum aggregates the cashier journey items into a single reference witho
 3) P6-03 Refund passthrough (to support returns/exchanges refunds) [cashier-addendum]
 4) P13-02 Hot plug detection and retries [cashier-addendum]
 5) P16-01 E‑receipt templates OR ensure print-only receipts via P13-01 [cashier-addendum]
+  Decision: For MVP, we chose print-only receipts using device printer; E‑receipts deferred to Phase 16.
 6) P11-02 Variant barcode mapping (or accept base SKU scans initially) [cashier-addendum]
 7) P3-02 Return policy and P3-03 manager override (with audit) [cashier-addendum]
 8) P4-02 Loyalty redemption (optional for MVP; accrual already live) [cashier-addendum]

@@ -18,7 +18,7 @@ use common_auth::{JwtConfig, JwtVerifier};
 use crate::order_handlers::{
     clear_offline_orders, create_order, get_order, get_order_receipt, list_orders, list_returns, compute_order,
     refund_order, void_order, create_order_from_skus,
-    list_tax_rate_overrides, upsert_tax_rate_override,
+    list_tax_rate_overrides, upsert_tax_rate_override, get_return_policy, upsert_return_policy, issue_return_override,
 };
 
 // --- Error metrics (mirrors product/inventory services) ---
@@ -154,6 +154,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/reports/settlement", get(crate::order_handlers::get_settlement_report))
         .route("/returns", get(list_returns))
         .route("/admin/tax_rate_overrides", get(list_tax_rate_overrides).post(upsert_tax_rate_override))
+    .route("/admin/return_policies", get(get_return_policy).post(upsert_return_policy))
+    .route("/admin/overrides/returns", post(issue_return_override))
         .route("/audit/events", get(audit_search))
         .route("/internal/audit_metrics", get(audit_metrics))
     .route("/internal/metrics", get(metrics))

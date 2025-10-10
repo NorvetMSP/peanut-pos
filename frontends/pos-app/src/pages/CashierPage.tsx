@@ -17,6 +17,7 @@ import RecentOrdersDrawer from '../components/pos/RecentOrdersDrawer';
 import ReplaceItemModal from '../components/pos/ReplaceItemModal';
 import logoTransparent from '../assets/logo_transparent.png';
 import './CashierPageModern.css';
+import { printSaleReceipt } from '../receipts/printService';
 
 const PRODUCT_SERVICE_URL = (import.meta.env.VITE_PRODUCT_SERVICE_URL ?? 'http://localhost:8081').replace(/\/$/, '');
 const IDLE_EVENTS: Array<keyof WindowEventMap> = ['mousemove', 'mousedown', 'keypress', 'touchstart', 'focus'];
@@ -212,8 +213,25 @@ const CashierPage: React.FC = () => {
         setPaymentError(`Payment error: ${result.paymentError}`);
         return;
       }
-      // Success path: clear any prior error, clear cart, and proceed
+      // Success path: attempt print, clear cart, and proceed
       setPaymentError(null);
+      try {
+        // Build receipt payload from current cart snapshot
+        const subtotal = cart.reduce((sum, it) => sum + it.price * it.quantity, 0);
+        const total = Number(totalAmount.toFixed(2));
+        await printSaleReceipt({
+          orderId: result.status === 'submitted' ? String((result.order as any)?.id ?? '') : undefined,
+          storeLabel,
+          cashierLabel,
+          items: cart,
+          subtotal,
+          total,
+          paidMethod: paymentMethod,
+          createdAt: new Date(),
+        });
+      } catch (e) {
+        console.warn('Receipt print failed', e);
+      }
       clearCart();
       setInactiveItems([]);
       openPaymentLink(result);
@@ -478,6 +496,30 @@ const CashierPage: React.FC = () => {
             >
               {submitting ? 'Processing...' : 'Submit / Complete Sale'}
               <span className="cashier-footer__shortcut">(Enter / F7)</span>
+            </button>
+            <button
+              type="button"
+              className="cashier-footer__submit"
+              onClick={() => {
+                if (cart.length === 0) return;
+                const subtotal = cart.reduce((sum, it) => sum + it.price * it.quantity, 0);
+                const total = Number(totalAmount.toFixed(2));
+                printSaleReceipt({
+                  storeLabel,
+                  cashierLabel,
+                  items: cart,
+                  subtotal,
+                  total,
+                  paidMethod: paymentMethod,
+                  createdAt: new Date(),
+                  footerNote: 'Duplicate copy',
+                }).then(r => {
+                  if (!r.ok) console.warn('Print failed:', r.message);
+                });
+              }}
+              disabled={cart.length === 0}
+            >
+              Print Receipt
             </button>
           </div>
         </div>

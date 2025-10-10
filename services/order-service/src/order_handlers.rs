@@ -1264,6 +1264,7 @@ pub async fn refund_order(
 
     let mut tx = state.db.begin().await.map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to begin refund transaction: {}", e)) })?;
 
+    // Load order snapshot (+ created_at/store_id eligible for policy)
     let order_snapshot = {
         let conn = tx
             .acquire()
@@ -1285,6 +1286,75 @@ pub async fn refund_order(
             return Err(ApiError::BadRequest { code: "invalid_status", trace_id: None, message: Some(format!("Order in status '{}' cannot be refunded", order_snapshot.status)) });
         }
         _ => {}
+    }
+
+    // Load order created_at and store/location id for policy checks
+    let (order_created_at, order_store_id): (DateTime<Utc>, Option<Uuid>) = {
+        let conn = tx
+            .acquire()
+            .await
+            .map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to acquire transaction connection: {e}")) })?;
+        let row = sqlx::query(
+            "SELECT created_at, store_id FROM orders WHERE id = $1 AND tenant_id = $2"
+        ).bind(req.order_id).bind(tenant_id)
+        .fetch_one(&mut *conn).await
+        .map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to read order metadata: {}", e)) })?;
+        let created_at: DateTime<Utc> = row.try_get("created_at").map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to read created_at: {}", e)) })?;
+        let store_id: Option<Uuid> = row.try_get("store_id").ok();
+        (created_at, store_id)
+    };
+
+    // Fetch return policy (location-specific, else tenant default)
+    #[derive(sqlx::FromRow)]
+    struct PolicyRow { allow_window_days: i32, restock_fee_bps: i32, receipt_required: bool, manager_override_allowed: bool }
+    let policy: PolicyRow = {
+        let conn = tx
+            .acquire()
+            .await
+            .map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to acquire transaction connection: {e}")) })?;
+        // Try location first
+        if let Ok(Some(row)) = sqlx::query_as::<_, PolicyRow>(
+            "SELECT allow_window_days, restock_fee_bps, receipt_required, manager_override_allowed FROM return_policies WHERE tenant_id = $1 AND location_id IS NOT DISTINCT FROM $2"
+        ).bind(tenant_id).bind(order_store_id).fetch_optional(&mut *conn).await {
+            row
+        } else if let Ok(Some(row)) = sqlx::query_as::<_, PolicyRow>(
+            "SELECT allow_window_days, restock_fee_bps, receipt_required, manager_override_allowed FROM return_policies WHERE tenant_id = $1 AND location_id IS NULL ORDER BY updated_at DESC LIMIT 1"
+        ).bind(tenant_id).fetch_optional(&mut *conn).await {
+            row
+        } else {
+            PolicyRow { allow_window_days: 30, restock_fee_bps: 0, receipt_required: true, manager_override_allowed: true }
+        }
+    };
+
+    // Manager override token handling (optional)
+    let override_token: Option<Uuid> = None; // TODO: read from header when plumbing headers in handler signature
+    let mut override_valid = false;
+    if let Some(token) = override_token {
+        let conn = tx
+            .acquire().await
+            .map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to acquire transaction connection: {e}")) })?;
+        if let Ok(Some(row)) = sqlx::query("SELECT used_at FROM return_overrides WHERE id = $1 AND tenant_id = $2 AND order_id = $3")
+            .bind(token).bind(tenant_id).bind(req.order_id).fetch_optional(&mut *conn).await {
+            let used_at: Option<DateTime<Utc>> = row.try_get("used_at").ok();
+            override_valid = used_at.is_none();
+            if override_valid {
+                let _ = sqlx::query("UPDATE return_overrides SET used_at = NOW() WHERE id = $1").bind(token).execute(&mut *tx).await;
+            }
+        }
+    }
+
+    // Enforce receipt requirement and window unless override is valid and allowed
+    if !(override_valid && policy.manager_override_allowed) {
+        if policy.receipt_required {
+            // For MVP we require that POS/backend knows original order_id; this handler always has it.
+            // No-op: if order_id missing we'd reject earlier with order_not_found.
+        }
+        if policy.allow_window_days > 0 {
+            let window = chrono::Duration::days(policy.allow_window_days as i64);
+            if Utc::now() - order_created_at > window {
+                return Err(ApiError::BadRequest { code: "return_window_expired", trace_id: None, message: Some(format!("Return window of {} days has expired", policy.allow_window_days)) });
+            }
+        }
     }
 
     let db_rows = {
@@ -1373,6 +1443,14 @@ pub async fn refund_order(
 
     if updates.is_empty() {
         return Err(ApiError::BadRequest { code: "no_valid_items", trace_id: None, message: Some("No valid items provided for refund".into()) });
+    }
+
+    // Apply restock fee
+    if policy.restock_fee_bps > 0 {
+        // refund_total := refund_total * (1 - bps/10000)
+        let fee = BigDecimal::from(policy.restock_fee_bps);
+        let discounted = &refund_total * (BigDecimal::from(10000) - fee) / BigDecimal::from(10000);
+        refund_total = discounted;
     }
 
     if let Some(client_total) = req.total.clone() {
@@ -2149,6 +2227,156 @@ pub async fn upsert_tax_rate_override(
     .map_err(|e| ApiError::Internal { trace_id: None, message: Some(format!("Failed to upsert override: {}", e)) })?;
 
     Ok(Json(row))
+}
+
+// --- Admin: Return policies CRUD (MVP stub) ---
+#[derive(Serialize, sqlx::FromRow, Clone)]
+pub struct ReturnPolicyRow {
+    pub tenant_id: Uuid,
+    pub location_id: Option<Uuid>,
+    pub allow_window_days: i32,
+    pub restock_fee_bps: i32,
+    pub receipt_required: bool,
+    pub manager_override_allowed: bool,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Deserialize, Default)]
+pub struct GetReturnPolicyParams { pub location_id: Option<Uuid> }
+
+pub async fn get_return_policy(
+    State(state): State<AppState>,
+    SecurityCtxExtractor(sec): SecurityCtxExtractor,
+    Query(params): Query<GetReturnPolicyParams>,
+) -> Result<Json<ReturnPolicyRow>, ApiError> {
+    if !sec.roles.iter().any(|r| matches!(r, Role::Admin | Role::Manager)) {
+        return Err(ApiError::ForbiddenMissingRole { role: "admin_or_manager", trace_id: None });
+    }
+    let tenant_id = sec.tenant_id;
+    let _ = sqlx::query(
+        r#"CREATE TABLE IF NOT EXISTS return_policies (
+            tenant_id UUID NOT NULL,
+            location_id UUID NULL,
+            allow_window_days INTEGER NOT NULL CHECK (allow_window_days >= 0 AND allow_window_days <= 3650),
+            restock_fee_bps INTEGER NOT NULL CHECK (restock_fee_bps >= 0 AND restock_fee_bps <= 10000),
+            receipt_required BOOLEAN NOT NULL DEFAULT TRUE,
+            manager_override_allowed BOOLEAN NOT NULL DEFAULT TRUE,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            PRIMARY KEY (tenant_id, location_id)
+        )"#
+    ).execute(&state.db).await;
+
+    if let Some(row) = sqlx::query_as::<_, ReturnPolicyRow>(
+        "SELECT tenant_id, location_id, allow_window_days, restock_fee_bps, receipt_required, manager_override_allowed, updated_at
+         FROM return_policies WHERE tenant_id = $1 AND location_id IS NOT DISTINCT FROM $2"
+    ).bind(tenant_id).bind(params.location_id).fetch_optional(&state.db).await.map_err(|e| ApiError::Internal{ trace_id: None, message: Some(format!("Failed to load policy: {}", e)) })? {
+        return Ok(Json(row));
+    }
+    if let Some(row) = sqlx::query_as::<_, ReturnPolicyRow>(
+        "SELECT tenant_id, location_id, allow_window_days, restock_fee_bps, receipt_required, manager_override_allowed, updated_at
+         FROM return_policies WHERE tenant_id = $1 AND location_id IS NULL ORDER BY updated_at DESC LIMIT 1"
+    ).bind(tenant_id).fetch_optional(&state.db).await.map_err(|e| ApiError::Internal{ trace_id: None, message: Some(format!("Failed to load default policy: {}", e)) })? {
+        return Ok(Json(row));
+    }
+    Ok(Json(ReturnPolicyRow {
+        tenant_id,
+        location_id: None,
+        allow_window_days: 30,
+        restock_fee_bps: 0,
+        receipt_required: true,
+        manager_override_allowed: true,
+        updated_at: Utc::now(),
+    }))
+}
+
+#[derive(Deserialize)]
+pub struct UpsertReturnPolicyRequest {
+    pub location_id: Option<Uuid>,
+    pub allow_window_days: i32,
+    pub restock_fee_bps: i32,
+    pub receipt_required: bool,
+    pub manager_override_allowed: bool,
+}
+
+pub async fn upsert_return_policy(
+    State(state): State<AppState>,
+    SecurityCtxExtractor(sec): SecurityCtxExtractor,
+    Json(req): Json<UpsertReturnPolicyRequest>,
+) -> Result<Json<ReturnPolicyRow>, ApiError> {
+    if !sec.roles.iter().any(|r| matches!(r, Role::Admin | Role::Manager)) {
+        return Err(ApiError::ForbiddenMissingRole { role: "admin_or_manager", trace_id: None });
+    }
+    let tenant_id = sec.tenant_id;
+    let _ = sqlx::query(
+        r#"CREATE TABLE IF NOT EXISTS return_policies (
+            tenant_id UUID NOT NULL,
+            location_id UUID NULL,
+            allow_window_days INTEGER NOT NULL CHECK (allow_window_days >= 0 AND allow_window_days <= 3650),
+            restock_fee_bps INTEGER NOT NULL CHECK (restock_fee_bps >= 0 AND restock_fee_bps <= 10000),
+            receipt_required BOOLEAN NOT NULL DEFAULT TRUE,
+            manager_override_allowed BOOLEAN NOT NULL DEFAULT TRUE,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            PRIMARY KEY (tenant_id, location_id)
+        )"#
+    ).execute(&state.db).await;
+    sqlx::query("DELETE FROM return_policies WHERE tenant_id = $1 AND location_id IS NOT DISTINCT FROM $2")
+        .bind(tenant_id).bind(req.location_id).execute(&state.db).await
+        .map_err(|e| ApiError::Internal{ trace_id: None, message: Some(format!("Failed to clear existing policy: {}", e)) })?;
+    let row = sqlx::query_as::<_, ReturnPolicyRow>(
+        "INSERT INTO return_policies (tenant_id, location_id, allow_window_days, restock_fee_bps, receipt_required, manager_override_allowed)
+         VALUES ($1,$2,$3,$4,$5,$6)
+         RETURNING tenant_id, location_id, allow_window_days, restock_fee_bps, receipt_required, manager_override_allowed, updated_at"
+    )
+    .bind(tenant_id)
+    .bind(req.location_id)
+    .bind(req.allow_window_days.max(0).min(3650))
+    .bind(req.restock_fee_bps.max(0).min(10000))
+    .bind(req.receipt_required)
+    .bind(req.manager_override_allowed)
+    .fetch_one(&state.db).await
+    .map_err(|e| ApiError::Internal{ trace_id: None, message: Some(format!("Failed to upsert policy: {}", e)) })?;
+    Ok(Json(row))
+}
+
+// --- Manager override tokens (MVP stub) ---
+#[derive(Serialize, sqlx::FromRow)]
+pub struct ReturnOverrideRow {
+    pub id: Uuid,
+    pub tenant_id: Uuid,
+    pub order_id: Uuid,
+    pub reason: String,
+    pub issued_at: DateTime<Utc>,
+    pub used_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Deserialize)]
+pub struct IssueOverrideRequest { pub order_id: Uuid, pub reason: String }
+
+pub async fn issue_return_override(
+    State(state): State<AppState>,
+    SecurityCtxExtractor(sec): SecurityCtxExtractor,
+    Json(req): Json<IssueOverrideRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if !sec.roles.iter().any(|r| matches!(r, Role::Manager | Role::Admin)) {
+        return Err(ApiError::ForbiddenMissingRole { role: "manager_or_admin", trace_id: None });
+    }
+    let tenant_id = sec.tenant_id;
+    let _ = sqlx::query(
+        r#"CREATE TABLE IF NOT EXISTS return_overrides (
+            id UUID PRIMARY KEY,
+            tenant_id UUID NOT NULL,
+            order_id UUID NOT NULL,
+            reason TEXT NOT NULL,
+            issued_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            used_at TIMESTAMPTZ NULL
+        )"#
+    ).execute(&state.db).await;
+    let id = Uuid::new_v4();
+    sqlx::query("INSERT INTO return_overrides (id, tenant_id, order_id, reason) VALUES ($1,$2,$3,$4)")
+        .bind(id).bind(tenant_id).bind(req.order_id).bind(&req.reason)
+        .execute(&state.db).await
+        .map_err(|e| ApiError::Internal{ trace_id: None, message: Some(format!("Failed to issue override: {}", e)) })?;
+    Ok(Json(serde_json::json!({"override_token": id})))
 }
 
 async fn compute_with_db_inner(
