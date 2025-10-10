@@ -77,6 +77,8 @@ async fn main() -> anyhow::Result<()> {
         v
     });
 
+    // TODO(P0-04): define checkout_latency_seconds histogram and tap_count_total counter (labels: tenant_id, store_id, terminal_id)
+
     async fn http_error_metrics(req: axum::http::Request<axum::body::Body>, next: axum::middleware::Next) -> axum::response::Response {
         let resp = next.run(req).await;
         let status = resp.status();

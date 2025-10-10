@@ -71,6 +71,7 @@ const CashierPage: React.FC = () => {
   const [pendingSubmit, setPendingSubmit] = useState(false);
   const [idleSeconds, setIdleSeconds] = useState(0);
   const [paymentError, setPaymentError] = useState<string | null>(null);
+  const [scanNotice, setScanNotice] = useState<string | null>(null);
 
   useSyncOnReconnect();
 
@@ -137,6 +138,21 @@ const CashierPage: React.FC = () => {
       return matchesQuery && matchesCategory;
     });
   }, [categoryFilter, products, query]);
+
+  const handleSubmitQuery = useCallback((raw: string) => {
+    const trimmed = raw.trim();
+    if (trimmed.length === 0) return;
+    // Base-SKU only: attempt exact SKU match
+    const exact = products.find(p => (p.sku ?? '').toLowerCase() === trimmed.toLowerCase());
+    if (exact) {
+      addItem({ id: exact.id, name: exact.name, price: exact.price, sku: exact.sku });
+      setQuery('');
+      setScanNotice(null);
+      return;
+    }
+    // No exact match: likely a variant barcode not supported in MVP
+    setScanNotice('Barcode not recognized. For MVP, please scan the base SKU label for this item.');
+  }, [addItem, products]);
 
   const inactiveCartItemIds = useMemo(
     () => cart.filter(item => !products.some(product => product.id === item.id)).map(item => item.id),
@@ -347,7 +363,7 @@ const CashierPage: React.FC = () => {
             </div>
           </div>
           <div className="cashier-header__controls">
-            <SearchBar query={query} onQueryChange={setQuery} />
+            <SearchBar query={query} onQueryChange={setQuery} onSubmitQuery={handleSubmitQuery} />
             {categories.length > 1 && (
               <CategoryFilter categories={categories} selected={categoryFilter} onSelect={setCategoryFilter} />
             )}
@@ -389,6 +405,11 @@ const CashierPage: React.FC = () => {
                 Offline mode: showing last synced catalog.
               </div>
             )}
+            {scanNotice && (
+              <div className="cashier-card__notice cashier-card__notice--muted" role="status">
+                {scanNotice}
+              </div>
+            )}
             <ProductGrid
               products={filteredProducts}
               onAddProduct={product =>
@@ -398,6 +419,7 @@ const CashierPage: React.FC = () => {
             {!isLoadingProducts && filteredProducts.length === 0 && (
               <div className="cashier-card__empty-state">
                 No products found. Try adjusting your search or category filter.
+                <div className="cashier-card__hint">Tip: Scanning variant barcodes isn’t supported yet. Scan the base SKU.</div>
               </div>
             )}
           </section>

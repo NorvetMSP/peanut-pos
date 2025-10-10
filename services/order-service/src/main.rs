@@ -118,6 +118,8 @@ async fn main() -> anyhow::Result<()> {
     let inventory_base_url =
         env::var("INVENTORY_SERVICE_URL").unwrap_or_else(|_| "http://localhost:8087".to_string());
 
+    // TODO(P0-04): expose checkout_latency_seconds and tap_count_total via /metrics with labels tenant_id/store_id/terminal_id
+
     #[cfg(any(feature = "kafka", feature = "kafka-producer"))]
     let state = AppState {
         db: db.clone(),

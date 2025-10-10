@@ -426,6 +426,8 @@ export const OrderProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   }, [tenantId, token]);
 
   const postOrder = useCallback(async (payload: OrderSubmissionPayload): Promise<OrderResponse> => {
+    // TODO(P0-04): start 'pos.checkout' root span; record tap_count_total on submission
+    // e.g., trace.startSpan('pos.checkout', { tenant_id: tenantId, terminal_id: ensureDeviceIdentifier() })
     const headers = buildHeaders();
     const response = await fetch(`${ORDER_SERVICE_URL}/orders`, {
       method: 'POST',
@@ -443,6 +445,8 @@ export const OrderProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       throw new Error(message);
     }
     const data = (await response.json()) as OrderResponse;
+    // TODO(P0-04): end 'pos.checkout' span and record checkout_latency_seconds
+    // metrics.checkoutLatency.observe(durationMs/1000, { tenant_id: tenantId, terminal_id: ensureDeviceIdentifier() })
     if (!data || typeof data.id !== 'string') {
       throw new Error('Order service returned an unexpected response.');
     }
