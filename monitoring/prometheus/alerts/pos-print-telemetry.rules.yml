@@ -1,0 +1,46 @@
+groups:
+  - name: pos-print-telemetry
+    rules:
+      - alert: PosPrintQueueDepthHigh
+        annotations:
+          summary: POS print queue depth high
+          description: Queue depth has been >= {{ $value }} for at least 5m (tenant={{ $labels.tenant_id }}, store={{ $labels.store_id }})
+          runbook_url: https://github.com/datawrangler05/novapos/blob/main/docs/runbook.md#pos-telemetry-smoke-test
+        expr: max_over_time(pos_print_gauge{name="queue_depth"}[5m]) >= 3
+        for: 5m
+        labels:
+          severity: warning
+          team: pos
+
+      - alert: PosPrintQueueDepthCritical
+        annotations:
+          summary: POS print queue depth critical
+          description: Queue depth has been >= {{ $value }} for at least 10m (tenant={{ $labels.tenant_id }}, store={{ $labels.store_id }})
+          runbook_url: https://github.com/datawrangler05/novapos/blob/main/docs/runbook.md#pos-telemetry-smoke-test
+        expr: max_over_time(pos_print_gauge{name="queue_depth"}[10m]) >= 10
+        for: 10m
+        labels:
+          severity: critical
+          team: pos
+
+      - alert: PosPrintRetriesSpiking
+        annotations:
+          summary: POS print retry failures spiking
+          description: Retry failures are increasing rapidly in the last 10m (tenant={{ $labels.tenant_id }}, store={{ $labels.store_id }})
+          runbook_url: https://github.com/datawrangler05/novapos/blob/main/docs/runbook.md#pos-telemetry-smoke-test
+        expr: increase(pos_print_retry_total{kind="failed"}[10m]) >= 5
+        for: 0m
+        labels:
+          severity: warning
+          team: pos
+
+      - alert: PosPrintNoSuccessAfterQueued
+        annotations:
+          summary: POS print jobs queued but not succeeding
+          description: Jobs are queuing but not succeeding within 15m (tenant={{ $labels.tenant_id }}, store={{ $labels.store_id }})
+          runbook_url: https://github.com/datawrangler05/novapos/blob/main/docs/runbook.md#pos-telemetry-smoke-test
+        expr: (increase(pos_print_retry_total{kind="queued"}[15m]) > 0) and (increase(pos_print_retry_total{kind="success"}[15m]) == 0)
+        for: 0m
+        labels:
+          severity: critical
+          team: pos

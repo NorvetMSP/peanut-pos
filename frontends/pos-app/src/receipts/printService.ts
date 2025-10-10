@@ -1,6 +1,7 @@
 import { MockPrinter } from "../devices/mocks/mockPrinter";
 import type { PrinterDevice } from "../devices/printer";
 import { buildSaleReceiptJob, type SaleReceipt } from "./format";
+import { incCounter, setGauge, setTimestamp } from "../services/telemetry";
 
 let cached: PrinterDevice | null = null;
 
@@ -23,4 +24,69 @@ export async function printSaleReceipt(data: SaleReceipt): Promise<{ ok: boolean
   } catch (err) {
     return { ok: false, message: err instanceof Error ? err.message : String(err) };
   }
+}
+
+// Retry queue (simple, in-memory per-session)
+type QueueItem = { job: ReturnType<typeof buildSaleReceiptJob>; resolve: (r: { ok: boolean; message?: string }) => void; attempts: number };
+const queue: QueueItem[] = [];
+let unsubscribe: (() => void) | null = null;
+
+export async function printSaleReceiptWithRetry(
+  data: SaleReceipt,
+  opts?: { maxAttempts?: number; intervalMs?: number; onQueued?: () => void }
+): Promise<{ ok: boolean; message?: string }> {
+  const maxAttempts = Math.max(1, opts?.maxAttempts ?? 3);
+  const intervalMs = Math.max(500, opts?.intervalMs ?? 1500);
+
+  const printer = await getPrinter();
+  const width = (await printer.capabilities()).widthChars?.[0] ?? 42;
+  const job = buildSaleReceiptJob(data, width);
+
+  // Try immediate print first
+  const first = await printer.print(job);
+  if (first.ok) return { ok: true };
+  if (first.error.code !== 'device_unavailable') {
+    return { ok: false, message: first.error.message ?? first.error.code };
+  }
+
+  // Device unavailable: queue and subscribe for status changes
+  return new Promise<{ ok: boolean; message?: string }>(resolve => {
+    queue.push({ job, resolve, attempts: 1 });
+    // Telemetry + UI hint
+    setGauge('pos.print.queue_depth', queue.length);
+    incCounter('pos.print.retry.queued');
+    opts?.onQueued?.();
+
+    const tryDequeue = async () => {
+      if (queue.length === 0) return;
+      const head = queue[0];
+      setTimestamp('pos.print.retry.last_attempt');
+      const res = await printer.print(head.job);
+      if (res.ok) {
+        incCounter('pos.print.retry.success');
+        head.resolve({ ok: true });
+        queue.shift();
+        setGauge('pos.print.queue_depth', queue.length);
+        return;
+      }
+      head.attempts += 1;
+      if (head.attempts > maxAttempts) {
+        incCounter('pos.print.retry.failed');
+        head.resolve({ ok: false, message: res.error.message ?? res.error.code });
+        queue.shift();
+        setGauge('pos.print.queue_depth', queue.length);
+        return;
+      }
+      // Backoff and re-attempt later
+      setTimeout(tryDequeue, intervalMs);
+    };
+
+    if (!unsubscribe && typeof printer.on === 'function') {
+      unsubscribe = printer.on('status', s => {
+        if (s.state === 'ready') {
+          void tryDequeue();
+        }
+      });
+    }
+  });
 }

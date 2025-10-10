@@ -1,0 +1,33 @@
+route:
+  group_by: ['alertname','tenant_id','store_id']
+  group_wait: 30s
+  group_interval: 2m
+  repeat_interval: 4h
+  receiver: dev-null
+  routes:
+    - matchers:
+        - severity = "critical"
+      receiver: pagerduty
+    - matchers:
+        - severity = "warning"
+      receiver: slack
+
+receivers:
+  - name: dev-null
+  - name: slack
+    slack_configs:
+      - api_url: '${SLACK_WEBHOOK_URL}'
+        send_resolved: true
+        channel: '#novapos-alerts'
+        title: '[{{ .Status | toUpper }}][{{ .CommonLabels.severity | default "n/a" }}] {{ .CommonLabels.alertname }}'
+        text: |
+          {{ range .Alerts }}
+          • {{ .Annotations.summary }}
+            details: {{ .Annotations.description }}
+            labels: tenant={{ .Labels.tenant_id }}, store={{ .Labels.store_id }}
+          {{ end }}
+  - name: pagerduty
+    pagerduty_configs:
+      - routing_key: '${PAGERDUTY_ROUTING_KEY}'
+        severity: '{{ .CommonLabels.severity | default "critical" }}'
+        send_resolved: true

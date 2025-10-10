@@ -173,6 +173,14 @@ Architecture is ready to offload to an analytical store or warehouse (e.g., BigQ
 - Prints receipts; payment terminal integration planned.
 - Idempotency prevents duplicate orders during resync.
 
+Device & peripherals (MVP status):
+
+- Unified Device SDK interfaces for printer/scanner/terminal with mock drivers for dev/tests.
+- Event-driven device status: printers emit `status` events; UI shows a proactive banner when disconnected/busy/error.
+- Hot-plug detection and retry: print jobs queue when the printer is unavailable and auto-retry with backoff once the device reports ready; failure and success toasts guide the cashier. A "queued for retry" toast is implemented.
+- Branding on receipts resolved via tenant-config when available with environment fallback.
+- Telemetry: POS emits counters/gauges for retry attempts/success/fail and queue depth; a scheduler batches POSTs with `tenant_id`/`store_id` labels to an ingestion endpoint in Order Service, which exposes Prometheus metrics consumed by a Grafana dashboard (POS print telemetry). Alerts to be finalized under P0-06/P9-02.
+
 ### 2. Back-office Admin Portal
 
 - React web app (port `3001`) for management tasks.
@@ -398,7 +406,7 @@ See also: Roadmap Execution Checklist for the sequential MVP plan — [../RoadMa
 
 - Health endpoints: `/healthz` on most services.
 - Metrics: exposed at `/metrics` (legacy `/internal/metrics` still served for backward compatibility).
-- Monitoring assets under `monitoring/` (Grafana/Prometheus dashboards and alert samples), with dashboards for Integration Gateway.
+- Monitoring assets under `monitoring/` (Grafana/Prometheus dashboards and alert samples), with dashboards for Integration Gateway and POS print telemetry (queue depth, retry counters, last attempt timestamp).
 
 ## Security overview
 
