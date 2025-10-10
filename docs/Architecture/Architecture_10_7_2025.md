@@ -267,7 +267,10 @@ Card payments:
 Crypto payments:
 Payment intents (MVP):
 
-- New REST endpoints on Payment Service: `POST /payment_intents` (idempotent create), `GET /payment_intents/:id`, `POST /payment_intents/confirm` (plus capture/void/refund). Backed by a `payment_intents` table when `DATABASE_URL` is configured; otherwise returns stubbed states for local workflows. These endpoints will back POS cashier flows and refund/void orchestration in Order Service.
+- New REST endpoints on Payment Service: `POST /payment_intents` (idempotent create), `GET /payment_intents/:id`, `POST /payment_intents/confirm` (plus capture/void/refund).
+- When `DATABASE_URL` is configured, the state machine is enforced and invalid transitions return HTTP 409 with code `invalid_state_transition` (e.g., capture before confirm, void after refund).
+- Without DB, handlers return stubbed nominal states to enable local workflows without persistence.
+- Order Service can optionally initiate a payment intent during card checkout when `ENABLE_PAYMENT_INTENTS=1` is set; failures are non-blocking for order creation.
 
 
 - Integrates with Coinbase Commerce.
