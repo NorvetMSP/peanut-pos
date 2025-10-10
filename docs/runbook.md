@@ -138,6 +138,12 @@ Behavior:
 - With `DATABASE_URL`, state transitions are enforced. Invalid transitions return HTTP 409 with code `invalid_state_transition`.
 - Idempotency: unique constraint on `idempotency_key` when provided.
 
+Refund/void passthrough (P6-03)
+
+- When `DATABASE_URL` is set and an intent has `provider` and `provider_ref`, the payment-service will call a gateway abstraction during refund/void and persist any updated `provider_ref` returned by the gateway. In stub mode, the provider_ref is deterministically updated: `...-refund` for refunds and `...-void` for voids.
+- Without DB, refund/void endpoints return stub states and do not call the gateway.
+- Order-service wiring to call payment-service for refunds/voids will be guarded by a feature flag. Default `PAYMENT_SERVICE_URL` is `http://localhost:8086`.
+
 ### Webhook verification
 
 Incoming webhooks are protected by an HMAC signature with timestamp skew and nonce replay checks. Enforcement is applied by middleware to any route under the path prefix `/webhooks/`.

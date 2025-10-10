@@ -267,6 +267,7 @@ Scope map (current status)
 
 - [~] P6-03 Refund/reversal passthrough [cashier-mvp]
   Actions: Gateway abstraction and endpoints for reversal; mapping from orders.
+  Notes: Core implemented in payment-service. A PaymentGateway abstraction and stub provider are wired so that POST `/payment_intents/refund` and `/payment_intents/void` call the gateway when `provider` and `provider_ref` exist, updating `provider_ref` deterministically (e.g., `cap_456` → `cap_456-refund`, `auth_999` → `auth_999-void`). DB-backed ignored tests assert provider_ref persistence and state transitions. Remaining: wire order-service to invoke payment-service for refunds/voids (feature-gated) and add an integration test.
   Acceptance: Reversal flows complete; linked to original tender.
   Dependencies: P6-01, P6-02.
 
