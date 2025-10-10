@@ -119,6 +119,25 @@ powershell -File scripts/create-order-with-card.ps1
 
 Result: order is marked paid with method=card; receipt shows a Paid line without Change.
 
+### Payment intents (MVP)
+
+We added a basic payment intent lifecycle in payment-service with optional DB. Order-service can initiate an intent during card checkout when enabled.
+
+- Toggle: set `ENABLE_PAYMENT_INTENTS=1` in order-service to POST a create-intent request to payment-service. Configure `PAYMENT_SERVICE_URL` (default <http://localhost:8086>).
+- Endpoints (payment-service):
+  - POST `/payment_intents` { id, orderId, amountMinor, currency, idempotencyKey? } → { id, state }
+  - GET `/payment_intents/:id` → { id, state }
+  - POST `/payment_intents/confirm` { id } → transitions created→authorized
+  - POST `/payment_intents/capture` { id } → transitions authorized→captured
+  - POST `/payment_intents/void` { id } → transitions authorized→voided
+  - POST `/payment_intents/refund` { id } → transitions captured→refunded
+
+Behavior:
+
+- Without `DATABASE_URL`, handlers return stub states for local workflows (e.g., created/authorized) and do not persist.
+- With `DATABASE_URL`, state transitions are enforced. Invalid transitions return HTTP 409 with code `invalid_state_transition`.
+- Idempotency: unique constraint on `idempotency_key` when provided.
+
 ### DB-backed tax rate overrides
 
 We support per-tenant, per-location, and per-POS-instance tax rate overrides. The resolver applies precedence:

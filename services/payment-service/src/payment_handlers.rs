@@ -95,10 +95,17 @@ pub async fn confirm_intent(
         return Err(ApiError::ForbiddenMissingRole { role: "payment_access", trace_id: sec.trace_id });
     }
     if let Some(db) = &state.db {
+        // Fetch current state and validate transition
+        let existing = repo::get_intent(db, &req.id).await
+            .map_err(|e| ApiError::Internal { trace_id: sec.trace_id, message: Some(format!("db_error: {e}")) })?;
+        let Some(cur) = existing else { return Err(ApiError::NotFound { code: "payment_intent_not_found", trace_id: sec.trace_id }); };
+        if !repo::is_valid_transition(&cur.state, repo::IntentState::Authorized) {
+            return Err(ApiError::Conflict { code: "invalid_state_transition", trace_id: sec.trace_id, message: Some(format!("from={} to=authorized", cur.state)) });
+        }
         let rec = repo::transition_state(db, &req.id, repo::IntentState::Authorized).await
             .map_err(|e| ApiError::Internal { trace_id: sec.trace_id, message: Some(format!("db_error: {e}")) })?;
-    if let Some(pi) = rec { return Ok(Json(IntentResponse { id: pi.id, state: pi.state })); }
-    return Err(ApiError::NotFound { code: "payment_intent_not_found", trace_id: sec.trace_id });
+        if let Some(pi) = rec { return Ok(Json(IntentResponse { id: pi.id, state: pi.state })); }
+        return Err(ApiError::NotFound { code: "payment_intent_not_found", trace_id: sec.trace_id });
     }
     Ok(Json(IntentResponse { id: req.id, state: "authorized".into() }))
 }
@@ -118,10 +125,16 @@ pub async fn capture_intent(
         return Err(ApiError::ForbiddenMissingRole { role: "payment_access", trace_id: sec.trace_id });
     }
     if let Some(db) = &state.db {
+        let existing = repo::get_intent(db, &req.id).await
+            .map_err(|e| ApiError::Internal { trace_id: sec.trace_id, message: Some(format!("db_error: {e}")) })?;
+        let Some(cur) = existing else { return Err(ApiError::NotFound { code: "payment_intent_not_found", trace_id: sec.trace_id }); };
+        if !repo::is_valid_transition(&cur.state, repo::IntentState::Captured) {
+            return Err(ApiError::Conflict { code: "invalid_state_transition", trace_id: sec.trace_id, message: Some(format!("from={} to=captured", cur.state)) });
+        }
         let rec = repo::transition_state(db, &req.id, repo::IntentState::Captured).await
             .map_err(|e| ApiError::Internal { trace_id: sec.trace_id, message: Some(format!("db_error: {e}")) })?;
-    if let Some(pi) = rec { return Ok(Json(IntentResponse { id: pi.id, state: pi.state })); }
-    return Err(ApiError::NotFound { code: "payment_intent_not_found", trace_id: sec.trace_id });
+        if let Some(pi) = rec { return Ok(Json(IntentResponse { id: pi.id, state: pi.state })); }
+        return Err(ApiError::NotFound { code: "payment_intent_not_found", trace_id: sec.trace_id });
     }
     Ok(Json(IntentResponse { id: req.id, state: "captured".into() }))
 }
@@ -141,10 +154,16 @@ pub async fn void_intent(
         return Err(ApiError::ForbiddenMissingRole { role: "payment_access", trace_id: sec.trace_id });
     }
     if let Some(db) = &state.db {
+        let existing = repo::get_intent(db, &req.id).await
+            .map_err(|e| ApiError::Internal { trace_id: sec.trace_id, message: Some(format!("db_error: {e}")) })?;
+        let Some(cur) = existing else { return Err(ApiError::NotFound { code: "payment_intent_not_found", trace_id: sec.trace_id }); };
+        if !repo::is_valid_transition(&cur.state, repo::IntentState::Voided) {
+            return Err(ApiError::Conflict { code: "invalid_state_transition", trace_id: sec.trace_id, message: Some(format!("from={} to=voided", cur.state)) });
+        }
         let rec = repo::transition_state(db, &req.id, repo::IntentState::Voided).await
             .map_err(|e| ApiError::Internal { trace_id: sec.trace_id, message: Some(format!("db_error: {e}")) })?;
-    if let Some(pi) = rec { return Ok(Json(IntentResponse { id: pi.id, state: pi.state })); }
-    return Err(ApiError::NotFound { code: "payment_intent_not_found", trace_id: sec.trace_id });
+        if let Some(pi) = rec { return Ok(Json(IntentResponse { id: pi.id, state: pi.state })); }
+        return Err(ApiError::NotFound { code: "payment_intent_not_found", trace_id: sec.trace_id });
     }
     Ok(Json(IntentResponse { id: req.id, state: "voided".into() }))
 }
@@ -164,10 +183,16 @@ pub async fn refund_intent(
         return Err(ApiError::ForbiddenMissingRole { role: "payment_access", trace_id: sec.trace_id });
     }
     if let Some(db) = &state.db {
+        let existing = repo::get_intent(db, &req.id).await
+            .map_err(|e| ApiError::Internal { trace_id: sec.trace_id, message: Some(format!("db_error: {e}")) })?;
+        let Some(cur) = existing else { return Err(ApiError::NotFound { code: "payment_intent_not_found", trace_id: sec.trace_id }); };
+        if !repo::is_valid_transition(&cur.state, repo::IntentState::Refunded) {
+            return Err(ApiError::Conflict { code: "invalid_state_transition", trace_id: sec.trace_id, message: Some(format!("from={} to=refunded", cur.state)) });
+        }
         let rec = repo::transition_state(db, &req.id, repo::IntentState::Refunded).await
             .map_err(|e| ApiError::Internal { trace_id: sec.trace_id, message: Some(format!("db_error: {e}")) })?;
-    if let Some(pi) = rec { return Ok(Json(IntentResponse { id: pi.id, state: pi.state })); }
-    return Err(ApiError::NotFound { code: "payment_intent_not_found", trace_id: sec.trace_id });
+        if let Some(pi) = rec { return Ok(Json(IntentResponse { id: pi.id, state: pi.state })); }
+        return Err(ApiError::NotFound { code: "payment_intent_not_found", trace_id: sec.trace_id });
     }
     Ok(Json(IntentResponse { id: req.id, state: "refunded".into() }))
 }

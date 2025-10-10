@@ -256,7 +256,11 @@ Scope map (current status)
 
 - [~] P6-01 Payment intent model [cashier-mvp]
   Actions: `payment_intents` table; idempotent create; state transitions; reversal link.
-  Acceptance: REST endpoints in payment-service for create/get/confirm/capture/void/refund; idempotent create; basic tests green; observability hooks in place.
+  $env:DATABASE_URL = "postgres://novapos:novapos@localhost:5432/novapos"
+  pushd services
+  cargo test -p payment-service -- --ignored db_backed_transitions_and_conflicts
+  popd  Acceptance: REST endpoints in payment-service for create/get/confirm/capture/void/refund; idempotent create; basic tests green; observability hooks in place.
+  Acceptance: Endpoints for create/get/confirm/capture/void/refund operational; with DB configured, invalid transitions return 409 (`invalid_state_transition`); without DB, endpoints stub nominal states for local workflows. Order-service can optionally initiate intent on card checkout when `ENABLE_PAYMENT_INTENTS=1`.
   Notes: MVP implemented in `payment-service` with optional DB (falls back to stateless stubs if `DATABASE_URL` is unset). SQLx migration `8002_create_payment_intents.sql`; repository implements simple state transitions. New routes: `POST /payment_intents`, `GET /payment_intents/:id`, `POST /payment_intents/confirm` (capture/void/refund wired). Tests cover create→confirm happy path without DB. Next: enforce transitions, wire provider refs, and add DB-backed tests.
   Dependencies: P2-01.
 

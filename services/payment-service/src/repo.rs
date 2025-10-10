@@ -25,6 +25,34 @@ impl IntentState {
             IntentState::Failed => "failed",
         }
     }
+
+    pub fn from_str(s: &str) -> Option<IntentState> {
+        match s {
+            "created" => Some(IntentState::Created),
+            "authorized" => Some(IntentState::Authorized),
+            "captured" => Some(IntentState::Captured),
+            "refunded" => Some(IntentState::Refunded),
+            "voided" => Some(IntentState::Voided),
+            "failed" => Some(IntentState::Failed),
+            _ => None,
+        }
+    }
+}
+
+/// Valid transitions for MVP:
+/// created -> authorized
+/// authorized -> captured | voided
+/// captured -> refunded
+/// Any other transition is invalid and should return HTTP 409
+pub fn is_valid_transition(from_state: &str, to: IntentState) -> bool {
+    match IntentState::from_str(from_state) {
+        Some(IntentState::Created) => matches!(to, IntentState::Authorized),
+        Some(IntentState::Authorized) => matches!(to, IntentState::Captured | IntentState::Voided),
+        Some(IntentState::Captured) => matches!(to, IntentState::Refunded),
+        // Terminal states: refunded/voided/failed cannot transition further in MVP
+        Some(IntentState::Refunded | IntentState::Voided | IntentState::Failed) => false,
+        None => false,
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
