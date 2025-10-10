@@ -265,6 +265,10 @@ Card payments:
 - Future support: EMV, tap, signature capture.
 
 Crypto payments:
+Payment intents (MVP):
+
+- New REST endpoints on Payment Service: `POST /payment_intents` (idempotent create), `GET /payment_intents/:id`, `POST /payment_intents/confirm` (plus capture/void/refund). Backed by a `payment_intents` table when `DATABASE_URL` is configured; otherwise returns stubbed states for local workflows. These endpoints will back POS cashier flows and refund/void orchestration in Order Service.
+
 
 - Integrates with Coinbase Commerce.
 - Creates charge, receives webhook, publishes `payment.completed` to Kafka.

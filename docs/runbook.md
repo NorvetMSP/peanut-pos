@@ -293,15 +293,16 @@ $headers = @{ 'Content-Type' = 'application/json'; 'X-Tenant-ID' = '<tenant-uuid
 $body = @{
   ts = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
   labels = @{ tenant_id = '<tenant-uuid>'; store_id = 'store-001' }
-  counters = @{
-    'pos.print.retry.queued' = 3
-    'pos.print.retry.failed' = 1
-    'pos.print.retry.success' = 0
-  }
-  gauges = @{
-    'pos.print.queue_depth' = 4
-  }
-} | ConvertTo-Json -Depth 5
+  counters = @(
+    @{ name = 'pos.print.retry.queued';  value = 3 }
+    @{ name = 'pos.print.retry.failed';  value = 1 }
+    @{ name = 'pos.print.retry.success'; value = 0 }
+  )
+  gauges = @(
+    @{ name = 'pos.print.queue_depth';        value = 4 }
+    @{ name = 'pos.print.retry.last_attempt'; value = 1200 }
+  )
+} | ConvertTo-Json -Depth 6
 Invoke-RestMethod -Method Post -Uri http://localhost:8084/pos/telemetry -Headers $headers -Body $body | Format-List
 ```
 
@@ -325,6 +326,40 @@ Optional: check Prometheus UI at <http://localhost:9090> for the expressions use
 increase(pos_print_retry_total{kind="failed"}[10m])
 max_over_time(pos_print_gauge{name="queue_depth"}[5m])
 ```
+
+### Alerts overview for POS print
+
+At-a-glance rules, thresholds, and routing. Full rules live in `monitoring/prometheus/alerts/pos-print-telemetry.rules.yml`; routing in `monitoring/alertmanager/alertmanager.yml`.
+
+- PosPrintQueueDepthHigh
+  - Condition: `max_over_time(pos_print_gauge{name="queue_depth"}[5m]) >= 3`
+  - Duration: 5m
+  - Severity: warning → routed to Slack receiver
+
+- PosPrintQueueDepthCritical
+  - Condition: `max_over_time(pos_print_gauge{name="queue_depth"}[10m]) >= 10`
+  - Duration: 10m
+  - Severity: critical → routed to PagerDuty receiver
+
+- PosPrintRetriesSpiking
+  - Condition: `increase(pos_print_retry_total{kind="failed"}[10m]) >= 5`
+  - Duration: immediate (no for:)
+  - Severity: warning → routed to Slack receiver
+
+- PosPrintNoSuccessAfterQueued
+  - Condition: `increase(queued[15m]) > 0 and increase(success[15m]) == 0`
+    - Concrete: `(increase(pos_print_retry_total{kind="queued"}[15m]) > 0) and (increase(pos_print_retry_total{kind="success"}[15m]) == 0)`
+  - Duration: immediate (no for:)
+  - Severity: critical → routed to PagerDuty receiver
+
+Routing summary (Alertmanager):
+
+- Grouping: `alertname, tenant_id, store_id`
+- severity=warning → Slack (`receivers.slack`) via `${SLACK_WEBHOOK_URL}` to `#novapos-alerts`
+- severity=critical → PagerDuty (`receivers.pagerduty`) via `${PAGERDUTY_ROUTING_KEY}`
+- Default receiver: `dev-null` (no-op) if no child route matches
+
+Tip: Set the required environment variables for receivers in your environment before bringing up Alertmanager, otherwise alerts will route but not deliver.
 
 ## Security & Environment Promotion
 

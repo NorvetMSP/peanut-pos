@@ -1,4 +1,4 @@
-use crate::AppState;
+use crate::{AppState, repo};
 use axum::{
     extract::State,
     http::HeaderMap,
@@ -71,7 +71,12 @@ pub async fn create_intent(
     #[cfg(any(feature = "kafka", feature = "kafka-producer"))] emit_capability_denial_audit(state.audit_producer.as_deref(), &sec, Capability::PaymentProcess, "payment-service").await;
         return Err(ApiError::ForbiddenMissingRole { role: "payment_access", trace_id: sec.trace_id });
     }
-    // Stub: no DB write yet; returns created state
+    if let Some(db) = &state.db {
+        let rec = repo::create_intent(db, &req.id, &req.order_id, req.amount_minor, &req.currency, req.idempotency_key.as_deref()).await
+            .map_err(|e| ApiError::Internal { trace_id: sec.trace_id, message: Some(format!("db_error: {e}")) })?;
+        return Ok(Json(IntentResponse { id: rec.id, state: rec.state }));
+    }
+    // Fallback: no DB configured
     Ok(Json(IntentResponse { id: req.id, state: "created".into() }))
 }
 
@@ -88,6 +93,12 @@ pub async fn confirm_intent(
     if ensure_capability(&sec, Capability::PaymentProcess).is_err() {
     #[cfg(any(feature = "kafka", feature = "kafka-producer"))] emit_capability_denial_audit(state.audit_producer.as_deref(), &sec, Capability::PaymentProcess, "payment-service").await;
         return Err(ApiError::ForbiddenMissingRole { role: "payment_access", trace_id: sec.trace_id });
+    }
+    if let Some(db) = &state.db {
+        let rec = repo::transition_state(db, &req.id, repo::IntentState::Authorized).await
+            .map_err(|e| ApiError::Internal { trace_id: sec.trace_id, message: Some(format!("db_error: {e}")) })?;
+    if let Some(pi) = rec { return Ok(Json(IntentResponse { id: pi.id, state: pi.state })); }
+    return Err(ApiError::NotFound { code: "payment_intent_not_found", trace_id: sec.trace_id });
     }
     Ok(Json(IntentResponse { id: req.id, state: "authorized".into() }))
 }
@@ -106,6 +117,12 @@ pub async fn capture_intent(
     #[cfg(any(feature = "kafka", feature = "kafka-producer"))] emit_capability_denial_audit(state.audit_producer.as_deref(), &sec, Capability::PaymentProcess, "payment-service").await;
         return Err(ApiError::ForbiddenMissingRole { role: "payment_access", trace_id: sec.trace_id });
     }
+    if let Some(db) = &state.db {
+        let rec = repo::transition_state(db, &req.id, repo::IntentState::Captured).await
+            .map_err(|e| ApiError::Internal { trace_id: sec.trace_id, message: Some(format!("db_error: {e}")) })?;
+    if let Some(pi) = rec { return Ok(Json(IntentResponse { id: pi.id, state: pi.state })); }
+    return Err(ApiError::NotFound { code: "payment_intent_not_found", trace_id: sec.trace_id });
+    }
     Ok(Json(IntentResponse { id: req.id, state: "captured".into() }))
 }
 
@@ -122,6 +139,12 @@ pub async fn void_intent(
     if ensure_capability(&sec, Capability::PaymentProcess).is_err() {
     #[cfg(any(feature = "kafka", feature = "kafka-producer"))] emit_capability_denial_audit(state.audit_producer.as_deref(), &sec, Capability::PaymentProcess, "payment-service").await;
         return Err(ApiError::ForbiddenMissingRole { role: "payment_access", trace_id: sec.trace_id });
+    }
+    if let Some(db) = &state.db {
+        let rec = repo::transition_state(db, &req.id, repo::IntentState::Voided).await
+            .map_err(|e| ApiError::Internal { trace_id: sec.trace_id, message: Some(format!("db_error: {e}")) })?;
+    if let Some(pi) = rec { return Ok(Json(IntentResponse { id: pi.id, state: pi.state })); }
+    return Err(ApiError::NotFound { code: "payment_intent_not_found", trace_id: sec.trace_id });
     }
     Ok(Json(IntentResponse { id: req.id, state: "voided".into() }))
 }
@@ -140,7 +163,36 @@ pub async fn refund_intent(
     #[cfg(any(feature = "kafka", feature = "kafka-producer"))] emit_capability_denial_audit(state.audit_producer.as_deref(), &sec, Capability::PaymentProcess, "payment-service").await;
         return Err(ApiError::ForbiddenMissingRole { role: "payment_access", trace_id: sec.trace_id });
     }
+    if let Some(db) = &state.db {
+        let rec = repo::transition_state(db, &req.id, repo::IntentState::Refunded).await
+            .map_err(|e| ApiError::Internal { trace_id: sec.trace_id, message: Some(format!("db_error: {e}")) })?;
+    if let Some(pi) = rec { return Ok(Json(IntentResponse { id: pi.id, state: pi.state })); }
+    return Err(ApiError::NotFound { code: "payment_intent_not_found", trace_id: sec.trace_id });
+    }
     Ok(Json(IntentResponse { id: req.id, state: "refunded".into() }))
+}
+
+#[derive(Deserialize)]
+pub struct GetPath { pub id: String }
+
+pub async fn get_intent(
+    State(state): State<AppState>,
+    SecurityCtxExtractor(sec): SecurityCtxExtractor,
+    _headers: HeaderMap,
+    axum::extract::Path(GetPath { id }): axum::extract::Path<GetPath>,
+) -> Result<Json<IntentResponse>, ApiError> {
+    if ensure_capability(&sec, Capability::PaymentProcess).is_err() {
+        #[cfg(any(feature = "kafka", feature = "kafka-producer"))] emit_capability_denial_audit(state.audit_producer.as_deref(), &sec, Capability::PaymentProcess, "payment-service").await;
+        return Err(ApiError::ForbiddenMissingRole { role: "payment_access", trace_id: sec.trace_id });
+    }
+    if let Some(db) = &state.db {
+        let rec = repo::get_intent(db, &id).await
+            .map_err(|e| ApiError::Internal { trace_id: sec.trace_id, message: Some(format!("db_error: {e}")) })?;
+    if let Some(pi) = rec { return Ok(Json(IntentResponse { id: pi.id, state: pi.state })); }
+    return Err(ApiError::NotFound { code: "payment_intent_not_found", trace_id: sec.trace_id });
+    }
+    // Fallback behavior without DB: pretend created
+    Ok(Json(IntentResponse { id, state: "created".into() }))
 }
 
 #[allow(unused_variables)]

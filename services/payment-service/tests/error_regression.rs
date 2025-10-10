@@ -6,7 +6,7 @@ use std::sync::Arc;
 use tower::ServiceExt;
 
 fn state() -> AppState {
-    AppState { jwt_verifier: Arc::new(JwtVerifier::new(JwtConfig::new("issuer","aud"))) , #[cfg(feature="kafka")] audit_producer: None }
+    AppState { jwt_verifier: Arc::new(JwtVerifier::new(JwtConfig::new("issuer","aud"))) , db: None, #[cfg(feature="kafka")] audit_producer: None }
 }
 
 #[tokio::test]

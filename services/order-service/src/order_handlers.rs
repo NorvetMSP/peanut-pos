@@ -834,6 +834,23 @@ pub async fn create_order(
         "card" => {
             if let Some(p) = &new_order.payment {
                 if p.amount_cents != total_cents { return Err(ApiError::BadRequest { code: "amount_mismatch", trace_id: None, message: Some("Card amount must equal order total".into()) }); }
+                // Optionally create a payment intent (feature-gated)
+                if state.enable_payment_intents {
+                    let url = format!("{}/payment_intents", state.payment_base_url.trim_end_matches('/'));
+                    let body = serde_json::json!({
+                        "id": format!("pi_{}", order_id),
+                        "orderId": order_id.to_string(),
+                        "amountMinor": total_cents,
+                        "currency": "USD",
+                        "idempotencyKey": new_order.idempotency_key.clone().unwrap_or_else(|| format!("ord:{}", order_id))
+                    });
+                    let resp = state.http_client.post(url)
+                        .header("Content-Type", "application/json")
+                        .header("X-Tenant-ID", tenant_id.to_string())
+                        .json(&body)
+                        .send().await;
+                    if let Err(err) = resp { tracing::warn!(?err, order_id = %order_id, "payment intent create failed (network)"); }
+                }
                 "COMPLETED"
             } else {
                 return Err(ApiError::BadRequest { code: "missing_amount", trace_id: None, message: Some("Card payment requires amount_cents".into()) });

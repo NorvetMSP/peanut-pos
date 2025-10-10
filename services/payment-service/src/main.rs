@@ -20,7 +20,8 @@ use hmac::{Hmac, Mac};
 use sha2::{Sha256, Digest};
 use tracing::{debug, info, warn};
 
-use payment_service::{payment_handlers::{process_card_payment, void_card_payment, create_intent, confirm_intent, capture_intent, void_intent, refund_intent}, AppState};
+use payment_service::{payment_handlers::{process_card_payment, void_card_payment, create_intent, confirm_intent, capture_intent, void_intent, refund_intent, get_intent}, AppState};
+use sqlx::PgPool;
 #[cfg(any(feature = "kafka", feature = "kafka-producer"))] use common_audit::{KafkaAuditSink, AuditProducer, AuditProducerConfig, BufferedAuditProducer};
 #[cfg(any(feature = "kafka", feature = "kafka-producer"))] use rdkafka::producer::FutureProducer;
 
@@ -44,7 +45,17 @@ async fn main() -> anyhow::Result<()> {
             Some(Arc::new(BufferedAuditProducer::new(AuditProducer::new(sink), 256)))
         } else { None }
     };
-    let state = AppState { jwt_verifier, #[cfg(any(feature = "kafka", feature = "kafka-producer"))] audit_producer };
+    let db = match env::var("DATABASE_URL") {
+        Ok(url) if !url.is_empty() => {
+            match PgPool::connect(&url).await {
+                Ok(pool) => Some(pool),
+                Err(err) => { warn!(error = %err, "Failed to connect to DATABASE_URL; running without DB"); None }
+            }
+        }
+        _ => None,
+    };
+
+    let state = AppState { jwt_verifier, db, #[cfg(any(feature = "kafka", feature = "kafka-producer"))] audit_producer };
 
     let allowed_origins = [
         "http://localhost:3000",
@@ -157,7 +168,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/payments", post(process_card_payment))
         .route("/payments/void", post(void_card_payment))
         // Payment intents MVP (HTTP JSON stubs)
-        .route("/payment_intents", post(create_intent))
+    .route("/payment_intents", post(create_intent))
+    .route("/payment_intents/:id", get(get_intent))
         .route("/payment_intents/confirm", post(confirm_intent))
         .route("/payment_intents/capture", post(capture_intent))
         .route("/payment_intents/void", post(void_intent))

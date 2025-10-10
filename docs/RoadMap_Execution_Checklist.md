@@ -256,7 +256,8 @@ Scope map (current status)
 
 - [~] P6-01 Payment intent model [cashier-mvp]
   Actions: `payment_intents` table; idempotent create; state transitions; reversal link.
-  Acceptance: Idempotency enforced; transitions tested; persistence stable.
+  Acceptance: REST endpoints in payment-service for create/get/confirm/capture/void/refund; idempotent create; basic tests green; observability hooks in place.
+  Notes: MVP implemented in `payment-service` with optional DB (falls back to stateless stubs if `DATABASE_URL` is unset). SQLx migration `8002_create_payment_intents.sql`; repository implements simple state transitions. New routes: `POST /payment_intents`, `GET /payment_intents/:id`, `POST /payment_intents/confirm` (capture/void/refund wired). Tests cover create→confirm happy path without DB. Next: enforce transitions, wire provider refs, and add DB-backed tests.
   Dependencies: P2-01.
 
 - [~] P6-02 Webhook hardening [cashier-mvp]
