@@ -69,6 +69,8 @@ pub struct AppState {
     pub jwt_verifier: Arc<JwtVerifier>,
     pub http_client: Client,
     pub inventory_base_url: String,
+    pub payment_base_url: String,
+    pub enable_payment_intents: bool,
     #[cfg(any(feature = "kafka", feature = "kafka-producer"))]
     pub kafka_producer: rdkafka::producer::FutureProducer,
     #[cfg(any(feature = "kafka", feature = "kafka-producer"))]

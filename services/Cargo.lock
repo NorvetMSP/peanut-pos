@@ -3182,8 +3182,10 @@ name = "payment-service"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
  "bigdecimal",
+ "chrono",
  "common-audit",
  "common-auth",
  "common-http-errors",
@@ -3198,6 +3200,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "sqlx",
  "subtle",
  "thiserror 2.0.16",
  "tokio",

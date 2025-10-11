@@ -265,6 +265,21 @@ Card payments:
 - Future support: EMV, tap, signature capture.
 
 Crypto payments:
+Payment intents (MVP):
+
+- New REST endpoints on Payment Service: `POST /payment_intents` (idempotent create), `GET /payment_intents/:id`, `POST /payment_intents/confirm` (plus capture/void/refund).
+- When `DATABASE_URL` is configured, the state machine is enforced and invalid transitions return HTTP 409 with code `invalid_state_transition` (e.g., capture before confirm, void after refund).
+- Without DB, handlers return stubbed nominal states to enable local workflows without persistence.
+- Order Service can optionally initiate a payment intent during card checkout when `ENABLE_PAYMENT_INTENTS=1` is set; failures are non-blocking for order creation.
+
+Webhook verification:
+
+- Payment Service includes a middleware that protects routes under `/webhooks/*` with HMAC signatures (header `X-Signature`), timestamp skew validation (config `WEBHOOK_MAX_SKEW_SECS`, default 300s), and nonce replay protection persisted in `webhook_nonces`. When no DB is configured, signature and skew checks still apply; nonce replay enforcement is skipped.
+
+Refund/void passthrough (P6-03):
+
+- A `PaymentGateway` trait abstracts provider calls for reversals. For intents that carry `provider` and `provider_ref`, `POST /payment_intents/refund` and `/payment_intents/void` invoke the gateway and update `provider_ref` based on the provider response. The stub gateway used in dev appends `-refund` or `-void` to the existing reference. With no DB configured, endpoints return nominal states without calling the gateway.
+
 
 - Integrates with Coinbase Commerce.
 - Creates charge, receives webhook, publishes `payment.completed` to Kafka.

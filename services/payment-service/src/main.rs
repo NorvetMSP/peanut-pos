@@ -16,11 +16,11 @@ use std::{env, net::SocketAddr, sync::Arc, time::Duration};
 use tokio::net::TcpListener;
 use tokio::time::{interval, MissedTickBehavior};
 use tower_http::cors::{AllowOrigin, CorsLayer};
-use hmac::{Hmac, Mac};
-use sha2::{Sha256, Digest};
 use tracing::{debug, info, warn};
 
-use payment_service::{payment_handlers::{process_card_payment, void_card_payment, create_intent, confirm_intent, capture_intent, void_intent, refund_intent}, AppState};
+use payment_service::{payment_handlers::{process_card_payment, void_card_payment, create_intent, confirm_intent, capture_intent, void_intent, refund_intent, get_intent}, AppState};
+use payment_service::webhook::verify_webhook;
+use sqlx::PgPool;
 #[cfg(any(feature = "kafka", feature = "kafka-producer"))] use common_audit::{KafkaAuditSink, AuditProducer, AuditProducerConfig, BufferedAuditProducer};
 #[cfg(any(feature = "kafka", feature = "kafka-producer"))] use rdkafka::producer::FutureProducer;
 
@@ -44,7 +44,17 @@ async fn main() -> anyhow::Result<()> {
             Some(Arc::new(BufferedAuditProducer::new(AuditProducer::new(sink), 256)))
         } else { None }
     };
-    let state = AppState { jwt_verifier, #[cfg(any(feature = "kafka", feature = "kafka-producer"))] audit_producer };
+    let db = match env::var("DATABASE_URL") {
+        Ok(url) if !url.is_empty() => {
+            match PgPool::connect(&url).await {
+                Ok(pool) => Some(pool),
+                Err(err) => { warn!(error = %err, "Failed to connect to DATABASE_URL; running without DB"); None }
+            }
+        }
+        _ => None,
+    };
+
+    let state = AppState { jwt_verifier, db, #[cfg(any(feature = "kafka", feature = "kafka-producer"))] audit_producer };
 
     let allowed_origins = [
         "http://localhost:3000",
@@ -95,61 +105,8 @@ async fn main() -> anyhow::Result<()> {
         (axum::http::StatusCode::OK, body.to_string())
     }
 
-    // Webhook signature verification middleware (skeleton)
-    async fn verify_webhook(req: axum::http::Request<axum::body::Body>, next: axum::middleware::Next) -> axum::response::Response {
-        // Only guard webhook paths (placeholder: match on "/webhooks/")
-        let is_webhook = req.uri().path().starts_with("/webhooks/");
-        if !is_webhook {
-            return next.run(req).await;
-        }
-
-        // Extract headers
-        let sig: String = req.headers().get("X-Signature").and_then(|v| v.to_str().ok()).map(|s| s.to_string()).unwrap_or_default();
-        let ts: String = req.headers().get("X-Timestamp").and_then(|v| v.to_str().ok()).map(|s| s.to_string()).unwrap_or_default();
-        let nonce: String = req.headers().get("X-Nonce").and_then(|v| v.to_str().ok()).map(|s| s.to_string()).unwrap_or_default();
-        if sig.is_empty() || ts.is_empty() || nonce.is_empty() {
-            let mut resp = axum::http::Response::builder().status(axum::http::StatusCode::UNAUTHORIZED).body(axum::body::Body::from("missing signature")) .unwrap();
-            resp.headers_mut().insert("X-Error-Code", HeaderValue::from_static("sig_missing"));
-            return resp;
-        }
-
-        // Buffer body (consume and rebuild request)
-        let (mut parts, body) = req.into_parts();
-        let bytes = match axum::body::to_bytes(body, 1024 * 1024).await { // 1MB cap
-            Ok(b) => b,
-            Err(_) => {
-                let mut resp = axum::http::Response::builder().status(axum::http::StatusCode::BAD_REQUEST).body(axum::body::Body::from("malformed")) .unwrap();
-                resp.headers_mut().insert("X-Error-Code", HeaderValue::from_static("malformed"));
-                return resp;
-            }
-        };
-
-        // Build canonical string: ts, nonce, body_sha256
-        let body_hash = format!("{:x}", sha2::Sha256::digest(&bytes));
-    let canonical = format!("ts:{}\nnonce:{}\nbody_sha256:{}", ts, nonce, body_hash);
-
-        // Secret lookup (placeholder: from env)
-        let secret = std::env::var("WEBHOOK_ACTIVE_SECRET").unwrap_or_default();
-        let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
-        mac.update(canonical.as_bytes());
-        let expected = hex::encode(mac.finalize().into_bytes());
-
-    let provided = sig.strip_prefix("sha256=").unwrap_or(sig.as_str());
-        let eq = subtle::ConstantTimeEq::ct_eq(expected.as_bytes(), provided.as_bytes()).unwrap_u8();
-        if eq != 1 {
-            let mut resp = axum::http::Response::builder().status(axum::http::StatusCode::UNAUTHORIZED).body(axum::body::Body::from("signature mismatch")) .unwrap();
-            resp.headers_mut().insert("X-Error-Code", HeaderValue::from_static("sig_mismatch"));
-            return resp;
-        }
-
-        // TODO: timestamp skew and nonce replay checks (requires DB access); pass through for now.
-
-        if let Ok(cl) = HeaderValue::from_str(&bytes.len().to_string()) {
-            parts.headers.insert(axum::http::header::CONTENT_LENGTH, cl);
-        }
-        let req = axum::http::Request::from_parts(parts, axum::body::Body::from(bytes));
-        next.run(req).await
-    }
+    // Webhook signature verification middleware with HMAC, timestamp skew and nonce replay protection
+    // verify_webhook now lives in payment_service::webhook
 
     let app = Router::new()
         .route("/healthz", get(|| async { "ok" }))
@@ -157,7 +114,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/payments", post(process_card_payment))
         .route("/payments/void", post(void_card_payment))
         // Payment intents MVP (HTTP JSON stubs)
-        .route("/payment_intents", post(create_intent))
+    .route("/payment_intents", post(create_intent))
+    .route("/payment_intents/:id", get(get_intent))
         .route("/payment_intents/confirm", post(confirm_intent))
         .route("/payment_intents/capture", post(capture_intent))
         .route("/payment_intents/void", post(void_intent))

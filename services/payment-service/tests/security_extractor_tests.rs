@@ -9,7 +9,7 @@ use serde_json::json;
 // Build minimal app with process_card_payment route only
 async fn app() -> Router {
     let verifier = Arc::new(JwtVerifier::new(JwtConfig::new("issuer","aud")));
-    let state = AppState { jwt_verifier: verifier, #[cfg(feature="kafka")] audit_producer: None };
+    let state = AppState { jwt_verifier: verifier, db: None, #[cfg(feature="kafka")] audit_producer: None };
     Router::new()
         .route("/payments", post(process_card_payment))
         .with_state(state)

@@ -117,6 +117,10 @@ async fn main() -> anyhow::Result<()> {
     let http_client = Client::new();
     let inventory_base_url =
         env::var("INVENTORY_SERVICE_URL").unwrap_or_else(|_| "http://localhost:8087".to_string());
+    let payment_base_url =
+        env::var("PAYMENT_SERVICE_URL").unwrap_or_else(|_| "http://localhost:8086".to_string());
+    let enable_payment_intents = env::var("ENABLE_PAYMENT_INTENTS")
+        .ok().map(|v| v=="1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
 
     // TODO(P0-04): expose checkout_latency_seconds and tap_count_total via /metrics with labels tenant_id/store_id/terminal_id
 
@@ -143,6 +147,8 @@ async fn main() -> anyhow::Result<()> {
         jwt_verifier,
         http_client: http_client.clone(),
         inventory_base_url: inventory_base_url.clone(),
+        payment_base_url: payment_base_url.clone(),
+        enable_payment_intents,
     };
 
     // Build the HTTP app with shared router wiring (CORS, middleware, routes)

@@ -119,6 +119,61 @@ powershell -File scripts/create-order-with-card.ps1
 
 Result: order is marked paid with method=card; receipt shows a Paid line without Change.
 
+### Payment intents (MVP)
+
+We added a basic payment intent lifecycle in payment-service with optional DB. Order-service can initiate an intent during card checkout when enabled.
+
+- Toggle: set `ENABLE_PAYMENT_INTENTS=1` in order-service to POST a create-intent request to payment-service. Configure `PAYMENT_SERVICE_URL` (default <http://localhost:8086>).
+- Endpoints (payment-service):
+  - POST `/payment_intents` { id, orderId, amountMinor, currency, idempotencyKey? } → { id, state }
+  - GET `/payment_intents/:id` → { id, state }
+  - POST `/payment_intents/confirm` { id } → transitions created→authorized
+  - POST `/payment_intents/capture` { id } → transitions authorized→captured
+  - POST `/payment_intents/void` { id } → transitions authorized→voided
+  - POST `/payment_intents/refund` { id } → transitions captured→refunded
+
+Behavior:
+
+- Without `DATABASE_URL`, handlers return stub states for local workflows (e.g., created/authorized) and do not persist.
+- With `DATABASE_URL`, state transitions are enforced. Invalid transitions return HTTP 409 with code `invalid_state_transition`.
+- Idempotency: unique constraint on `idempotency_key` when provided.
+
+Refund/void passthrough (P6-03)
+
+- When `DATABASE_URL` is set and an intent has `provider` and `provider_ref`, the payment-service will call a gateway abstraction during refund/void and persist any updated `provider_ref` returned by the gateway. In stub mode, the provider_ref is deterministically updated: `...-refund` for refunds and `...-void` for voids.
+- Without DB, refund/void endpoints return stub states and do not call the gateway.
+- Order-service wiring to call payment-service for refunds/voids will be guarded by a feature flag. Default `PAYMENT_SERVICE_URL` is `http://localhost:8086`.
+
+### Webhook verification
+
+Incoming webhooks are protected by an HMAC signature with timestamp skew and nonce replay checks. Enforcement is applied by middleware to any route under the path prefix `/webhooks/`.
+
+- Required headers:
+  - X-Signature: `sha256=<hex>` HMAC over the canonical string below
+  - X-Timestamp: Unix epoch seconds
+  - X-Nonce: Unique, single-use nonce per delivery
+  - X-Provider: Optional provider tag, stored with the nonce for audit
+
+- Canonical string to sign:
+  - `ts:<X-Timestamp>\nnonce:<X-Nonce>\nbody_sha256:<sha256(body)>`
+
+- Environment configuration:
+  - WEBHOOK_ACTIVE_SECRET: HMAC secret used to validate signatures
+  - WEBHOOK_MAX_SKEW_SECS: Max allowed clock skew in seconds (default 300)
+
+- Behavior:
+  - Missing or mismatched signature → 401 with `X-Error-Code: sig_missing|sig_mismatch`
+  - Invalid timestamp or excessive skew → 401 with `X-Error-Code: sig_ts_invalid|sig_skew`
+  - Nonce replay (seen before) → 401 with `X-Error-Code: sig_replay`
+  - When no database is configured, signature and timestamp checks still apply; nonce replay protection is skipped.
+
+- Storage:
+  - Nonces are persisted in `webhook_nonces (nonce TEXT PRIMARY KEY, ts TIMESTAMPTZ DEFAULT now(), provider TEXT)`
+
+Notes:
+
+- The middleware is enabled; add webhook routes under `/webhooks/` to activate protection on those endpoints.
+
 ### DB-backed tax rate overrides
 
 We support per-tenant, per-location, and per-POS-instance tax rate overrides. The resolver applies precedence:
@@ -293,15 +348,16 @@ $headers = @{ 'Content-Type' = 'application/json'; 'X-Tenant-ID' = '<tenant-uuid
 $body = @{
   ts = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
   labels = @{ tenant_id = '<tenant-uuid>'; store_id = 'store-001' }
-  counters = @{
-    'pos.print.retry.queued' = 3
-    'pos.print.retry.failed' = 1
-    'pos.print.retry.success' = 0
-  }
-  gauges = @{
-    'pos.print.queue_depth' = 4
-  }
-} | ConvertTo-Json -Depth 5
+  counters = @(
+    @{ name = 'pos.print.retry.queued';  value = 3 }
+    @{ name = 'pos.print.retry.failed';  value = 1 }
+    @{ name = 'pos.print.retry.success'; value = 0 }
+  )
+  gauges = @(
+    @{ name = 'pos.print.queue_depth';        value = 4 }
+    @{ name = 'pos.print.retry.last_attempt'; value = 1200 }
+  )
+} | ConvertTo-Json -Depth 6
 Invoke-RestMethod -Method Post -Uri http://localhost:8084/pos/telemetry -Headers $headers -Body $body | Format-List
 ```
 
@@ -325,6 +381,40 @@ Optional: check Prometheus UI at <http://localhost:9090> for the expressions use
 increase(pos_print_retry_total{kind="failed"}[10m])
 max_over_time(pos_print_gauge{name="queue_depth"}[5m])
 ```
+
+### Alerts overview for POS print
+
+At-a-glance rules, thresholds, and routing. Full rules live in `monitoring/prometheus/alerts/pos-print-telemetry.rules.yml`; routing in `monitoring/alertmanager/alertmanager.yml`.
+
+- PosPrintQueueDepthHigh
+  - Condition: `max_over_time(pos_print_gauge{name="queue_depth"}[5m]) >= 3`
+  - Duration: 5m
+  - Severity: warning → routed to Slack receiver
+
+- PosPrintQueueDepthCritical
+  - Condition: `max_over_time(pos_print_gauge{name="queue_depth"}[10m]) >= 10`
+  - Duration: 10m
+  - Severity: critical → routed to PagerDuty receiver
+
+- PosPrintRetriesSpiking
+  - Condition: `increase(pos_print_retry_total{kind="failed"}[10m]) >= 5`
+  - Duration: immediate (no for:)
+  - Severity: warning → routed to Slack receiver
+
+- PosPrintNoSuccessAfterQueued
+  - Condition: `increase(queued[15m]) > 0 and increase(success[15m]) == 0`
+    - Concrete: `(increase(pos_print_retry_total{kind="queued"}[15m]) > 0) and (increase(pos_print_retry_total{kind="success"}[15m]) == 0)`
+  - Duration: immediate (no for:)
+  - Severity: critical → routed to PagerDuty receiver
+
+Routing summary (Alertmanager):
+
+- Grouping: `alertname, tenant_id, store_id`
+- severity=warning → Slack (`receivers.slack`) via `${SLACK_WEBHOOK_URL}` to `#novapos-alerts`
+- severity=critical → PagerDuty (`receivers.pagerduty`) via `${PAGERDUTY_ROUTING_KEY}`
+- Default receiver: `dev-null` (no-op) if no child route matches
+
+Tip: Set the required environment variables for receivers in your environment before bringing up Alertmanager, otherwise alerts will route but not deliver.
 
 ## Security & Environment Promotion
 

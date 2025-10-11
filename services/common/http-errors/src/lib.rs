@@ -15,6 +15,8 @@ pub enum ApiError {
     ForbiddenMissingRole { role: &'static str, trace_id: Option<Uuid> },
     Forbidden { trace_id: Option<Uuid> },
     BadRequest { code: &'static str, trace_id: Option<Uuid>, message: Option<String> },
+    // 409 Conflict errors (e.g., invalid state transitions)
+    Conflict { code: &'static str, trace_id: Option<Uuid>, message: Option<String> },
     NotFound { code: &'static str, trace_id: Option<Uuid> },
     Internal { trace_id: Option<Uuid>, message: Option<String> },
 }
@@ -39,6 +41,11 @@ impl IntoResponse for ApiError {
             ),
             ApiError::BadRequest { code, trace_id, message } => (
                 StatusCode::BAD_REQUEST,
+                ErrorBody { code: code.into(), missing_role: None, trace_id, message },
+                code
+            ),
+            ApiError::Conflict { code, trace_id, message } => (
+                StatusCode::CONFLICT,
                 ErrorBody { code: code.into(), missing_role: None, trace_id, message },
                 code
             ),

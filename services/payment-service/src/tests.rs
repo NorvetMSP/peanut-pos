@@ -14,7 +14,7 @@ mod tests {
     async fn unauthorized_flow_returns_json_envelope(){
         let cfg = JwtConfig::new("issuer".into(), "aud".into());
         let verifier = JwtVerifier::builder(cfg).build().await.expect("build verifier");
-        let state = AppState { jwt_verifier: Arc::new(verifier) };
+    let state = AppState { jwt_verifier: Arc::new(verifier), db: None };
         let app = Router::new()
             .route("/payments", post(crate::payment_handlers::process_card_payment))
             .with_state(state);
