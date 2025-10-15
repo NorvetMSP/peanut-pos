@@ -93,6 +93,8 @@ async fn build_test_app(pool: sqlx::PgPool) -> Router {
         jwt_verifier: verifier,
         http_client: reqwest::Client::new(),
         inventory_base_url: "http://localhost:8087".to_string(),
+        payment_base_url: "http://localhost:8086".to_string(),
+        enable_payment_intents: false,
         #[cfg(any(feature = "kafka", feature = "kafka-producer"))]
         audit_producer: None,
     };

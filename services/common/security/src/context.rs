@@ -25,11 +25,13 @@ fn tenant_from_headers(headers: &HeaderMap) -> Option<Uuid> {
 }
 
 fn roles_from_headers(headers: &HeaderMap) -> Vec<Role> {
-    headers.get("X-Roles")
+    headers
+        .get("X-Roles")
         .and_then(|v| v.to_str().ok())
         .map(|csv| {
             csv
                 .split(',')
+                .map(|s| s.trim())
                 .filter(|s| !s.is_empty())
                 .map(|s| s.parse::<Role>().unwrap())
                 .collect()

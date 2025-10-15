@@ -2,13 +2,18 @@ import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "../AuthContext";
 import { withRoleGuard } from "../components/RoleGuard";
-import { MANAGER_ROLES } from "../rbac";
+import { MANAGER_ROLES, SUPER_ADMIN_ROLES } from "../rbac";
+import { useHasAnyRole } from "../hooks/useRoleAccess";
 import { resolveServiceUrl } from "../utils/env";
 import "./AdminSectionModern.css";
 
 const PRODUCT_SERVICE_URL = resolveServiceUrl(
   "VITE_PRODUCT_SERVICE_URL",
   "http://localhost:8081",
+);
+const AUTH_SERVICE_URL = resolveServiceUrl(
+  "VITE_AUTH_SERVICE_URL",
+  "http://localhost:8085",
 );
 const DEFAULT_IMAGE_PLACEHOLDER =
   "https://images.fineartamerica.com/images/artworkimages/mediumlarge/1/super-nova-rina-kaff.jpg";
@@ -41,6 +46,11 @@ type ProductAuditEntry = {
   actor_name?: string | null;
   actor_email?: string | null;
   changes: unknown;
+};
+
+type TenantOption = {
+  value: string;
+  label: string;
 };
 
 const normalizeProduct = (input: unknown): ServiceProduct | null => {
@@ -129,8 +139,9 @@ function normalizeAuditEntries(input: unknown): ProductAuditEntry[] {
 }
 
 const ProductListPageContent: React.FC = () => {
-  const { isLoggedIn, currentUser, token } = useAuth();
+  const { isLoggedIn, currentUser, token, roles } = useAuth();
   const navigate = useNavigate();
+  const isSuperAdmin = useHasAnyRole(SUPER_ADMIN_ROLES);
 
   const [products, setProducts] = useState<ServiceProduct[]>([]);
   const [newProduct, setNewProduct] = useState<ProductFormState>({
@@ -174,13 +185,30 @@ const ProductListPageContent: React.FC = () => {
     if (!isLoggedIn) void navigate("/login", { replace: true });
   }, [isLoggedIn, navigate]);
 
-  const tenantId = currentUser?.tenant_id
-    ? String(currentUser.tenant_id)
-    : null;
+  const tenantId = currentUser?.tenant_id ? String(currentUser.tenant_id) : null;
 
-  const buildHeaders = useCallback((): Record<string, string> => {
+  const [selectedTenantId, setSelectedTenantId] = useState<string | null>(null);
+  const [tenantOptions, setTenantOptions] = useState<TenantOption[]>([]);
+  const [tenantsLoading, setTenantsLoading] = useState(false);
+
+  // For super admins, allow overriding tenant via selector; others stick to their tenant
+  useEffect(() => {
+    setSelectedTenantId(tenantId ?? null);
+  }, [tenantId]);
+
+  const effectiveTenantId = useMemo(
+    () => (isSuperAdmin ? selectedTenantId ?? tenantId : tenantId),
+    [isSuperAdmin, selectedTenantId, tenantId],
+  );
+
+  const buildHeaders = useCallback((tenantOverride?: string): Record<string, string> => {
     const headers: Record<string, string> = {};
-    if (tenantId) headers["X-Tenant-ID"] = tenantId;
+    const tenantHeader = tenantOverride ?? effectiveTenantId;
+    if (tenantHeader) headers["X-Tenant-ID"] = tenantHeader;
+    // Pass roles expected by backend SecurityCtxExtractor (comma-separated)
+    if (Array.isArray(roles) && roles.length > 0) {
+      headers["X-Roles"] = roles.join(",");
+    }
     const userId =
       currentUser && typeof currentUser.id === "string"
         ? currentUser.id.trim()
@@ -198,16 +226,20 @@ const ProductListPageContent: React.FC = () => {
     if (userName) headers["X-User-Name"] = userName;
     if (token) headers["Authorization"] = `Bearer ${token}`;
     return headers;
-  }, [currentUser, tenantId, token]);
+  }, [currentUser, effectiveTenantId, token, roles]);
 
   const ensureTenantContext = useCallback((): boolean => {
-    if (!tenantId) {
-      setError("Tenant context is unavailable. Please log out and back in.");
+    if (!effectiveTenantId) {
+      setError(
+        isSuperAdmin
+          ? "Tenant context is unavailable. Please select a tenant."
+          : "Tenant context is unavailable. Please log out and back in.",
+      );
       setProducts([]);
       return false;
     }
     return true;
-  }, [tenantId]);
+  }, [effectiveTenantId, isSuperAdmin]);
 
   const fetchProducts = useCallback(async (): Promise<void> => {
     if (!ensureTenantContext()) return;
@@ -234,6 +266,60 @@ const ProductListPageContent: React.FC = () => {
       setIsLoading(false);
     }
   }, [buildHeaders, ensureTenantContext]);
+
+  // Fetch tenant catalog for super admins
+  const buildAuthHeaders = useCallback(
+    (tenantOverride?: string): Record<string, string> => {
+      const headers: Record<string, string> = {};
+      const tenantHeader = tenantOverride ?? effectiveTenantId;
+      if (tenantHeader) headers["X-Tenant-ID"] = tenantHeader;
+      if (token) headers["Authorization"] = `Bearer ${token}`;
+      return headers;
+    },
+    [effectiveTenantId, token],
+  );
+
+  const fetchTenants = useCallback(async (): Promise<void> => {
+    if (!isSuperAdmin) return;
+    setTenantsLoading(true);
+    try {
+      const response = await fetch(`${AUTH_SERVICE_URL}/tenants`, {
+        // Auth-service CORS only allows a limited header set; avoid custom headers here
+        headers: buildAuthHeaders(tenantId ?? undefined),
+      });
+      if (!response.ok) {
+        throw new Error(`Failed to fetch tenants (${response.status})`);
+      }
+      const data = (await response.json()) as unknown;
+      const asArray = Array.isArray(data) ? data : [];
+      const options: TenantOption[] = asArray
+        .map((entry) => {
+          if (typeof entry !== "object" || entry === null) return null;
+          const obj = entry as Record<string, unknown>;
+          const id = typeof obj.id === "string" ? obj.id : null;
+          const name = typeof obj.name === "string" ? obj.name : null;
+          if (!id) return null;
+          return { value: id, label: name ?? id } satisfies TenantOption;
+        })
+        .filter((x): x is TenantOption => x !== null);
+      setTenantOptions(options);
+      setSelectedTenantId((prev) => {
+        if (prev && options.some((o) => o.value === prev)) return prev;
+        return tenantId ?? null;
+      });
+    } catch (err) {
+      console.error("Unable to load tenant catalog", err);
+      setError((prev) => prev ?? "Unable to load tenants. Please try again.");
+    } finally {
+      setTenantsLoading(false);
+    }
+  }, [buildAuthHeaders, isSuperAdmin, tenantId]);
+
+  useEffect(() => {
+    if (isSuperAdmin) {
+      void fetchTenants();
+    }
+  }, [fetchTenants, isSuperAdmin]);
 
   const fetchProductAudit = useCallback(
     async (productId: string, force = false): Promise<void> => {
@@ -550,6 +636,35 @@ const ProductListPageContent: React.FC = () => {
         </div>
 
         <div className="admin-section-content">
+          {isSuperAdmin && (
+            <div className="mb-4">
+              <label
+                className="text-sm font-medium text-gray-700 dark:text-gray-300"
+                htmlFor="product-tenant-select"
+              >
+                Tenant
+              </label>
+              <select
+                id="product-tenant-select"
+                value={selectedTenantId ?? ""}
+                onChange={(event) => setSelectedTenantId(event.target.value || null)}
+                className="mt-1 block w-full max-w-sm rounded-md border border-gray-300 bg-white px-3 py-2 text-gray-900 focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary dark:border-gray-700 dark:bg-gray-800 dark:text-gray-100"
+                disabled={tenantsLoading}
+              >
+                {tenantsLoading && tenantOptions.length === 0 ? (
+                  <option>Loading tenants...</option>
+                ) : tenantOptions.length === 0 ? (
+                  <option>No tenants available</option>
+                ) : (
+                  tenantOptions.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))
+                )}
+              </select>
+            </div>
+          )}
           {error && (
             <div className="rounded bg-red-100 text-red-800 px-4 py-3 mb-4">
               {error}

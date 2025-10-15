@@ -9,7 +9,7 @@ erDiagram
     LOCATIONS {
         UUID id PK
         UUID tenant_id
-        TEXT code (unique within tenant)
+        TEXT code "unique within tenant"
         TEXT name
         TEXT timezone
         BOOLEAN active
@@ -19,22 +19,23 @@ erDiagram
     INVENTORY_ITEMS {
         UUID tenant_id PK
         UUID product_id PK
-        UUID location_id PK FK -> LOCATIONS.id
+        UUID location_id PK "FK to LOCATIONS.id"
         INT quantity
         INT threshold
         TIMESTAMPTZ updated_at
     }
 
     INVENTORY_RESERVATIONS {
-        UUID order_id PK(partial)
-        UUID product_id PK(partial)
+        UUID order_id PK "partial key"
+        UUID product_id PK "partial key"
         UUID tenant_id
-        UUID location_id (nullable FK)
+        UUID location_id "nullable FK to LOCATIONS.id"
         INT quantity
-        TEXT status (ACTIVE|RELEASED|EXPIRED|CONSUMED)
+        TEXT status "ACTIVE | RELEASED | EXPIRED | CONSUMED"
         TIMESTAMPTZ created_at
-        TIMESTAMPTZ expires_at (nullable)
+        TIMESTAMPTZ expires_at "nullable"
     }
+
 ```
 
 ## Phased Rollout

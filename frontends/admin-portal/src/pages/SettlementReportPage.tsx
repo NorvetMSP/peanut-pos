@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { withRoleGuard } from '../components/RoleGuard';
 import { MANAGER_ROLES } from '../rbac';
 import { useAuth } from '../AuthContext';
@@ -10,6 +11,7 @@ type Row = SettlementRow;
 
 const SettlementReportPageContent: React.FC = () => {
   const { token, currentUser } = useAuth();
+  const navigate = useNavigate();
   const [date, setDate] = useState<string>(() => new Date().toISOString().slice(0,10));
   const [rows, setRows] = useState<Row[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -68,6 +70,16 @@ const SettlementReportPageContent: React.FC = () => {
             </tbody>
           </table>
         )}
+      </div>
+      {/* Navigation: provide a consistent way back to Admin Home, matching other pages */}
+      <div style={{ textAlign: 'right', marginTop: '2rem' }}>
+        <button
+          className="admin-section-btn"
+          onClick={() => void navigate('/home')}
+          type="button"
+        >
+          Back to Admin Home
+        </button>
       </div>
     </div>
   );

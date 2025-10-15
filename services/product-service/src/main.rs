@@ -162,6 +162,7 @@ async fn main() -> anyhow::Result<()> {
                 CONTENT_TYPE,
                 HeaderName::from_static("authorization"),
                 HeaderName::from_static("x-tenant-id"),
+                HeaderName::from_static("x-roles"),
                 HeaderName::from_static("x-user-id"),
                 HeaderName::from_static("x-user-name"),
                 HeaderName::from_static("x-user-email"),

@@ -2,58 +2,65 @@
 
 NovaPOS is a distributed edge/cloud POS platform designed for multi-tenant SaaS. Stores run an offline-capable POS Edge Client, while cloud microservices (Rust, containerized) provide core business functions. Components are decoupled with events over Kafka and secured end-to-end for tenant isolation.
 
-![Architecture overview](./architecture-overview.svg)
-
 ```mermaid
-%%{init: { 'theme': 'neutral', 'themeVariables': { 'primaryColor': '#f7f9fc', 'lineColor': '#555', 'fontFamily': 'Inter, Segoe UI, Arial, sans-serif' } }}%%
+%%{init: {
+  'theme': 'neutral',
+  'themeVariables': {
+    'primaryColor': '#f7f9fc',
+    'lineColor': '#555',
+    'fontFamily': 'Inter, Segoe UI, Arial, sans-serif'
+  }
+}}%%
+
 flowchart LR
-  %% Frontends
-  subgraph Frontends
-    POS["POS Edge Client\nReact PWA (offline)"]
-    ADMIN["Admin Portal\nManagement UI"]
+
+  %% === Frontends ===
+  subgraph Frontends["Frontends"]
+    POS["POS Edge Client<br/>(React PWA, offline-capable)"]
+    ADMIN["Admin Portal<br/>(Management UI)"]
   end
 
-  %% Kafka
-  KAFKA["Kafka\norder.completed | order.voided | payment.completed"]
+  %% === Kafka Bus ===
+  KAFKA["Kafka<br/>order.completed | order.voided | payment.completed"]
 
-  %% Services
-  subgraph Services (Rust)
-    AUTH[Auth]
-    PROD[Product]
-    INV[Inventory]
-    ORD[Order]
-    PAY[Payment]
-    IGW[Integration GW]
-    CUST[Customer]
-    LOY[Loyalty]
-    ANA[Analytics]
+  %% === Services (Rust) ===
+  subgraph Services["Services – Rust Microservices"]
+    AUTH["Auth"]
+    PROD["Product"]
+    INV["Inventory"]
+    ORD["Order"]
+    PAY["Payment"]
+    IGW["Integration Gateway"]
+    CUST["Customer"]
+    LOY["Loyalty"]
+    ANA["Analytics"]
   end
 
-  %% Infra
-  subgraph Infrastructure
-    PG[("PostgreSQL\ntenant_id")]
-    REDIS[(Redis)]
-    VAULT[(Vault)]
+  %% === Infrastructure ===
+  subgraph Infrastructure["Infrastructure"]
+    PG["PostgreSQL<br/>tenant_id"]
+    REDIS["Redis"]
+    VAULT["Vault"]
   end
 
-  %% Edges (REST)
-  POS -- REST/JWT + X-Tenant-ID --> ORD
-  ADMIN -- REST/JWT + X-Tenant-ID --> AUTH
-  ADMIN -- REST --> PROD
+  %% === REST Edges ===
+  POS -->|"REST / JWT + X-Tenant-ID"| ORD
+  ADMIN -->|"REST / JWT + X-Tenant-ID"| AUTH
+  ADMIN -->|"REST"| PROD
 
-  %% Sync between services
-  ORD -- Reserve stock (REST) --> INV
-  ORD -- Initiate payment (REST) --> PAY
+  %% === Service-to-Service Calls ===
+  ORD -->|"Reserve Stock (REST)"| INV
+  ORD -->|"Initiate Payment (REST)"| PAY
 
-  %% Events (Kafka)
-  ORD -- order.completed --> KAFKA
-  ORD -- order.voided --> KAFKA
-  PAY -- payment.completed --> KAFKA
-  KAFKA -- consume --> INV
-  KAFKA -- consume --> LOY
-  KAFKA -- consume --> ANA
+  %% === Kafka Events ===
+  ORD -->|"order.completed"| KAFKA
+  ORD -->|"order.voided"| KAFKA
+  PAY -->|"payment.completed"| KAFKA
+  KAFKA -->|"consume"| INV
+  KAFKA -->|"consume"| LOY
+  KAFKA -->|"consume"| ANA
 
-  %% Data stores
+  %% === Data Stores ===
   AUTH --- VAULT
   ORD --- PG
   PROD --- PG
@@ -61,6 +68,7 @@ flowchart LR
   PAY --- VAULT
   IGW --- VAULT
   ORD --- REDIS
+
 ```
 
 Legend: Solid arrows denote synchronous REST calls; arrows to/from Kafka nodes indicate event publication/consumption; dashed/labelled edges are illustrative only.
@@ -279,7 +287,6 @@ Webhook verification:
 Refund/void passthrough (P6-03):
 
 - A `PaymentGateway` trait abstracts provider calls for reversals. For intents that carry `provider` and `provider_ref`, `POST /payment_intents/refund` and `/payment_intents/void` invoke the gateway and update `provider_ref` based on the provider response. The stub gateway used in dev appends `-refund` or `-void` to the existing reference. With no DB configured, endpoints return nominal states without calling the gateway.
-
 
 - Integrates with Coinbase Commerce.
 - Creates charge, receives webhook, publishes `payment.completed` to Kafka.

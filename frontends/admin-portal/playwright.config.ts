@@ -1,6 +1,6 @@
 import { defineConfig } from '@playwright/test';
 
-const PORT = 4173;
+const PORT = 5173;
 const HOST = 'localhost';
 const BASE_URL = `http://${HOST}:${PORT}`;
 
@@ -18,7 +18,7 @@ export default defineConfig({
   },
   webServer: {
     command: `npm run dev -- --host ${HOST} --port ${PORT} --strictPort`,
-    url: `${BASE_URL}/customers`,
+    url: `${BASE_URL}/home`,
     reuseExistingServer: false,
     timeout: 120_000,
   },

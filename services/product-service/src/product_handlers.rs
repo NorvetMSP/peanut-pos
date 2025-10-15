@@ -125,7 +125,7 @@ pub async fn update_product(
     Json(upd): Json<UpdateProduct>,
 ) -> Result<Json<Product>, ApiError> {
     // Temporary dual enforcement: old roles + new context roles
-    if !sec.roles.iter().any(|r| matches!(r, Role::Admin | Role::Manager)) {
+    if !sec.roles.iter().any(|r| matches!(r, Role::Admin | Role::Manager | Role::SuperAdmin)) {
         return Err(ApiError::ForbiddenMissingRole { role: "Manager", trace_id: sec.trace_id });
     }
     let tenant_id = sec.tenant_id;
@@ -199,7 +199,7 @@ pub async fn create_product(
     SecurityCtxExtractor(sec): SecurityCtxExtractor,
     Json(new_product): Json<NewProduct>,
 ) -> Result<Json<Product>, ApiError> {
-    if !sec.roles.iter().any(|r| matches!(r, Role::Admin | Role::Manager)) {
+    if !sec.roles.iter().any(|r| matches!(r, Role::Admin | Role::Manager | Role::SuperAdmin)) {
         return Err(ApiError::ForbiddenMissingRole { role: "Manager", trace_id: sec.trace_id });
     }
     let tenant_id = sec.tenant_id;
@@ -296,7 +296,7 @@ pub async fn delete_product(
     SecurityCtxExtractor(sec): SecurityCtxExtractor,
     Path(product_id): axum::extract::Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
-    if !sec.roles.iter().any(|r| matches!(r, Role::Admin | Role::Manager)) {
+    if !sec.roles.iter().any(|r| matches!(r, Role::Admin | Role::Manager | Role::SuperAdmin)) {
         return Err(ApiError::ForbiddenMissingRole { role: "Manager", trace_id: sec.trace_id });
     }
     let tenant_id = sec.tenant_id;
